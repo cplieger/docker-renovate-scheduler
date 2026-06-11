@@ -1,0 +1,10 @@
+*.log
+.DS_Store
+
+# Kiro skill artifacts (code-review, refactor, steering-maintenance)
+**/.code-review/
+**/.refactor/
+**/.steering-maintenance/
+
+# Built binary
+/docker-renovate-scheduler

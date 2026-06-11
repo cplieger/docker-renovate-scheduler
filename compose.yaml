@@ -1,0 +1,39 @@
+services:
+  renovate:
+    image: ghcr.io/cplieger/docker-renovate-scheduler:latest
+    container_name: renovate
+    restart: unless-stopped
+
+    # Built-in scheduling (default): one run at startup for immediate
+    # freshness, then every SCHED_INTERVAL. No external scheduler required.
+    environment:
+      LOG_LEVEL: "info"          # debug | info | warn | error
+      LOG_FORMAT: "json"         # Renovate's own log format (for Loki/Alloy)
+      SCHED_INTERVAL: "6h"       # built-in cadence (Go duration); "off" -> external
+      SCHED_TIMEOUT: "1h"        # whole-run timeout for one `renovate` invocation
+
+      # --- Renovate's own configuration (RENOVATE_*) — not wrapped by us ---
+      RENOVATE_PLATFORM: "github"
+      RENOVATE_AUTODISCOVER: "true"      # or set RENOVATE_REPOSITORIES
+      RENOVATE_TOKEN: "${RENOVATE_TOKEN}"
+      RENOVATE_GITHUB_COM_TOKEN: "${RENOVATE_GITHUB_COM_TOKEN}"
+      # Resident-container cache reuse (git fetch, not clone):
+      RENOVATE_PERSIST_REPO_DATA: "true"
+      RENOVATE_REPOSITORY_CACHE: "enabled"
+
+    # External scheduling variant: disable the built-in loop and let a central
+    # scheduler drive each run by exec'ing the `run` subcommand. The advisory
+    # lock on /tmp/.docker-renovate-scheduler.lock prevents overlapping runs
+    # across the exec and the (now-idle) daemon.
+    #   environment:
+    #     SCHED_INTERVAL: "off"  # disabled | 0 also disable the built-in scheduler
+    #   labels:                  # e.g. an Ofelia sibling on the same host
+    #     ofelia.enabled: "true"
+    #     ofelia.job-exec.renovate-run.schedule: "@every 6h"
+    #     ofelia.job-exec.renovate-run.command: "docker-renovate-scheduler run"
+    #     ofelia.job-exec.renovate-run.no-overlap: "true"
+
+    volumes:
+      - ./data:/data:rw          # RENOVATE_BASE_DIR — persist clones + caches
+      # Optional: a Renovate config.js instead of RENOVATE_* env vars
+      # - ./config.js:/usr/src/app/config.js:ro

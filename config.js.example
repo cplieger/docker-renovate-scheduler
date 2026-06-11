@@ -1,0 +1,34 @@
+// Example Renovate self-hosted bot configuration.
+//
+// This is RENOVATE's own config, NOT the scheduler's — the scheduler only
+// reads SCHED_INTERVAL / SCHED_TIMEOUT / LOG_LEVEL. Mount this at
+// /usr/src/app/config.js (or point RENOVATE_CONFIG_FILE at it) if you prefer
+// a file over RENOVATE_* environment variables. Everything here is documented
+// at https://docs.renovatebot.com/self-hosted-configuration/
+//
+// Secrets (tokens) should come from the environment, never be committed.
+
+module.exports = {
+  platform: 'github',
+  token: process.env.RENOVATE_TOKEN,
+  // Needed for changelog lookups / to avoid github.com API rate limits when
+  // the bot runs against a non-github.com platform.
+  githubTokenWarn: false,
+
+  // Which repositories to process. Pick ONE approach:
+  autodiscover: true,
+  // autodiscoverFilter: ['cplieger/*'],
+  // repositories: ['cplieger/homelab', 'cplieger/docker-renovate-scheduler'],
+
+  // Onboarding behaviour for a self-hosted org bot.
+  onboardingConfig: {
+    $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+    extends: ['config:recommended'],
+  },
+
+  // Resident-container performance: keep repo data and the extraction cache
+  // between runs so each run does a git fetch rather than a fresh clone. The
+  // scheduler image sets RENOVATE_BASE_DIR=/data — persist that volume.
+  persistRepoData: true,
+  repositoryCache: 'enabled',
+};
