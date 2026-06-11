@@ -1,0 +1,114 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - noctx
+    - gosec
+    - gocritic
+    - revive
+    - goconst
+    - gocyclo
+    - unconvert
+    - unparam
+    - prealloc
+    - wastedassign
+    - intrange
+    - modernize
+    - usestdlibvars
+    - usetesting
+    - perfsprint
+    - misspell
+    - durationcheck
+    - errname
+    - nolintlint
+    - sloglint
+  settings:
+    errcheck:
+      check-type-assertions: true
+    govet:
+      enable-all: true
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    gocyclo:
+      min-complexity: 18
+    goconst:
+      ignore-tests: true
+    perfsprint:
+      strconcat: false
+    sloglint:
+      kv-only: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    presets:
+      - comments
+      - std-error-handling
+      - common-false-positives
+      - legacy
+    paths:
+      - node_modules
+    rules:
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - errcheck
+          - gosec
+          - goconst
+          - gocritic
+          - govet
+          - prealloc
+          - perfsprint
+          - errname
+          - sloglint
+          - unparam
+          - usetesting
+          - noctx
+          - revive
+      - path: _test\.go
+        text: "string .* has .* occurrences"
+        linters:
+          - goconst
+
+# Formatters (golangci-lint v2). `golangci-lint run` reports unformatted
+# files as issues (exit 1), so the existing lint step enforces these — no
+# extra workflow step / version bump needed; the config propagates via
+# sync.yaml. `golangci-lint fmt` applies them.
+formatters:
+  enable:
+    - gofumpt
+    - gci
+  settings:
+    gofumpt:
+      # Strictest: the `-extra` rules (group adjacent same-type params,
+      # forbid naked returns) on top of gofumpt's strict superset of
+      # gofmt. module-path is auto-detected from each repo's go.mod when
+      # left empty.
+      extra-rules: true
+    gci:
+      # Deterministic import grouping: standard -> third-party -> local
+      # module (folded by gofumpt into the third-party group). A separate
+      # gci `localmodule`/`prefix` section is intentionally NOT used: gofumpt
+      # never emits a distinct local-import group, so it would never converge.
+      # goimports is intentionally NOT enabled: it conflicts with gci on
+      # ordering, and its only unique capability (add/remove imports) is
+      # moot in CI — the Go compiler already rejects unused/missing
+      # imports, and editors handle it via gopls.
+      sections:
+        - standard
+        - default
+      custom-order: true
+  exclusions:
+    # Generated files are auto-excluded (default generated: lax).
+    paths:
+      - node_modules
