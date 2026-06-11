@@ -1,0 +1,34 @@
+# Synced from cplieger/ci/.github/workflow-templates/release.yml — DO NOT EDIT.
+# The release pipeline is fully centralized; all logic and per-repo policy
+# lives in cplieger/ci/.github/workflows/release.yaml. This file just calls it.
+#
+# Behavior:
+#   - On every push to main and on workflow_dispatch, the central detect job
+#     computes the cliff version, classifies the repo type (docker/go/ts),
+#     identifies which paths actually changed, and dispatches to the right
+#     downstream branch (Docker build/sign/publish, Go tag, TS publish to
+#     npm+JSR, or any combination for hybrid repos with subpackages).
+#   - To change behavior for this repo (e.g., disable Docker Hub mirror,
+#     force arm64-only), edit the "Resolve repo policy" step in
+#     cplieger/ci/.github/workflows/release.yaml — there is no per-repo
+#     override surface here.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Permissions must include everything the called reusable workflow declares,
+# since GitHub takes the intersection of caller and callee permissions.
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+  security-events: write
+
+jobs:
+  release:
+    uses: cplieger/ci/.github/workflows/release.yaml@2a1a6602f9d06ef47a10312e768ccf91cee2a545 # v2
+    secrets: inherit
