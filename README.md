@@ -6,7 +6,6 @@
 ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)
 ![base: renovate/renovate](https://img.shields.io/badge/base-renovate%2Frenovate-1A1F6C)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/docker-renovate-scheduler/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/docker-renovate-scheduler)
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
 Run [Renovate](https://github.com/renovatebot/renovate) as a resident, always-on container — driven by a built-in interval scheduler **or** an external trigger — instead of a one-shot job. A tiny Go wrapper around the official `renovate/renovate` image; structured logs, no metrics, no open ports.
 
