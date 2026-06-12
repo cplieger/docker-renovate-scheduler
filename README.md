@@ -29,7 +29,7 @@ Unlike a single-static-binary tool, Renovate is a Node.js application that shell
 
 ## Configuration
 
-Renovate reads **its entire configuration from its own** `RENOVATE_*` environment variables, a `config.js`, or a config file (see [`config.js.example`](config.js.example)) — this scheduler does not wrap or re-expose any of it. The scheduler itself is configured by three variables, all kept **outside** the `RENOVATE_*` namespace so Renovate cannot mistake them for config options:
+Renovate reads **its entire configuration from its own** `RENOVATE_*` environment variables, a `config.js`, or a config file (see [`config.js.example`](config.js.example)) — this scheduler does not wrap or re-expose any of it. The scheduler itself is configured by the variables below, all kept **outside** the `RENOVATE_*` namespace so Renovate cannot mistake them for config options:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
