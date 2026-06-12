@@ -105,7 +105,7 @@ The `docker exec` trigger is clean — no entrypoint prefix needed. The schedule
 
 #### Overlap & coalescing
 
-A trigger that races an in-flight run does **not** run twice and is **not** lost. The loser sets a single-slot "rerun pending" flag — any number of overlapping triggers collapse into one ("max 1 wait") — and when the active run finishes it immediately reruns once to pick up the queued work, then settles. This matters for release-driven triggering (e.g. a burst of `release` webhooks firing a Komodo action): without coalescing, a trigger that lands mid-run would otherwise wait for the next interval. Reruns are bounded by a small internal cap so a relentless trigger source can't pin the lock, and a failed run stops the loop rather than hammering a broken Renovate. Ofelia's `no-overlap` still prevents redundant *triggers* from queuing on the scheduler side.
+A trigger that races an in-flight run does **not** run twice and is **not** lost. The loser sets a single-slot "rerun pending" flag — any number of overlapping triggers collapse into one ("max 1 wait") — and when the active run finishes it immediately reruns once to pick up the queued work, then settles. This matters for release-driven triggering (e.g. a burst of `release` webhooks firing a Komodo action): without coalescing, a trigger that lands mid-run would otherwise wait for the next interval. Reruns are bounded by a small internal cap so a relentless trigger source can't pin the lock, and a failed run stops the loop rather than hammering a broken Renovate. Ofelia's `no-overlap` still prevents redundant _triggers_ from queuing on the scheduler side.
 
 ## Subcommands
 
