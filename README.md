@@ -85,8 +85,20 @@ The run exits 0 on success, 1 on failure, and updates the same health marker the
       ofelia.enabled: "true"
       ofelia.job-exec.renovate-run.schedule: "@every 6h"
       ofelia.job-exec.renovate-run.command: "docker-renovate-scheduler run"
+      ofelia.job-exec.renovate-run.user: "12021"   # MUST match the container's user — see below
       ofelia.job-exec.renovate-run.no-overlap: "true"
 ```
+
+> **Run the trigger as the same user the container runs as.** The run-lock and
+> health marker live in `/tmp`, owned by whoever the container runs as — the
+> image's default `12021`, or whatever you set via Compose `user:`. A bare
+> `docker exec` (and a Komodo `execute_terminal`) inherits the container's user
+> automatically, but Ofelia's `job-exec` does **not**: it runs as the image's
+> default user unless you set `user:` explicitly. If the trigger's user differs
+> from the container's, every run fails with
+> `cannot acquire run lock … permission denied`. So set Ofelia's `user:` to
+> match your Compose `user:` — e.g. `"568"` if you run the container rootless
+> as `568:568`, or leave the default `12021` if you don't override the user.
 
 The `docker exec` trigger is clean — no entrypoint prefix needed. The scheduler routes Renovate through the image entrypoint internally, so a bare exec still gets the full containerbase environment. The `flock` means a manually triggered run that races the scheduled one skips rather than running twice; Ofelia's `no-overlap` still avoids queuing redundant triggers.
 
@@ -116,7 +128,7 @@ HEALTHCHECK --interval=60s --timeout=5s --retries=3 --start-period=30s \
 
 ## Security
 
-No network listener, no HTTP server, no exposed ports. Runs as the base image's non-root user (UID 12021). The scheduler executes Renovate via the image entrypoint with an explicit argument slice (no shell). Renovate's token is never logged by the scheduler. The base image is Renovate's own (AGPL-3.0); the scheduler wrapper is GPL-3.0.
+No network listener, no HTTP server, no exposed ports. Runs as the base image's non-root user (UID `12021`) by default, or whatever you set via Compose `user:` (e.g. `568:568` to match a rootless homelab UID); the `/tmp` run-lock and health marker are owned by that user, so external run triggers must execute as it (see [Scheduling modes](#scheduling-modes)). The scheduler executes Renovate via the image entrypoint with an explicit argument slice (no shell). Renovate's token is never logged by the scheduler. The base image is Renovate's own (AGPL-3.0); the scheduler wrapper is GPL-3.0.
 
 ## Dependencies
 
