@@ -43,3 +43,32 @@ func (l *fileLock) unlock() {
 	_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
 	_ = l.f.Close()
 }
+
+// --- Rerun coalescing flag ---
+
+// markRerunPending records, via a single-slot flag file, that a trigger
+// arrived while a run held the overlap lock, so the active holder reruns once
+// on completion. Idempotent: the flag is boolean, so any number of
+// overlapping triggers coalesce into exactly one queued rerun ("max 1 wait").
+// Best-effort — a failed write (a broken /tmp would also break the lock and
+// the health marker) simply defers the trigger to the next scheduled run.
+func markRerunPending(path string) {
+	if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644); err == nil { // #nosec G304 -- fixed in-container flag path
+		_ = f.Close()
+	}
+}
+
+// rerunPending reports whether a coalesced rerun was queued during the pass
+// (the flag file exists).
+func rerunPending(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// clearRerunPending removes the flag at the start of each pass so only
+// triggers arriving during that pass queue the next rerun (clearing before
+// the pass, not after, prevents lost wakeups). Best-effort: a missing flag is
+// the desired state, and a stale flag is cleared on the next pass anyway.
+func clearRerunPending(path string) {
+	_ = os.Remove(path)
+}

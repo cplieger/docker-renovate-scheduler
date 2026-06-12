@@ -66,15 +66,28 @@ func defaultCommandRunner(ctx context.Context, name string, cmdArgs ...string) *
 	return cmd
 }
 
-// runRenovatePass acquires the overlap lock and runs one Renovate pass. It
-// returns ok=true on success — either Renovate exited 0, or the lock was
-// already held so this pass is a deliberate no-op — and ok=false when
-// Renovate exited non-zero (or the lock could not be acquired due to an
-// error).
+// maxCoalescedReruns bounds how many times one holder will rerun to drain
+// queued triggers before releasing the lock, so a relentless trigger source
+// can't pin it indefinitely. A realistic burst (many release webhooks at
+// once) collapses into one or two reruns because the flag is single-slot; the
+// cap only bites under a pathological continuous storm, after which the holder
+// releases the lock and the next trigger (or the next scheduled tick) resumes.
+const maxCoalescedReruns = 8
+
+// runRenovatePass acquires the overlap lock and runs Renovate, coalescing
+// overlapping triggers. It returns ok=true on success — either the final pass
+// exited 0, or the lock was already held so this call only queued a rerun (a
+// deliberate no-op) — and ok=false when a pass exited non-zero (or the lock
+// could not be acquired due to an error).
 //
-// The whole pass is guarded by an advisory file lock so the built-in ticker
+// The pass is guarded by an advisory file lock so the built-in ticker
 // (in-process) and an external `run` exec (cross-process) never run two
-// Renovate processes against the same base dir at once.
+// Renovate processes against the same base dir at once. Rather than dropping a
+// trigger that arrives while a run is in flight, the loser sets a single-slot
+// rerun flag; the holder clears it before each pass and, if a trigger set it
+// during the pass, reruns on completion (bounded by maxCoalescedReruns). The
+// flag is cleared before the pass, not after, so a trigger arriving mid-run is
+// never lost.
 func runRenovatePass(ctx context.Context, timeout time.Duration, trigger string, repoArgs []string, newCmd commandRunner) (ok bool) {
 	lock, locked, lockErr := tryLock(lockFilePath)
 	if lockErr != nil {
@@ -83,11 +96,47 @@ func runRenovatePass(ctx context.Context, timeout time.Duration, trigger string,
 		return false
 	}
 	if !locked {
-		slog.Info("renovate already running, skipping overlapping request", "trigger", trigger)
+		// A run is already in flight. Queue a single coalesced rerun instead
+		// of dropping this trigger; the active holder reruns on completion.
+		markRerunPending(rerunFlagPath)
+		slog.Info("renovate already running, queued rerun", "trigger", trigger)
 		return true
 	}
 	defer lock.unlock()
 
+	for reruns := 0; ; reruns++ {
+		// Clear before the pass so only triggers arriving *during* it queue
+		// the next rerun (no lost wakeups). The first iteration also clears
+		// any stale flag left by a holder that exited mid-window.
+		clearRerunPending(rerunFlagPath)
+
+		passTrigger := trigger
+		if reruns > 0 {
+			passTrigger = trigger + "+rerun"
+		}
+		if ok = runRenovateOnce(ctx, timeout, passTrigger, repoArgs, newCmd); !ok {
+			// A failed or timed-out pass stops the loop: don't hammer a failing
+			// Renovate. Any queued trigger is left for the next scheduled run
+			// or external trigger to retry.
+			return false
+		}
+		if !rerunPending(rerunFlagPath) {
+			return true
+		}
+		if reruns >= maxCoalescedReruns {
+			slog.Warn("coalesced rerun cap reached; deferring remaining work to next trigger",
+				"trigger", trigger, "cap", maxCoalescedReruns)
+			return true
+		}
+		slog.Info("trigger arrived during run; coalescing rerun", "trigger", trigger, "rerun", reruns+1)
+	}
+}
+
+// runRenovateOnce executes exactly one Renovate pass under an already-held
+// overlap lock and reports whether it exited cleanly. The pass is bounded by
+// timeout (SCHED_TIMEOUT); on cancellation the command runner sends SIGTERM
+// with a short grace before SIGKILL.
+func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string, repoArgs []string, newCmd commandRunner) (ok bool) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

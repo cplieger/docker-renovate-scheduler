@@ -37,3 +37,31 @@ func TestFileLockMutualExclusion(t *testing.T) {
 	}
 	again.unlock()
 }
+
+// TestRerunFlag verifies the coalescing flag primitives: mark sets it, clear
+// removes it, rerunPending reflects presence, and both mark and clear are
+// idempotent (clearing a missing flag is a no-op).
+func TestRerunFlag(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "rerun.flag")
+
+	if rerunPending(path) {
+		t.Error("rerunPending should be false before the flag is set")
+	}
+	markRerunPending(path)
+	if !rerunPending(path) {
+		t.Error("rerunPending should be true after markRerunPending")
+	}
+	markRerunPending(path) // idempotent: still a single slot
+	if !rerunPending(path) {
+		t.Error("markRerunPending should be idempotent (still set)")
+	}
+	clearRerunPending(path)
+	if rerunPending(path) {
+		t.Error("rerunPending should be false after clearRerunPending")
+	}
+	clearRerunPending(path) // no-op on a missing flag, must not error or panic
+	if rerunPending(path) {
+		t.Error("clearRerunPending on a missing flag should leave it clear")
+	}
+}

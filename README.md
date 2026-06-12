@@ -23,7 +23,7 @@ Unlike a single-static-binary tool, Renovate is a Node.js application that shell
 
 - Runs `renovate` on a **built-in interval** (`SCHED_INTERVAL=6h`) — one run at startup for immediate freshness, then every interval — **or** stays idle and runs on an **external trigger** (`SCHED_INTERVAL=off` + `docker exec … run`).
 - Routes every Renovate invocation through the image's own entrypoint so the containerbase environment (`binarySource=install`) is set up — even for runs triggered by a bare `docker exec`, which bypasses the image `ENTRYPOINT`.
-- Overlap-guards runs with an advisory `flock`, so a scheduled run and a manually/externally triggered run never execute two Renovate processes against the same base directory at once.
+- Overlap-guards runs with an advisory `flock`, so a scheduled run and a manually/externally triggered run never execute two Renovate processes against the same base directory at once. A trigger that arrives while a run is in flight isn't dropped — it queues a single coalesced rerun ("max 1 wait") that fires as soon as the current run finishes.
 - File-marker healthcheck via [`github.com/cplieger/health`](https://github.com/cplieger/health): unhealthy when the last run failed, recovers on the next clean run.
 - Streams Renovate's own structured logs straight through to stdout/stderr (set `LOG_FORMAT=json`) for collection by Alloy/Promtail/Loki. The scheduler neither captures nor parses Renovate's output; it emits only its own lifecycle lines.
 
@@ -101,7 +101,11 @@ The run exits 0 on success, 1 on failure, and updates the same health marker the
 > match your Compose `user:` — e.g. `"568"` if you run the container rootless
 > as `568:568`, or leave the default `12021` if you don't override the user.
 
-The `docker exec` trigger is clean — no entrypoint prefix needed. The scheduler routes Renovate through the image entrypoint internally, so a bare exec still gets the full containerbase environment. The `flock` means a manually triggered run that races the scheduled one skips rather than running twice; Ofelia's `no-overlap` still avoids queuing redundant triggers.
+The `docker exec` trigger is clean — no entrypoint prefix needed. The scheduler routes Renovate through the image entrypoint internally, so a bare exec still gets the full containerbase environment.
+
+#### Overlap & coalescing
+
+A trigger that races an in-flight run does **not** run twice and is **not** lost. The loser sets a single-slot "rerun pending" flag — any number of overlapping triggers collapse into one ("max 1 wait") — and when the active run finishes it immediately reruns once to pick up the queued work, then settles. This matters for release-driven triggering (e.g. a burst of `release` webhooks firing a Komodo action): without coalescing, a trigger that lands mid-run would otherwise wait for the next interval. Reruns are bounded by a small internal cap so a relentless trigger source can't pin the lock, and a failed run stops the loop rather than hammering a broken Renovate. Ofelia's `no-overlap` still prevents redundant _triggers_ from queuing on the scheduler side.
 
 ## Subcommands
 
