@@ -36,10 +36,14 @@ Go module `github.com/cplieger/docker-renovate-scheduler`; binary
   base-dir verification.
 - `renovate.go` — `renovateInvocation` builds the command that routes through
   `/usr/local/sbin/renovate-entrypoint.sh`; `runRenovatePass` is the
-  flock-guarded single run. `defaultCommandRunner` carries the gosec `#nosec
-  G702` annotation on the `exec.CommandContext` call.
+  flock-guarded coalescing loop (queue-on-overlap → rerun-on-completion,
+  bounded by `maxCoalescedReruns`) and `runRenovateOnce` is a single pass.
+  `defaultCommandRunner` carries the gosec `#nosec G702` annotation on the
+  `exec.CommandContext` call.
 - `lock.go` — `flock(2)` overlap guard (proven, from the rsync sibling) so a
-  built-in tick never overlaps an external `run` invocation.
+  built-in tick never overlaps an external `run` invocation, plus the
+  single-slot rerun-coalescing flag primitives (`markRerunPending` /
+  `rerunPending` / `clearRerunPending`).
 - `health.go` — thin wrapper over `github.com/cplieger/health` (file marker).
 
 ## Env-var convention (don't collide with Renovate)
@@ -57,7 +61,10 @@ never parses or rewrites Renovate config.
   is `/data` (writable). No network listener, no exposed ports.
 - Every renovate run is serialized by the `flock` in `lock.go` — the built-in
   ticker and an external `docker exec … run` can both fire, and the lock is what
-  stops them overlapping. Keep it.
+  stops them overlapping. A trigger that loses the lock sets a single-slot rerun
+  flag instead of being dropped, and the holder reruns once on completion if
+  it's set (bounded by `maxCoalescedReruns`, and a failed pass stops the loop).
+  Keep both the lock and the coalescing.
 - `exec.CommandContext` arg lists only — never build a `sh -c` string from env.
 - The run timeout (`SCHED_TIMEOUT`) is propagated via context so a wedged
   renovate run is killed, not left running into the next tick.
@@ -82,7 +89,8 @@ never parses or rewrites Renovate config.
 - Tests are table-driven + property-based
   ([rapid](https://github.com/flyingmutant/rapid)) and live beside the code
   (`*_test.go`). They cover the interval sentinels, timeout parsing, the
-  entrypoint-routed invocation builder, and the flock mutual-exclusion.
+  entrypoint-routed invocation builder, the flock mutual-exclusion, and the
+  rerun coalescing (queue-on-overlap, bounded reruns, no rerun on failure).
 
 ## Running checks locally
 

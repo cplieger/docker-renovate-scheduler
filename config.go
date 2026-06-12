@@ -49,6 +49,14 @@ const (
 	// concurrently against the same repositories and base dir. /tmp is
 	// writable by Renovate's non-root user, same place as the health marker.
 	lockFilePath = "/tmp/.docker-renovate-scheduler.lock"
+
+	// rerunFlagPath is the single-slot coalescing flag for the overlap guard.
+	// When a trigger arrives while lockFilePath is held, the loser touches
+	// this file instead of dropping the request; the active holder reruns once
+	// on completion if it is set. Any number of overlapping triggers collapse
+	// into exactly one queued rerun ("max 1 wait"). Sibling of the lock file
+	// in the same Renovate-writable /tmp.
+	rerunFlagPath = "/tmp/.docker-renovate-scheduler.rerun"
 )
 
 // setupLogger installs a slog text handler that emits canonical logfmt
