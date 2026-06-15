@@ -11,9 +11,9 @@ func TestRootlessCacheLikelyUnwritable(t *testing.T) {
 	noEnv := env(nil)
 
 	tests := []struct {
+		getenv func(string) string
 		name   string
 		euid   int
-		getenv func(string) string
 		want   bool
 	}{
 		{
