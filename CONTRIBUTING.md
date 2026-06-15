@@ -58,7 +58,11 @@ never parses or rewrites Renovate config.
 ## Guardrails (don't weaken)
 
 - Runs as the renovate image's non-root user (UID `12021`); `RENOVATE_BASE_DIR`
-  is `/data` (writable). No network listener, no exposed ports.
+  is `/data` (writable). No network listener, no exposed ports. Overriding the
+  UID is an operator choice with a caveat — a custom UID has no writable home, so
+  each language cache must be redirected to a writable volume and forwarded via
+  `RENOVATE_CUSTOM_ENV_VARIABLES` (see "Running as a non-default user" in the
+  README); don't try to paper over that inside the image.
 - Every renovate run is serialized by the `flock` in `lock.go` — the built-in
   ticker and an external `docker exec … run` can both fire, and the lock is what
   stops them overlapping. A trigger that loses the lock sets a single-slot rerun
