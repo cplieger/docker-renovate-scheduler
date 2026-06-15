@@ -46,6 +46,33 @@ Everything else is Renovate's own configuration. The essentials for a self-hoste
 - `RENOVATE_AUTODISCOVER=true` **or** `RENOVATE_REPOSITORIES` — which repositories to process.
 - `RENOVATE_PERSIST_REPO_DATA=true` and `RENOVATE_REPOSITORY_CACHE=enabled` — recommended for a resident container so runs `git fetch` instead of `git clone` and reuse extraction/datasource caches across runs (the payoff of staying always-on; persist `/data`).
 
+## Running as a non-default user (rootless)
+
+By default the container runs as the base image's non-root user (UID `12021`), which has a writable home and a working [containerbase](https://github.com/containerbase/base) — Renovate installs toolchains on demand and regenerates lockfiles with no extra config. **This is the recommended, friction-free setup; if you can, don't override the user.**
+
+If you override the user (Compose `user:`) to match host volume ownership — e.g. `568:568` for a rootless homelab — that UID has **no home directory** (`HOME=/`), so every cache that defaults under `$HOME` becomes unwritable. Two things then break **silently**:
+
+- containerbase's on-demand `binarySource=install` tool installs fail (it can't write `/opt/containerbase`), and
+- each language manager's cache is unwritable, so **artifact/lockfile regeneration fails** — `go mod tidy` can't refresh `go.sum`, `npm install` can't refresh `package-lock.json`. The dependency PR is still raised, but it updates the manifest only (`go.mod` / `package.json`) and then fails the consuming repo's CI (`missing go.sum entry`, or `npm ci` reporting the lock out of sync).
+
+To run as a custom UID, use the tools baked into the image and route every cache to a writable, mounted volume:
+
+```yaml
+    user: "568:568"                        # your rootless UID (chown the volume to it)
+    environment:
+      RENOVATE_BINARY_SOURCE: "global"     # use baked tools; skip the crashing installer
+      GOPATH: "/data/go"
+      GOCACHE: "/data/.cache/go-build"      # Go
+      npm_config_cache: "/data/.npm"        # Node / npm
+      # Renovate forwards only an allowlist to artifact subprocesses
+      # (GOPATH yes; GOCACHE / npm_config_cache no), so forward them explicitly:
+      RENOVATE_CUSTOM_ENV_VARIABLES: '{"GOPATH":"/data/go","GOCACHE":"/data/.cache/go-build","npm_config_cache":"/data/.npm"}'
+    volumes:
+      - ./data:/data                        # chown ./data to your UID on the host
+```
+
+Add one cache entry per language manager you let Renovate update (the same pattern extends to `pip`, `cargo`, etc.). The `/data` volume must be owned by your UID. **If that's more than you want to manage, run as the default `12021` instead** and let the image's writable home do the work.
+
 ## Scheduling modes
 
 ### Built-in scheduler (default)

@@ -21,20 +21,11 @@ services:
       RENOVATE_PERSIST_REPO_DATA: "true"
       RENOVATE_REPOSITORY_CACHE: "enabled"
 
-      # Running as a non-default UID (rootless)? The base image's containerbase
-      # tool installer and the default Go/Node caches live under /opt/containerbase
-      # and /home/ubuntu, owned by the image's built-in user (UID 12021). If you
-      # override the container UID, on-demand `binarySource=install` tool installs
-      # fail and gomod's `go mod tidy` can't write its cache, so go.sum is never
-      # refreshed and Go dependency PRs fail CI with `missing go.sum entry`. In that
-      # case bake the tools you need at build time (this image bakes Go) and use
-      # them at runtime instead of installing on demand:
-      #   RENOVATE_BINARY_SOURCE: "global"
-      #   GOPATH: "/data/go"
-      #   GOCACHE: "/data/.cache/go-build"
-      #   # Renovate forwards only an env allowlist to artifact subprocesses
-      #   # (GOPATH yes, GOCACHE no), so pass the cache paths through explicitly:
-      #   RENOVATE_CUSTOM_ENV_VARIABLES: '{"GOPATH":"/data/go","GOCACHE":"/data/.cache/go-build"}'
+      # Rootless / non-default UID needs binarySource=global + each tool's cache
+      # redirected to a writable volume and forwarded (Renovate doesn't forward
+      # GOCACHE / npm_config_cache), else tool installs and lockfile regeneration
+      # fail silently. Simplest: don't override the user (runs as 12021). See the
+      # README, "Running as a non-default user".
 
     # External scheduling variant: disable the built-in loop and let a central
     # scheduler drive each run by exec'ing the `run` subcommand. The advisory
