@@ -52,6 +52,7 @@ func main() {
 // non-zero.
 func run(ctx context.Context) error {
 	setupLogger()
+	warnIfRootlessCacheUnwritable()
 
 	if err := verifyBaseDir(ctx); err != nil {
 		slog.Error("base directory not writable", "path", baseDir(), "error", err,
@@ -143,6 +144,7 @@ func runExternal(ctx context.Context, marker *health.Marker) {
 // container's healthcheck reflects this run.
 func runRun(ctx context.Context, repoArgs []string) int {
 	setupLogger()
+	warnIfRootlessCacheUnwritable()
 
 	if err := verifyBaseDir(ctx); err != nil {
 		slog.Error("base directory not writable", "path", baseDir(), "error", err)

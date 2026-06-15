@@ -48,19 +48,23 @@ Everything else is Renovate's own configuration. The essentials for a self-hoste
 
 ## Running as a non-default user (rootless)
 
-By default the container runs as the base image's non-root user (UID `12021`), which has a writable home and a working [containerbase](https://github.com/containerbase/base) — Renovate installs toolchains on demand and regenerates lockfiles with no extra config. **This is the recommended, friction-free setup; if you can, don't override the user.**
+> **Recommended: don't override the user.** Run the image as-is; it works with no extra configuration.
 
-If you override the user (Compose `user:`) to match host volume ownership — e.g. `568:568` for a rootless homelab — that UID has **no home directory** (`HOME=/`), so every cache that defaults under `$HOME` becomes unwritable. Two things then break **silently**:
+By default the container runs as the base image's non-root user, UID `12021`, which has a writable home and a working [containerbase](https://github.com/containerbase/base): Renovate installs toolchains on demand and regenerates lockfiles out of the box.
 
-- containerbase's on-demand `binarySource=install` tool installs fail (it can't write `/opt/containerbase`), and
-- each language manager's cache is unwritable, so **artifact/lockfile regeneration fails** — `go mod tidy` can't refresh `go.sum`, `npm install` can't refresh `package-lock.json`. The dependency PR is still raised, but it updates the manifest only (`go.mod` / `package.json`) and then fails the consuming repo's CI (`missing go.sum entry`, or `npm ci` reporting the lock out of sync).
+If you override the user (Compose `user:`) to match host volume ownership (e.g. a `568:568` rootless homelab UID), that UID has **no home directory** (`HOME=/`), so every tool cache that defaults under `$HOME` becomes unwritable and two things break **silently**:
 
-To run as a custom UID, use the tools baked into the image and route every cache to a writable, mounted volume:
+- containerbase's on-demand tool installs fail (`binarySource=install` can't write `/opt/containerbase`); and
+- lockfile/artifact regeneration fails: `go mod tidy` can't refresh `go.sum`, `npm install` can't refresh `package-lock.json`. The dependency PR is still raised, but manifest-only (`go.mod` / `package.json`), and then fails the consuming repo's CI (`missing go.sum entry`, or `npm ci` reporting the lock out of sync).
+
+The scheduler **logs a startup warning** when it detects this state (a non-default UID with an unwritable home and no cache redirection), so the misconfiguration surfaces immediately instead of as a broken PR days later.
+
+If you must run as a custom UID, use the tools baked into the image and route every cache to a writable, mounted volume:
 
 ```yaml
-    user: "568:568"                        # your rootless UID (chown the volume to it)
+    user: "568:568"                        # your rootless UID
     environment:
-      RENOVATE_BINARY_SOURCE: "global"     # use baked tools; skip the crashing installer
+      RENOVATE_BINARY_SOURCE: "global"     # use the baked tools; skip the on-demand installer
       GOPATH: "/data/go"
       GOCACHE: "/data/.cache/go-build"      # Go
       npm_config_cache: "/data/.npm"        # Node / npm
@@ -71,7 +75,7 @@ To run as a custom UID, use the tools baked into the image and route every cache
       - ./data:/data                        # chown ./data to your UID on the host
 ```
 
-Add one cache entry per language manager you let Renovate update (the same pattern extends to `pip`, `cargo`, etc.). The `/data` volume must be owned by your UID. **If that's more than you want to manage, run as the default `12021` instead** and let the image's writable home do the work.
+Add one cache entry per language manager Renovate updates (the pattern extends to `pip`, `cargo`, etc.), and `chown` the `/data` volume to your UID. If that is more than you want to manage, run as the default `12021`.
 
 ## Scheduling modes
 
