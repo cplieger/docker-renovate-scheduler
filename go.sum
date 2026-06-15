@@ -1,6 +1,4 @@
-github.com/cplieger/health v1.1.0 h1:s//JW6MZtiHLLAhJhD21wxzeqFP94dqV0KMa+zJRTWM=
-github.com/cplieger/health v1.1.0/go.mod h1:INjkN9qJnR14X5AFqX6ymFaHvx51djYgk2oQb/gJ9u8=
-github.com/cplieger/health v1.1.1 h1:3FiPlrT5w8td3tqHdBaNN0r3JVpwlmuQrg01y01JsNI=
-github.com/cplieger/health v1.1.1/go.mod h1:INjkN9qJnR14X5AFqX6ymFaHvx51djYgk2oQb/gJ9u8=
+github.com/cplieger/health v1.1.2 h1:FskL5oUhfB11X0lLd2Kr0YVAcQmln86iFvnw3aiXg6Q=
+github.com/cplieger/health v1.1.2/go.mod h1:INjkN9qJnR14X5AFqX6ymFaHvx51djYgk2oQb/gJ9u8=
 pgregory.net/rapid v1.3.0 h1:vBvO0VSqti75J1jjYqpgPNBLKMd1+gxa9fYo7vk/Exc=
 pgregory.net/rapid v1.3.0/go.mod h1:dPlE4OBBxgXPqkP79flB6sJL1dx5azpI7HQ9MY9Z7uk=
