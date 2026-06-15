@@ -34,7 +34,7 @@ services:
       #   GOCACHE: "/data/.cache/go-build"
       #   # Renovate forwards only an env allowlist to artifact subprocesses
       #   # (GOPATH yes, GOCACHE no), so pass the cache paths through explicitly:
-      #   RENOVATE_CUSTOM_ENVVARIABLES: '{"GOPATH":"/data/go","GOCACHE":"/data/.cache/go-build"}'
+      #   RENOVATE_CUSTOM_ENV_VARIABLES: '{"GOPATH":"/data/go","GOCACHE":"/data/.cache/go-build"}'
 
     # External scheduling variant: disable the built-in loop and let a central
     # scheduler drive each run by exec'ing the `run` subcommand. The advisory
