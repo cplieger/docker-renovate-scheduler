@@ -116,3 +116,29 @@ func TestVerifyBaseDir(t *testing.T) {
 		}
 	})
 }
+
+// TestLoadRunTimeout_ZeroIsNonPositiveAndUsesDefault pins the `d <= 0`
+// boundary on config.go:140. A zero SCHED_TIMEOUT parses cleanly (err == nil)
+// but is non-positive, so it must fall back to the default rather than arm a
+// zero timeout that would cancel every run immediately. A boundary mutation
+// (`d < 0`) would let a zero duration through unchanged.
+func TestLoadRunTimeout_ZeroIsNonPositiveAndUsesDefault(t *testing.T) {
+	t.Run("bare zero", func(t *testing.T) {
+		t.Setenv("SCHED_TIMEOUT", "0")
+
+		got := loadRunTimeout()
+
+		if got != defaultRunTimeout {
+			t.Errorf("loadRunTimeout() with SCHED_TIMEOUT=0 = %v, want %v (zero is non-positive and must use the default)", got, defaultRunTimeout)
+		}
+	})
+	t.Run("zero seconds", func(t *testing.T) {
+		t.Setenv("SCHED_TIMEOUT", "0s")
+
+		got := loadRunTimeout()
+
+		if got != defaultRunTimeout {
+			t.Errorf("loadRunTimeout() with SCHED_TIMEOUT=0s = %v, want %v (zero is non-positive and must use the default)", got, defaultRunTimeout)
+		}
+	})
+}
