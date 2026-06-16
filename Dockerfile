@@ -28,13 +28,15 @@ ENV RENOVATE_BASE_DIR=/data
 
 # Pre-install Go so Renovate's gomod artifact step (go mod tidy / go get to
 # refresh go.sum after a dependency bump) works even when the container is run
-# as a non-default UID. The homelab runs this image as UID 568, which cannot
-# write containerbase's tool dir (/opt/containerbase/tools, owned 12021:root)
-# to install Go on demand -- so gomod artifact updates silently failed and
-# every Go dependency PR landed with a stale go.sum. Installing Go here as
-# root makes it world-executable for any runtime UID; GOTOOLCHAIN=auto then
-# lets Go fetch a newer toolchain into the writable RENOVATE_BASE_DIR cache
-# when a repo's go.mod requires a higher version than the baked one.
+# as a non-default UID. A non-default runtime UID cannot write containerbase's
+# tool dir (/opt/containerbase/tools, owned 12021:root) to install Go on
+# demand -- so gomod artifact updates silently fail and every Go dependency PR
+# lands with a stale go.sum. Installing Go here as root makes it
+# world-executable for any runtime UID; GOTOOLCHAIN=auto then lets Go fetch a
+# newer toolchain into the writable RENOVATE_BASE_DIR cache when a repo's
+# go.mod requires a higher version than the baked one. (The homelab itself now
+# runs the image default 12021:0, but this stays load-bearing for external
+# rootless operators -- see the README "Running as a non-default user".)
 # renovate: datasource=golang-version depName=go
 ARG GOLANG_VERSION=1.26.4
 RUN install-tool golang "${GOLANG_VERSION}"
