@@ -34,11 +34,11 @@ Unlike a single-static-binary tool, Renovate is a Node.js application that shell
 
 Renovate reads **its entire configuration from its own** `RENOVATE_*` environment variables, a `config.js`, or a config file (see [`config.js.example`](config.js.example)) — this scheduler does not wrap or re-expose any of it. The scheduler itself is configured by the variables below, all kept **outside** the `RENOVATE_*` namespace so Renovate cannot mistake them for config options:
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `SCHED_INTERVAL` | Built-in scheduler cadence as a Go duration (`6h`, `1h`, `30m`). First run at startup, then every interval. Set to `off` (aliases `disabled`, `0`) to disable the built-in scheduler and trigger runs externally — see [Scheduling modes](#scheduling-modes). Falls back to `6h` on an unset or unparseable (non-sentinel) value. | `6h` |
-| `SCHED_TIMEOUT` | Whole-run timeout for a single `renovate` invocation, as a Go duration. This is the outer bound on the process; Renovate's own `RENOVATE_EXECUTION_TIMEOUT` is a separate per-child limit. | `1h` |
-| `LOG_LEVEL` | `debug`, `info`, `warn`, or `error` (honoured by both the scheduler and Renovate). | `info` |
+| Variable         | Description                                                                                                                                                                                                                                                                                                                       | Default |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `SCHED_INTERVAL` | Built-in scheduler cadence as a Go duration (`6h`, `1h`, `30m`). First run at startup, then every interval. Set to `off` (aliases `disabled`, `0`) to disable the built-in scheduler and trigger runs externally — see [Scheduling modes](#scheduling-modes). Falls back to `6h` on an unset or unparseable (non-sentinel) value. | `6h`    |
+| `SCHED_TIMEOUT`  | Whole-run timeout for a single `renovate` invocation, as a Go duration. This is the outer bound on the process; Renovate's own `RENOVATE_EXECUTION_TIMEOUT` is a separate per-child limit.                                                                                                                                        | `1h`    |
+| `LOG_LEVEL`      | `debug`, `info`, `warn`, or `error` (honoured by both the scheduler and Renovate).                                                                                                                                                                                                                                                | `info`  |
 
 Everything else is Renovate's own configuration. The essentials for a self-hosted bot:
 
@@ -143,18 +143,18 @@ A trigger that races an in-flight run does **not** run twice and is **not** lost
 
 ## Subcommands
 
-| Command | Purpose |
-|---------|---------|
-| `daemon` (default) | PID 1; dispatches built-in vs external based on `SCHED_INTERVAL`. |
-| `run [repo …]` | One Renovate run, then exit (exit 0 on success, 1 on failure). The external-trigger entry point; extra args are passed through to Renovate as repository slugs. |
-| `health` | The Docker healthcheck probe (stats the marker file). |
+| Command            | Purpose                                                                                                                                                         |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `daemon` (default) | PID 1; dispatches built-in vs external based on `SCHED_INTERVAL`.                                                                                               |
+| `run [repo …]`     | One Renovate run, then exit (exit 0 on success, 1 on failure). The external-trigger entry point; extra args are passed through to Renovate as repository slugs. |
+| `health`           | The Docker healthcheck probe (stats the marker file).                                                                                                           |
 
 ## Volumes
 
-| Mount | Description |
-|-------|-------------|
-| `/data` | `RENOVATE_BASE_DIR` — repository clones, caches, and dynamically installed tools. Persist it (the image creates it owned by the image's non-root user). |
-| `/usr/src/app/config.js` | Optional — a Renovate `config.js` if you prefer it over `RENOVATE_*` env vars. |
+| Mount                    | Description                                                                                                                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/data`                  | `RENOVATE_BASE_DIR` — repository clones, caches, and dynamically installed tools. Persist it (the image creates it owned by the image's non-root user). |
+| `/usr/src/app/config.js` | Optional — a Renovate `config.js` if you prefer it over `RENOVATE_*` env vars.                                                                          |
 
 ## Healthcheck
 
@@ -173,11 +173,11 @@ No network listener, no HTTP server, no exposed ports. Runs as the base image's 
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
 
-| Dependency | Source |
-|------------|--------|
-| renovate/renovate | [Docker Hub](https://hub.docker.com/r/renovate/renovate) (the runtime base) |
-| golang | [Go](https://hub.docker.com/_/golang) (builder stage only) |
-| [`github.com/cplieger/health`](https://github.com/cplieger/health) | file-marker healthcheck |
+| Dependency                                                         | Source                                                                      |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| renovate/renovate                                                  | [Docker Hub](https://hub.docker.com/r/renovate/renovate) (the runtime base) |
+| golang                                                             | [Go](https://hub.docker.com/_/golang) (builder stage only)                  |
+| [`github.com/cplieger/health`](https://github.com/cplieger/health) | file-marker healthcheck                                                     |
 
 ## Credits
 
