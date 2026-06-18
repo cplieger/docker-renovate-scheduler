@@ -15,7 +15,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # package managers, and its default binarySource=install installs those tools
 # at runtime via containerbase. The upstream image assembles all of that; we
 # add only the scheduler binary on top.
-FROM renovate/renovate:43.229.2@sha256:0da530905aa47d55d0c8f3dc5cfb692dadd62374ceb084cb7117c7209a296044
+FROM renovate/renovate:43.229.3@sha256:9a11a56441518190f7eefaf2d675cd50e630a6641997d10b6b3c83d14d93a3d3
 
 # Renovate stores repo clones and caches under RENOVATE_BASE_DIR. Persisting
 # it on a volume lets runs git-fetch instead of git-clone and reuse the
