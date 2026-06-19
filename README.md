@@ -22,6 +22,8 @@ It deliberately has **no built-in HTTP/webhook server** — triggering is delega
 
 Unlike a single-static-binary tool, Renovate is a Node.js application that shells out to `git` and, for lockfile maintenance, to language package managers; its default `binarySource=install` installs those toolchains at runtime via [containerbase](https://github.com/containerbase/base). There is no static, dependency-free form to drop on `scratch`. So this image **builds on the official `renovate/renovate` image** (the "full" image the Renovate docs recommend when runtime tool installation is needed) and adds only the scheduler binary on top. The Go wrapper itself is a static, CGO-free binary.
 
+One deliberate trim: the bundled `docker` CLI is removed from the image. Renovate invokes it only under `binarySource=docker` (running each tool in a sidecar container); this scheduler runs the default `binarySource=install`, so the CLI is never used. Dropping the unused ~42 MB binary cuts the attack surface and clears the Go-stdlib CVEs that image scanners report against it. As a result, **`binarySource=docker` is not supported by this image**; it is [deprecated upstream](https://github.com/renovatebot/renovate/discussions/40742) regardless, so `binarySource=install` (the default here) is the path forward.
+
 ## What it does
 
 - Runs `renovate` on a **built-in interval** (`SCHED_INTERVAL=6h`) — one run at startup for immediate freshness, then every interval — **or** stays idle and runs on an **external trigger** (`SCHED_INTERVAL=off` + `docker exec … run`).
@@ -167,7 +169,7 @@ HEALTHCHECK --interval=60s --timeout=5s --retries=3 --start-period=30s \
 
 ## Security
 
-No network listener, no HTTP server, no exposed ports. Runs as the base image's non-root user (UID `12021`) by default, or whatever you set via Compose `user:` (e.g. `568:568` to match a rootless homelab UID); the `/tmp` run-lock and health marker are owned by that user, so external run triggers must execute as it (see [Scheduling modes](#scheduling-modes)). The scheduler executes Renovate via the image entrypoint with an explicit argument slice (no shell). Renovate's token is never logged by the scheduler. The base image is Renovate's own (AGPL-3.0); the scheduler wrapper is GPL-3.0.
+No network listener, no HTTP server, no exposed ports. The unused `docker` CLI is stripped from the base image, removing that container-execution surface along with `binarySource=docker` support. Runs as the base image's non-root user (UID `12021`) by default, or whatever you set via Compose `user:` (e.g. `568:568` to match a rootless homelab UID); the `/tmp` run-lock and health marker are owned by that user, so external run triggers must execute as it (see [Scheduling modes](#scheduling-modes)). The scheduler executes Renovate via the image entrypoint with an explicit argument slice (no shell). Renovate's token is never logged by the scheduler. The base image is Renovate's own (AGPL-3.0); the scheduler wrapper is GPL-3.0.
 
 ## Dependencies
 

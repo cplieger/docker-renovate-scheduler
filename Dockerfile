@@ -22,6 +22,19 @@ FROM renovate/renovate:43.231.1@sha256:a271e7a9bc5855ed1216573b36d9677b38b9b17e3
 # datasource/tool caches. Create it owned by the image's non-root user
 # (UID 12021, group 0) so the container can write there even on a fresh mount.
 USER root
+
+# Strip the docker CLI that containerbase bakes into the renovate base image
+# (a ~42 MB binary under /opt/containerbase/tools/docker, plus its shim and
+# PATH symlink). Renovate only invokes the docker CLI under binarySource=docker
+# (verified against its exec layer: every docker call is gated on that mode);
+# this scheduler runs binarySource=install, so the binary is never used.
+# Removing it drops the Go-stdlib CVEs Trivy reports against that unused binary
+# and trims attack surface. binarySource=docker is therefore unsupported here
+# (and is deprecated upstream anyway).
+RUN rm -rf /opt/containerbase/tools/docker \
+    /opt/containerbase/bin/docker \
+    /usr/local/bin/docker
+
 COPY --chmod=755 --from=go-builder /docker-renovate-scheduler /usr/local/bin/docker-renovate-scheduler
 RUN mkdir -p /data && chown 12021:0 /data && chmod 0775 /data
 ENV RENOVATE_BASE_DIR=/data
