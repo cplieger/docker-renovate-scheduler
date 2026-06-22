@@ -143,6 +143,23 @@ The `docker exec` trigger is clean — no entrypoint prefix needed. The schedule
 
 A trigger that races an in-flight run does **not** run twice and is **not** lost. The loser sets a single-slot "rerun pending" flag — any number of overlapping triggers collapse into one ("max 1 wait") — and when the active run finishes it immediately reruns once to pick up the queued work, then settles. This matters for release-driven triggering (e.g. a burst of `release` webhooks firing a Komodo action): without coalescing, a trigger that lands mid-run would otherwise wait for the next interval. Reruns are bounded by a small internal cap so a relentless trigger source can't pin the lock, and a failed run stops the loop rather than hammering a broken Renovate. Ofelia's `no-overlap` still prevents redundant _triggers_ from queuing on the scheduler side.
 
+## Graceful shutdown
+
+On `SIGTERM`/`SIGINT` (a `docker stop`, or a redeploy that recreates the container) the scheduler does not abandon an in-flight run. It waits for the current run to finish before exiting:
+
+- **Built-in mode** waits for the in-process run (startup or interval) to complete.
+- **External mode** waits for an in-flight `run` — a separate `docker exec` process — to release the shared overlap lock. This is the case that bites a release-driven setup: a redeploy landing on top of an Ofelia- or Komodo-triggered run would otherwise `SIGKILL` it (exit 137) and report the scheduled job as failed.
+
+Docker terminates the container once the process exits **or** `stop_grace_period` elapses, whichever comes first. So set `stop_grace_period` long enough to cover a normal run; otherwise Docker `SIGKILL`s the run before the drain completes:
+
+```yaml
+services:
+  renovate:
+    stop_grace_period: 6m   # >= a typical run, so a redeploy drains instead of killing it
+```
+
+The drain is internally capped at `SCHED_TIMEOUT` (a run can't outlast its own timeout); `stop_grace_period` is the real outer bound.
+
 ## Subcommands
 
 | Command            | Purpose                                                                                                                                                         |

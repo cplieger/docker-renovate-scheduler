@@ -44,6 +44,26 @@ func (l *fileLock) unlock() {
 	_ = l.f.Close()
 }
 
+// runInFlight reports whether a Renovate run currently holds the overlap lock
+// at path — i.e. the built-in ticker or an external `run` exec is mid-pass. It
+// probes with a non-blocking lock attempt: a free lock is acquired and
+// immediately released (not in flight); a lock another holder owns fails with
+// EWOULDBLOCK (in flight). Because flock releases automatically when the
+// holding process exits, a crashed run never reports as perpetually in flight.
+// The external-mode shutdown drain uses this to wait out an in-flight run
+// before the daemon exits, so a redeploy doesn't SIGKILL it mid-pass.
+func runInFlight(path string) (inFlight bool, err error) {
+	l, ok, err := tryLock(path)
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		l.unlock()
+		return false, nil
+	}
+	return true, nil
+}
+
 // --- Rerun coalescing flag ---
 
 // markRerunPending records, via a single-slot flag file, that a trigger

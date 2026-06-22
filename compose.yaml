@@ -3,6 +3,9 @@ services:
     image: ghcr.io/cplieger/docker-renovate-scheduler:latest
     container_name: renovate
     restart: unless-stopped
+    # Give an in-flight run time to drain on stop/redeploy instead of being
+    # SIGKILLed (exit 137). Cover a typical run; see README "Graceful shutdown".
+    stop_grace_period: 6m
 
     # Built-in scheduling (default): one run at startup for immediate
     # freshness, then every SCHED_INTERVAL. No external scheduler required.
