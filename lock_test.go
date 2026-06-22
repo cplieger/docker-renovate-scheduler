@@ -65,3 +65,34 @@ func TestRerunFlag(t *testing.T) {
 		t.Error("clearRerunPending on a missing flag should leave it clear")
 	}
 }
+
+// TestRunInFlight reports a held lock as in-flight and a free lock as not, and
+// verifies the probe does not retain the lock (the path must be re-acquirable
+// after probing). This is the predicate the external-mode shutdown drain polls.
+func TestRunInFlight(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "run.lock")
+
+	if inFlight, err := runInFlight(path); err != nil {
+		t.Fatalf("runInFlight on a free lock: unexpected error: %v", err)
+	} else if inFlight {
+		t.Error("runInFlight() = true on a free lock, want false")
+	}
+
+	held, ok, err := tryLock(path)
+	if err != nil || !ok {
+		t.Fatalf("failed to acquire lock for the held case: ok=%v err=%v", ok, err)
+	}
+
+	if inFlight, err := runInFlight(path); err != nil {
+		t.Fatalf("runInFlight on a held lock: unexpected error: %v", err)
+	} else if !inFlight {
+		t.Error("runInFlight() = false while the lock is held, want true")
+	}
+
+	held.unlock()
+
+	if inFlight, err := runInFlight(path); err != nil || inFlight {
+		t.Errorf("runInFlight() after unlock = (%v, %v), want (false, nil) — the probe must not retain the lock", inFlight, err)
+	}
+}

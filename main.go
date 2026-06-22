@@ -73,7 +73,7 @@ func run(ctx context.Context) error {
 		runBuiltin(ctx, marker, interval, timeout)
 		return nil
 	}
-	runExternal(ctx, marker)
+	runExternal(ctx, marker, timeout)
 	return nil
 }
 
@@ -124,7 +124,12 @@ func runBuiltin(ctx context.Context, marker *health.Marker, interval, timeout ti
 // on a release webhook). The marker is set healthy on boot so an idle,
 // not-yet-triggered container reads healthy; each `run` invocation updates
 // it on disk.
-func runExternal(ctx context.Context, marker *health.Marker) {
+//
+// On shutdown the daemon does not exit immediately: an external `run` may be
+// mid-pass (a separate `docker exec` process the daemon can't wait() on), so
+// it drains that run via the shared overlap flock before returning. drainTimeout
+// (SCHED_TIMEOUT) caps the wait at a single run's own maximum lifetime.
+func runExternal(ctx context.Context, marker *health.Marker, drainTimeout time.Duration) {
 	marker.Set(true)
 
 	slog.Info("container started (external scheduling)",
@@ -132,7 +137,21 @@ func runExternal(ctx context.Context, marker *health.Marker) {
 
 	<-ctx.Done()
 	slog.Info("shutting down", "cause", context.Cause(ctx))
+	// Mark unhealthy immediately so observers see the signal before the run
+	// drain (a Renovate run can take a while).
 	marker.Set(false)
+
+	// An external `run` (a separate `docker exec` process — an Ofelia job-exec
+	// or the Komodo release-trigger action) may be mid-pass when the container
+	// is asked to stop, typically a redeploy of the stack landing on top of an
+	// in-progress run. PID 1 can't wait() on that separate process, but the run
+	// holds the overlap flock, so wait for it to release before exiting. Docker
+	// only tears the container down (SIGKILLing the run) once PID 1 exits or
+	// stop_grace_period elapses, so draining here lets the run finish with its
+	// real exit code instead of being SIGKILLed (exit 137) and reported as a
+	// failed job. stop_grace_period is the real outer bound — set it long
+	// enough to cover a normal run.
+	waitForRunToDrain(lockFilePath, drainPollInterval, drainTimeout)
 }
 
 // runRun performs exactly one Renovate pass and returns the process exit
@@ -162,4 +181,54 @@ func runRun(ctx context.Context, repoArgs []string) int {
 	}
 	marker.Set(true)
 	return 0
+}
+
+// drainPollInterval is how often the external-mode shutdown drain re-checks
+// whether an in-flight run still holds the overlap lock. Runs take minutes, so
+// a sub-second poll is cheap and keeps the post-completion shutdown delay
+// negligible.
+const drainPollInterval = 500 * time.Millisecond
+
+// waitForRunToDrain blocks until no external `run` holds the overlap lock at
+// lockPath — the in-flight run finished, or its process died (flock releases on
+// process exit) — or maxWait elapses, whichever comes first. It is the
+// external-scheduling shutdown drain: PID 1 cannot wait() on the separate `run`
+// process, so it polls the shared flock instead. It returns true if the run
+// drained and false if maxWait elapsed first (the caller then exits and the
+// container stop terminates any lingering run). maxWait is the run's own
+// SCHED_TIMEOUT, so the wait can never outlast a single run's maximum lifetime.
+func waitForRunToDrain(lockPath string, poll, maxWait time.Duration) bool {
+	inFlight, err := runInFlight(lockPath)
+	if err != nil {
+		slog.Warn("cannot probe the run lock during shutdown; exiting without draining", "error", err)
+		return false
+	}
+	if !inFlight {
+		return true
+	}
+
+	slog.Info("waiting for in-flight renovate run to finish before shutdown", "max_wait", maxWait)
+	deadline := time.NewTimer(maxWait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-deadline.C:
+			slog.Warn("in-flight renovate run did not finish within the drain window; exiting (container stop will terminate it)",
+				"max_wait", maxWait)
+			return false
+		case <-ticker.C:
+			inFlight, err := runInFlight(lockPath)
+			if err != nil {
+				slog.Warn("cannot probe the run lock during shutdown; exiting without draining", "error", err)
+				return false
+			}
+			if !inFlight {
+				slog.Info("in-flight renovate run finished; proceeding with shutdown")
+				return true
+			}
+		}
+	}
 }
