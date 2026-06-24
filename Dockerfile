@@ -24,8 +24,9 @@ FROM renovate/renovate:43.242.0@sha256:5159fecda22d7bd50d4ebcdc7896ddb65e649e3a1
 USER root
 
 # Strip the docker CLI that containerbase bakes into the renovate base image
-# (a ~42 MB binary under /opt/containerbase/tools/docker, plus its shim and
-# PATH symlink). Renovate only invokes the docker CLI under binarySource=docker
+# (a ~42 MB binary under /opt/containerbase/tools/docker, plus its shim, PATH
+# symlink, the containerbase lib dir, and the version marker). Renovate only
+# invokes the docker CLI under binarySource=docker
 # (verified against its exec layer: every docker call is gated on that mode);
 # this scheduler runs binarySource=install, so the binary is never used.
 # Removing it drops the Go-stdlib CVEs Trivy reports against that unused binary
@@ -34,6 +35,8 @@ USER root
 RUN rm -rf /opt/containerbase/tools/docker \
     /opt/containerbase/bin/docker \
     /usr/local/bin/docker \
+    /opt/containerbase/lib/docker \
+    /opt/containerbase/versions/docker \
     && ! command -v docker \
     && [ -z "$(find /opt/containerbase -name docker 2>/dev/null)" ]
 
