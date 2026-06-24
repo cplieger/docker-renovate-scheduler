@@ -74,7 +74,7 @@ func TestRunRenovatePass_CoalescedRerun_LabelsOnlyRerunsWithSuffix(t *testing.T)
 	calls := 0
 
 	// when
-	ok := runRenovatePass(context.Background(), time.Minute, "tick", nil, flagMarkingRunner("true", &calls, 1))
+	ok := runRenovatePass(context.Background(), context.Background(), time.Minute, "tick", nil, flagMarkingRunner("true", &calls, 1))
 
 	// then
 	if !ok {
@@ -101,7 +101,7 @@ func TestRunRenovatePass_CoalescedRerun_LogsOneBasedRerunCounter(t *testing.T) {
 	calls := 0
 
 	// when
-	ok := runRenovatePass(context.Background(), time.Minute, "tick", nil, flagMarkingRunner("true", &calls, 1))
+	ok := runRenovatePass(context.Background(), context.Background(), time.Minute, "tick", nil, flagMarkingRunner("true", &calls, 1))
 
 	// then
 	if !ok {

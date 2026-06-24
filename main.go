@@ -44,6 +44,13 @@ func main() {
 	}
 }
 
+// logBaseDirError reports the shared "base directory not writable" failure with its
+// remediation hint, so the two composition roots cannot drift.
+func logBaseDirError(err error) {
+	slog.Error("base directory not writable", "path", baseDir(), "error", err,
+		"hint", "mount a writable volume at RENOVATE_BASE_DIR (the image default is /data); a read_only container needs a /data volume or tmpfs")
+}
+
 // run is the composition root for the long-running container (the `daemon`
 // subcommand and the default no-arg command). It configures logging,
 // verifies the Renovate base directory is writable, wires the health marker,
@@ -55,8 +62,7 @@ func run(ctx context.Context) error {
 	warnIfRootlessCacheUnwritable()
 
 	if err := verifyBaseDir(ctx); err != nil {
-		slog.Error("base directory not writable", "path", baseDir(), "error", err,
-			"hint", "mount a writable volume at RENOVATE_BASE_DIR (the image default is /data); a read_only container needs a /data volume or tmpfs")
+		logBaseDirError(err)
 		return err
 	}
 
@@ -70,7 +76,7 @@ func run(ctx context.Context) error {
 	defer marker.Cleanup()
 
 	if scheduleEnabled {
-		runBuiltin(ctx, marker, interval, timeout)
+		runBuiltin(ctx, marker, interval, timeout, defaultCommandRunner)
 		return nil
 	}
 	runExternal(ctx, marker, timeout)
@@ -83,7 +89,7 @@ func run(ctx context.Context) error {
 // run takes longer than the interval. Both goroutines share the wait group
 // so shutdown waits for in-flight work. Each run sets the health marker
 // from its outcome.
-func runBuiltin(ctx context.Context, marker *health.Marker, interval, timeout time.Duration) {
+func runBuiltin(ctx context.Context, marker *health.Marker, interval, timeout time.Duration, newCmd commandRunner) {
 	// Remove any stale marker from a previous run that may have crashed
 	// before its defer ran. The first run flips it to its real value.
 	marker.Set(false)
@@ -92,8 +98,24 @@ func runBuiltin(ctx context.Context, marker *health.Marker, interval, timeout ti
 		"interval", interval, "timeout", timeout, "base_dir", baseDir())
 
 	var wg sync.WaitGroup
+	// runCtx is deliberately decoupled from the shutdown signal so an
+	// in-flight run drains to completion (bounded by its own SCHED_TIMEOUT)
+	// instead of being cancelled mid-pass — matching external mode and the
+	// documented "does not abandon an in-flight run" contract.
+	// stop_grace_period is the real outer bound; ctx still stops *scheduling*
+	// (the ticker loop below).
+	runCtx := context.WithoutCancel(ctx)
 	wg.Go(func() {
-		marker.Set(runRenovatePass(ctx, timeout, "startup", nil, defaultCommandRunner))
+		// Skip the startup run if shutdown was signalled before this goroutine
+		// was scheduled (a redeploy landing in the container's first instant).
+		// Mirrors the ticker arm below: a stop request is never followed by a
+		// fresh run, which -- because runCtx is WithoutCancel -- would otherwise
+		// drain for a full SCHED_TIMEOUT and risk exceeding stop_grace_period
+		// (the exit-137 SIGKILL the drain exists to prevent).
+		if ctx.Err() != nil {
+			return
+		}
+		marker.Set(runRenovatePass(ctx, runCtx, timeout, "startup", nil, newCmd))
 	})
 	wg.Go(func() {
 		ticker := time.NewTicker(interval)
@@ -103,7 +125,17 @@ func runBuiltin(ctx context.Context, marker *health.Marker, interval, timeout ti
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				marker.Set(runRenovatePass(ctx, timeout, "interval", nil, defaultCommandRunner))
+				// ctx.Done() and ticker.C can both be ready once a run outlasts
+				// the interval (a tick buffers during the pass) and shutdown has
+				// been signalled; select then picks pseudo-randomly. Re-check
+				// shutdown so a stop request is never followed by a fresh run,
+				// which would drain for another full SCHED_TIMEOUT and risk
+				// exceeding stop_grace_period -- the exit-137 SIGKILL the drain
+				// exists to prevent.
+				if ctx.Err() != nil {
+					return
+				}
+				marker.Set(runRenovatePass(ctx, runCtx, timeout, "interval", nil, newCmd))
 			}
 		}
 	})
@@ -114,8 +146,15 @@ func runBuiltin(ctx context.Context, marker *health.Marker, interval, timeout ti
 	// drain (a Renovate run can take a while).
 	marker.Set(false)
 
+	// Narrate the drain so an operator triaging exit-137 sees the daemon was
+	// deliberately waiting on an in-flight run, mirroring external-mode waitForRunToDrain.
+	if inFlight, err := runInFlight(lockFilePath); err == nil && inFlight {
+		slog.Info("waiting for in-flight renovate run to finish before shutdown", "max_wait", timeout)
+	}
+
 	// Wait for the startup run and any in-flight ticker run to drain.
 	wg.Wait()
+	slog.Info("shutdown complete")
 }
 
 // runExternal idles until shutdown. The built-in scheduler is disabled
@@ -152,6 +191,7 @@ func runExternal(ctx context.Context, marker *health.Marker, drainTimeout time.D
 	// failed job. stop_grace_period is the real outer bound — set it long
 	// enough to cover a normal run.
 	waitForRunToDrain(lockFilePath, drainPollInterval, drainTimeout)
+	slog.Info("shutdown complete")
 }
 
 // runRun performs exactly one Renovate pass and returns the process exit
@@ -166,7 +206,7 @@ func runRun(ctx context.Context, repoArgs []string) int {
 	warnIfRootlessCacheUnwritable()
 
 	if err := verifyBaseDir(ctx); err != nil {
-		slog.Error("base directory not writable", "path", baseDir(), "error", err)
+		logBaseDirError(err)
 		return 1
 	}
 
@@ -175,7 +215,7 @@ func runRun(ctx context.Context, repoArgs []string) int {
 
 	timeout := loadRunTimeout()
 	marker := health.NewMarker(healthMarkerPath)
-	if ok := runRenovatePass(ctx, timeout, "external", repoArgs, defaultCommandRunner); !ok {
+	if ok := runRenovatePass(ctx, ctx, timeout, "external", repoArgs, defaultCommandRunner); !ok {
 		marker.Set(false)
 		return 1
 	}
@@ -195,8 +235,10 @@ const drainPollInterval = 500 * time.Millisecond
 // external-scheduling shutdown drain: PID 1 cannot wait() on the separate `run`
 // process, so it polls the shared flock instead. It returns true if the run
 // drained and false if maxWait elapsed first (the caller then exits and the
-// container stop terminates any lingering run). maxWait is the run's own
-// SCHED_TIMEOUT, so the wait can never outlast a single run's maximum lifetime.
+// container stop terminates any lingering run). maxWait is one SCHED_TIMEOUT:
+// it bounds the wait to a single pass. A coalescing `run` can chain reruns past
+// that, so the drain may give up mid-coalescing; stop_grace_period (the real
+// outer bound) is what actually caps shutdown.
 func waitForRunToDrain(lockPath string, poll, maxWait time.Duration) bool {
 	inFlight, err := runInFlight(lockPath)
 	if err != nil {

@@ -150,12 +150,12 @@ On `SIGTERM`/`SIGINT` (a `docker stop`, or a redeploy that recreates the contain
 - **Built-in mode** waits for the in-process run (startup or interval) to complete.
 - **External mode** waits for an in-flight `run` — a separate `docker exec` process — to release the shared overlap lock. This is the case that bites a release-driven setup: a redeploy landing on top of an Ofelia- or Komodo-triggered run would otherwise `SIGKILL` it (exit 137) and report the scheduled job as failed.
 
-Docker terminates the container once the process exits **or** `stop_grace_period` elapses, whichever comes first. So set `stop_grace_period` long enough to cover a normal run; otherwise Docker `SIGKILL`s the run before the drain completes:
+Docker terminates the container once the process exits **or** `stop_grace_period` elapses, whichever comes first. So set `stop_grace_period` long enough to cover your **slowest** run -- a cold first run (empty `./data` + on-demand tool installs) can take as long as the 10m healthcheck `start_period`; otherwise Docker `SIGKILL`s the run before the drain completes:
 
 ```yaml
 services:
   renovate:
-    stop_grace_period: 6m   # >= a typical run, so a redeploy drains instead of killing it
+    stop_grace_period: 10m  # >= your slowest run (a cold first run ~ the 10m healthcheck start_period); a shorter grace SIGKILLs it mid-drain
 ```
 
 The drain is internally capped at `SCHED_TIMEOUT` (a run can't outlast its own timeout); `stop_grace_period` is the real outer bound.
@@ -183,6 +183,8 @@ The drain is internally capped at `SCHED_TIMEOUT` (a run can't outlast its own t
 HEALTHCHECK --interval=60s --timeout=5s --retries=3 --start-period=30s \
     CMD ["/usr/local/bin/docker-renovate-scheduler", "health"]
 ```
+
+The image bakes a conservative `--start-period=30s`; the example `compose.yaml` raises it to `10m` because a first run on a cold cache installs toolchains on demand and can take several minutes. Compose merges this single field onto the baked healthcheck (interval/timeout/retries/CMD are inherited) -- size it to your own first-run duration.
 
 ## Security
 

@@ -1,9 +1,18 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"io/fs"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cplieger/health"
 )
 
 // TestWaitForRunToDrain_NoRunReturnsImmediately verifies the fast path: with
@@ -72,5 +81,195 @@ func TestWaitForRunToDrain_TimesOutWhileHeld(t *testing.T) {
 	}
 	if elapsed < 60*time.Millisecond {
 		t.Errorf("waitForRunToDrain() returned after %v, want >= maxWait (60ms) — it must wait the full window", elapsed)
+	}
+}
+
+// TestWaitForRunToDrain_ProbeErrorExitsWithoutDraining covers the probe-error
+// fast exit: when runInFlight cannot open the lock (unopenable path, here a
+// missing parent dir), the drain logs a warning and returns false immediately
+// rather than arming the wait — a broken lock must not hang shutdown.
+func TestWaitForRunToDrain_ProbeErrorExitsWithoutDraining(t *testing.T) {
+	t.Parallel()
+	bad := filepath.Join(t.TempDir(), "missing-subdir", "run.lock")
+	start := time.Now()
+	drained := waitForRunToDrain(bad, 10*time.Millisecond, time.Second)
+	elapsed := time.Since(start)
+	if drained {
+		t.Error("waitForRunToDrain() = true on a probe error, want false")
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("waitForRunToDrain() armed the wait despite a probe error (took %v); a probe error must return immediately", elapsed)
+	}
+}
+
+// TestRunBuiltin_DrainsInFlightRunAfterShutdown verifies the built-in-mode
+// half of the "does not abandon an in-flight run" contract: on shutdown the
+// ticker loop stops scheduling, but an in-flight run drains to completion
+// because runCtx is decoupled from the shutdown signal (context.WithoutCancel).
+// A regression that reverts WithoutCancel to ctx would cancel the in-flight run
+// mid-pass (the exit-137 bug the drain was added to fix) and fail the ctxErr
+// assertion below.
+func TestRunBuiltin_DrainsInFlightRunAfterShutdown(t *testing.T) {
+	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
+	clearRerunPending(rerunFlagPath)
+	started := make(chan struct{})
+	proceed := make(chan struct{})
+	var ctxErr error
+	var once sync.Once
+	runner := func(c context.Context, _ string, _ ...string) *exec.Cmd {
+		once.Do(func() { close(started) })
+		<-proceed
+		ctxErr = c.Err()
+		return exec.CommandContext(context.Background(), "true")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	marker := health.NewMarker(filepath.Join(t.TempDir(), "marker"))
+	done := make(chan struct{})
+	go func() {
+		runBuiltin(ctx, marker, time.Hour, time.Minute, runner)
+		close(done)
+	}()
+	<-started
+	cancel()
+	select {
+	case <-done:
+		t.Fatal("runBuiltin returned before the in-flight run drained")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(proceed)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runBuiltin did not return after the in-flight run finished")
+	}
+	if ctxErr != nil {
+		t.Errorf("in-flight run ctx err = %v, want nil (WithoutCancel must decouple from shutdown)", ctxErr)
+	}
+}
+
+// TestRunExternal_BootsHealthyThenDrainsOnShutdown pins external mode's
+// documented boot-healthy contract (README: external mode "starts healthy —
+// idle, nothing has failed") and the shutdown-then-drain sequence. A
+// regression that booted external mode unhealthy would make Docker kill an
+// idle, correctly-running container, and nothing else would catch it.
+func TestRunExternal_BootsHealthyThenDrainsOnShutdown(t *testing.T) {
+	// Not parallel: probes the package-global lockFilePath in /tmp.
+	markerPath := filepath.Join(t.TempDir(), "marker")
+	marker := health.NewMarker(markerPath)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		runExternal(ctx, marker, time.Second)
+		close(done)
+	}()
+
+	// External mode boots healthy: poll until the marker file appears.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(markerPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("runExternal did not set the health marker healthy on boot")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runExternal did not return after shutdown")
+	}
+
+	if _, err := os.Stat(markerPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("after shutdown marker must be removed; stat err = %v, want not-exist", err)
+	}
+}
+
+// TestRunBuiltin_SkipsStartupRunWhenAlreadyShutDown covers runBuiltin's
+// startup-run skip-on-already-shutdown guard (the boot-time-redeploy guard):
+// a stop signalled before the startup goroutine is scheduled must NOT launch a
+// fresh run, which -- because runCtx is context.WithoutCancel -- would
+// otherwise drain for a full SCHED_TIMEOUT and risk the exit-137 SIGKILL the
+// drain exists to prevent.
+func TestRunBuiltin_SkipsStartupRunWhenAlreadyShutDown(t *testing.T) {
+	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
+	clearRerunPending(rerunFlagPath)
+
+	var ran atomic.Bool
+	runner := func(_ context.Context, _ string, _ ...string) *exec.Cmd {
+		ran.Store(true)
+		return exec.CommandContext(context.Background(), "true")
+	}
+
+	// Shutdown signalled before runBuiltin starts (boot-time redeploy).
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	marker := health.NewMarker(filepath.Join(t.TempDir(), "marker"))
+
+	done := make(chan struct{})
+	go func() {
+		runBuiltin(ctx, marker, time.Hour, time.Minute, runner)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runBuiltin did not return promptly with a pre-cancelled context")
+	}
+
+	if ran.Load() {
+		t.Error("runBuiltin invoked Renovate despite shutdown before startup; must be skipped")
+	}
+}
+
+// TestRunBuiltin_FiresIntervalRunAfterStartup covers runBuiltin's interval
+// ticker arm (the `case <-ticker.C` run), the primary periodic-run behaviour
+// of built-in mode. The drain test uses a 1h interval so the ticker never
+// fires; a short interval here proves the tick arm runs a pass (startup is the
+// 1st invocation, the first tick is the 2nd).
+func TestRunBuiltin_FiresIntervalRunAfterStartup(t *testing.T) {
+	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
+	clearRerunPending(rerunFlagPath)
+
+	var calls atomic.Int64
+	gotTwo := make(chan struct{})
+	var once sync.Once
+	runner := func(_ context.Context, _ string, _ ...string) *exec.Cmd {
+		if calls.Add(1) >= 2 {
+			once.Do(func() { close(gotTwo) })
+		}
+		return exec.CommandContext(context.Background(), "true")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	marker := health.NewMarker(filepath.Join(t.TempDir(), "marker"))
+
+	done := make(chan struct{})
+	go func() {
+		// Short interval: startup is call 1, first tick is call 2.
+		runBuiltin(ctx, marker, 15*time.Millisecond, time.Minute, runner)
+		close(done)
+	}()
+
+	select {
+	case <-gotTwo:
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-done
+		t.Fatalf("ticker arm did not fire; runner called %d times (want >= 2)", calls.Load())
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runBuiltin did not return after shutdown")
 	}
 }
