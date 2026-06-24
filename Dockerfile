@@ -24,7 +24,8 @@ FROM renovate/renovate:43.242.0@sha256:5159fecda22d7bd50d4ebcdc7896ddb65e649e3a1
 USER root
 
 # Strip the docker CLI that containerbase bakes into the renovate base image
-# (a ~42 MB binary under /opt/containerbase/tools/docker, plus its shim, PATH
+# (a ~42 MB binary under /opt/containerbase/tools/docker/<ver>/bin/docker, plus
+# its shim at /opt/containerbase/bin/docker, the /usr/local/bin/docker PATH
 # symlink, the containerbase lib dir, and the version marker). Renovate only
 # invokes the docker CLI under binarySource=docker
 # (verified against its exec layer: every docker call is gated on that mode);
@@ -32,11 +33,15 @@ USER root
 # Removing it drops the Go-stdlib CVEs Trivy reports against that unused binary
 # and trims attack surface. binarySource=docker is therefore unsupported here
 # (and is deprecated upstream anyway).
-RUN rm -rf /opt/containerbase/tools/docker \
-    /opt/containerbase/bin/docker \
-    /usr/local/bin/docker \
-    /opt/containerbase/lib/docker \
-    /opt/containerbase/versions/docker \
+#
+# Let find DRIVE the removal instead of enumerating fixed paths: containerbase
+# reshuffles these locations between releases (the v43.242.0 bump added
+# lib/docker and the versions/ marker, which a hardcoded 3-path list missed and
+# the assertion below then failed the build on). Deleting every entry named
+# `docker` under the containerbase tree, plus the PATH symlink, is layout-stable
+# and won't silently fall behind the next base-image bump.
+RUN find /opt/containerbase -name docker -prune -exec rm -rf {} + \
+    && rm -f /usr/local/bin/docker \
     && ! command -v docker \
     && [ -z "$(find /opt/containerbase -name docker 2>/dev/null)" ]
 
