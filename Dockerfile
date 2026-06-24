@@ -4,7 +4,8 @@ ENV GOTOOLCHAIN=auto
 
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 COPY *.go ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
@@ -17,10 +18,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # add only the scheduler binary on top.
 FROM renovate/renovate:43.235.0@sha256:fa30ad5be8d59ae573806adf6d4281a38596c09fc8c77cffb8ecff917599eb1f
 
-# Renovate stores repo clones and caches under RENOVATE_BASE_DIR. Persisting
-# it on a volume lets runs git-fetch instead of git-clone and reuse the
-# datasource/tool caches. Create it owned by the image's non-root user
-# (UID 12021, group 0) so the container can write there even on a fresh mount.
+# Become root for the image customizations below -- strip the bundled docker CLI,
+# install the scheduler binary, create /data, and pre-install Go. The final USER
+# reverts to the non-root 12021 before the runtime CMD.
 USER root
 
 # Strip the docker CLI that containerbase bakes into the renovate base image
@@ -33,9 +33,41 @@ USER root
 # (and is deprecated upstream anyway).
 RUN rm -rf /opt/containerbase/tools/docker \
     /opt/containerbase/bin/docker \
-    /usr/local/bin/docker
+    /usr/local/bin/docker \
+    && ! command -v docker \
+    && [ -z "$(find /opt/containerbase -name docker 2>/dev/null)" ]
+
+# DL4006: the version-assertion pipe (apt-cache policy | awk) needs a
+# pipefail-aware shell so a failing apt-cache surfaces instead of being
+# masked by awk's exit status. bash is present in the renovate/Ubuntu base.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Patch the MySQL client libraries the renovate base inherits from its Ubuntu
+# layer (pulled in transitively by containerbase's default-libmysqlclient-dev
+# build prerequisite). Renovate itself never connects to MySQL, but Trivy still
+# flags the stale libs against this image (CVE-2026-46862 / CVE-2026-46863).
+# Upgrade just those two packages to the patched noble-security build rather
+# than removing them, so native MySQL-driver builds during lockfile maintenance
+# keep working. Left unpinned on purpose: we always want the latest patched
+# point release, and this becomes a no-op once the base image ships it.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --only-upgrade --no-install-recommends \
+        libmysqlclient21 libmysqlclient-dev \
+    && for p in libmysqlclient21 libmysqlclient-dev; do \
+         dpkg-query -W "$p" >/dev/null 2>&1 || continue; \
+         inst="$(dpkg-query -W -f='${Version}' "$p")"; \
+         cand="$(apt-cache policy "$p" | awk '/Candidate:/{print $2}')"; \
+         [ "$inst" = "$cand" ] || { echo "FATAL: $p $inst != candidate $cand"; exit 1; }; \
+       done \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --chmod=755 --from=go-builder /docker-renovate-scheduler /usr/local/bin/docker-renovate-scheduler
+
+# Renovate stores repo clones and caches under RENOVATE_BASE_DIR. Persisting
+# it on a volume lets runs git-fetch instead of git-clone and reuse the
+# datasource/tool caches. Create it owned by the image's non-root user
+# (UID 12021, group 0) so the container can write there even on a fresh mount.
 RUN mkdir -p /data && chown 12021:0 /data && chmod 0775 /data
 ENV RENOVATE_BASE_DIR=/data
 

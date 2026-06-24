@@ -96,3 +96,34 @@ func TestRunInFlight(t *testing.T) {
 		t.Errorf("runInFlight() after unlock = (%v, %v), want (false, nil) — the probe must not retain the lock", inFlight, err)
 	}
 }
+
+func TestTryLock_ReturnsErrorWhenPathUnopenable(t *testing.T) {
+	t.Parallel()
+	bad := filepath.Join(t.TempDir(), "missing-subdir", "run.lock")
+
+	l, ok, err := tryLock(bad)
+
+	if err == nil {
+		t.Error("tryLock() error = nil for an unopenable path, want non-nil")
+	}
+	if ok {
+		t.Error("tryLock() ok = true for an unopenable path, want false")
+	}
+	if l != nil {
+		t.Error("tryLock() returned a non-nil lock for an unopenable path, want nil")
+	}
+}
+
+func TestRunInFlight_PropagatesProbeError(t *testing.T) {
+	t.Parallel()
+	bad := filepath.Join(t.TempDir(), "missing-subdir", "run.lock")
+
+	inFlight, err := runInFlight(bad)
+
+	if err == nil {
+		t.Error("runInFlight() error = nil for an unopenable path, want non-nil")
+	}
+	if inFlight {
+		t.Error("runInFlight() = true on a probe error, want false")
+	}
+}

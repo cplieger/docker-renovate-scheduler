@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -88,17 +89,32 @@ const maxCoalescedReruns = 8
 // during the pass, reruns on completion (bounded by maxCoalescedReruns). The
 // flag is cleared before the pass, not after, so a trigger arriving mid-run is
 // never lost.
-func runRenovatePass(ctx context.Context, timeout time.Duration, trigger string, repoArgs []string, newCmd commandRunner) (ok bool) {
+// shutdownCtx governs whether to START a pass/rerun (shutdown-aware); runCtx
+// governs execution lifetime (decoupled from shutdown in built-in mode, equal
+// to shutdownCtx in external mode). Splitting them lets an in-flight pass drain
+// uncancelled while a queued rerun is still suppressed once shutdown is
+// signalled, so a stop request is never followed by a fresh run.
+func runRenovatePass(shutdownCtx, runCtx context.Context, timeout time.Duration, trigger string, repoArgs []string, newCmd commandRunner) (ok bool) {
 	lock, locked, lockErr := tryLock(lockFilePath)
+	if !locked && lockErr == nil {
+		// A run is already in flight. Queue a single coalesced rerun instead
+		// of dropping this trigger; the active holder reruns on completion.
+		markRerunPending(rerunFlagPath)
+		// Narrow the lost-wakeup window: the holder may have already passed its
+		// final rerunPending() check and be between there and releasing the
+		// lock when we set the flag above, leaving no holder to observe it.
+		// Retry the lock once; if the holder has since released it we now own the
+		// run and drain the flag ourselves. A residual window remains (holder still
+		// holding across both our attempts); it loses no work -- the next
+		// tick/trigger clears the flag and runs -- only latency until that run.
+		lock, locked, lockErr = tryLock(lockFilePath)
+	}
 	if lockErr != nil {
 		slog.Error("cannot acquire run lock",
 			"trigger", trigger, "path", lockFilePath, "error", lockErr)
 		return false
 	}
 	if !locked {
-		// A run is already in flight. Queue a single coalesced rerun instead
-		// of dropping this trigger; the active holder reruns on completion.
-		markRerunPending(rerunFlagPath)
 		slog.Info("renovate already running, queued rerun", "trigger", trigger)
 		return true
 	}
@@ -114,13 +130,24 @@ func runRenovatePass(ctx context.Context, timeout time.Duration, trigger string,
 		if reruns > 0 {
 			passTrigger = trigger + "+rerun"
 		}
-		if ok = runRenovateOnce(ctx, timeout, passTrigger, repoArgs, newCmd); !ok {
+		if ok = runRenovateOnce(runCtx, timeout, passTrigger, repoArgs, newCmd); !ok {
 			// A failed or timed-out pass stops the loop: don't hammer a failing
 			// Renovate. Any queued trigger is left for the next scheduled run
 			// or external trigger to retry.
 			return false
 		}
 		if !rerunPending(rerunFlagPath) {
+			return true
+		}
+		// Shutdown gate: a rerun is queued, but if shutdown has been signalled
+		// don't START a fresh pass. In built-in mode runCtx is decoupled from
+		// shutdown (context.WithoutCancel), so without this check the loop would
+		// launch another runRenovateOnce that drains for a full SCHED_TIMEOUT
+		// after SIGTERM -- risking the stop_grace_period overrun (exit-137
+		// SIGKILL) this drain feature exists to prevent. The in-flight pass
+		// already completed above; we only defer the *next* one.
+		if shutdownCtx.Err() != nil {
+			slog.Info("shutdown signalled during run; deferring queued rerun", "trigger", trigger)
 			return true
 		}
 		if reruns >= maxCoalescedReruns {
@@ -148,11 +175,29 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string,
 	runErr := newCmd(runCtx, name, args...).Run()
 	durationMs := time.Since(start).Milliseconds()
 
-	if runErr != nil {
+	switch {
+	case runErr == nil:
+		slog.Info("renovate run complete", "trigger", trigger, "duration_ms", durationMs)
+		return true
+	case ctx.Err() != nil:
+		// Parent context cancelled: the external `run` process is shutting
+		// down, not a Renovate failure. Warn (not Error) so a clean shutdown
+		// doesn't trip the level=error alert. In built-in mode the run ctx is
+		// decoupled from the shutdown signal (see runBuiltin), so this branch
+		// fires only for the cancelable external `run` path.
+		slog.Warn("renovate run interrupted by shutdown",
+			"trigger", trigger, "duration_ms", durationMs, "cause", context.Cause(ctx))
+		return false
+	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
+		// The run exceeded SCHED_TIMEOUT. Logged distinctly from a genuine
+		// non-zero Renovate exit so operators can tell a slow run from a
+		// real failure during triage.
+		slog.Error("renovate run timed out",
+			"trigger", trigger, "duration_ms", durationMs, "timeout", timeout)
+		return false
+	default:
 		slog.Error("renovate run failed",
 			"trigger", trigger, "duration_ms", durationMs, "error", runErr)
 		return false
 	}
-	slog.Info("renovate run complete", "trigger", trigger, "duration_ms", durationMs)
-	return true
 }

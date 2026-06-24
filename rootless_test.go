@@ -29,12 +29,12 @@ func TestRootlessCacheLikelyUnwritable(t *testing.T) {
 			euid: customUID, getenv: noEnv, want: true,
 		},
 		{
-			name: "custom UID mitigated via GOCACHE does not warn",
-			euid: customUID, getenv: env(map[string]string{"GOCACHE": "/data/.cache/go-build"}), want: false,
+			name: "custom UID with GOCACHE but no forwarding still warns",
+			euid: customUID, getenv: env(map[string]string{"GOCACHE": "/data/.cache/go-build"}), want: true,
 		},
 		{
-			name: "custom UID mitigated via npm_config_cache does not warn",
-			euid: customUID, getenv: env(map[string]string{"npm_config_cache": "/data/.npm"}), want: false,
+			name: "custom UID with npm_config_cache but no forwarding still warns",
+			euid: customUID, getenv: env(map[string]string{"npm_config_cache": "/data/.npm"}), want: true,
 		},
 		{
 			name: "custom UID mitigated via RENOVATE_CUSTOM_ENV_VARIABLES does not warn",

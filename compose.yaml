@@ -3,46 +3,38 @@ services:
     image: ghcr.io/cplieger/docker-renovate-scheduler:latest
     container_name: renovate
     restart: unless-stopped
-    # Give an in-flight run time to drain on stop/redeploy instead of being
-    # SIGKILLed (exit 137). Cover a typical run; see README "Graceful shutdown".
-    stop_grace_period: 6m
 
-    # Built-in scheduling (default): one run at startup for immediate
-    # freshness, then every SCHED_INTERVAL. No external scheduler required.
+    # Let an in-flight run drain on stop/redeploy instead of being SIGKILLed
+    # (exit 137). Size it to your SLOWEST run: a cold first run (empty ./data +
+    # on-demand tool installs) can take as long as the healthcheck start_period
+    # below (10m), so a shorter grace would SIGKILL that run mid-drain.
+    # See README "Graceful shutdown".
+    stop_grace_period: 10m
+
+    # Built-in scheduling (default): one run at startup, then every
+    # SCHED_INTERVAL. For external scheduling, see README "Scheduling modes".
     environment:
       LOG_LEVEL: "info"          # debug | info | warn | error
       LOG_FORMAT: "json"         # Renovate's own log format (for Loki/Alloy)
-      SCHED_INTERVAL: "6h"       # built-in cadence (Go duration); "off" -> external
+      SCHED_INTERVAL: "6h"       # built-in cadence (Go duration); "off" -> external trigger
       SCHED_TIMEOUT: "1h"        # whole-run timeout for one `renovate` invocation
 
-      # --- Renovate's own configuration (RENOVATE_*) — not wrapped by us ---
+      # Renovate's own config (RENOVATE_*) — passed straight through, not wrapped:
       RENOVATE_PLATFORM: "github"
-      RENOVATE_AUTODISCOVER: "true"      # or set RENOVATE_REPOSITORIES
+      RENOVATE_AUTODISCOVER: "true"            # or set RENOVATE_REPOSITORIES
       RENOVATE_TOKEN: "${RENOVATE_TOKEN}"
-      RENOVATE_GITHUB_COM_TOKEN: "${RENOVATE_GITHUB_COM_TOKEN}"
-      # Resident-container cache reuse (git fetch, not clone):
-      RENOVATE_PERSIST_REPO_DATA: "true"
+      RENOVATE_GITHUB_COM_TOKEN: "${RENOVATE_GITHUB_COM_TOKEN}"   # changelogs + dodge rate limits
+      RENOVATE_PERSIST_REPO_DATA: "true"       # cache reuse: git fetch not clone (persist /data)
       RENOVATE_REPOSITORY_CACHE: "enabled"
 
-      # Rootless / non-default UID needs binarySource=global + each tool's cache
-      # redirected to a writable volume and forwarded (Renovate doesn't forward
-      # GOCACHE / npm_config_cache), else tool installs and lockfile regeneration
-      # fail silently. Simplest: don't override the user (runs as 12021). See the
-      # README, "Running as a non-default user".
+      # Runs as UID 12021 by default — recommended. Overriding `user:` needs extra cache
+      # config or tool installs fail silently; see README "Running as a non-default user".
 
-    # External scheduling variant: disable the built-in loop and let a central
-    # scheduler drive each run by exec'ing the `run` subcommand. The advisory
-    # lock on /tmp/.docker-renovate-scheduler.lock prevents overlapping runs
-    # across the exec and the (now-idle) daemon.
-    #   environment:
-    #     SCHED_INTERVAL: "off"  # disabled | 0 also disable the built-in scheduler
-    #   labels:                  # e.g. an Ofelia sibling on the same host
-    #     ofelia.enabled: "true"
-    #     ofelia.job-exec.renovate-run.schedule: "@every 6h"
-    #     ofelia.job-exec.renovate-run.command: "docker-renovate-scheduler run"
-    #     ofelia.job-exec.renovate-run.no-overlap: "true"
+    # First run is slow (cold cache + on-demand tool installs); the image bakes a 30s
+    # start-period, so raise this or the container flaps unhealthy. See README "Healthcheck".
+    healthcheck:
+      start_period: 10m
 
     volumes:
-      - ./data:/data:rw          # RENOVATE_BASE_DIR — persist clones + caches
-      # Optional: a Renovate config.js instead of RENOVATE_* env vars
-      # - ./config.js:/usr/src/app/config.js:ro
+      - ./data:/data             # RENOVATE_BASE_DIR — persist clones + caches
+      # - ./config.js:/usr/src/app/config.js:ro   # optional: config.js instead of RENOVATE_* env

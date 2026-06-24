@@ -29,8 +29,9 @@ func warnIfRootlessCacheUnwritable() {
 		"uid", os.Geteuid(),
 		"home", os.Getenv("HOME"),
 		"fix", "run as the image's default UID 12021, or set RENOVATE_BINARY_SOURCE=global "+
-			"and redirect each tool cache to a writable volume — see the README, "+
-			"'Running as a non-default user'")
+			"and redirect each tool cache to a writable volume, forwarding it to Renovate's "+
+			"artifact subprocesses via RENOVATE_CUSTOM_ENV_VARIABLES (or a config.js "+
+			"customEnvVariables) — see the README, 'Running as a non-default user'")
 }
 
 // rootlessCacheLikelyUnwritable is the pure decision behind the warning, split
@@ -47,11 +48,14 @@ func rootlessCacheLikelyUnwritable(euid int, getenv func(string) string) bool {
 	if euid == defaultImageUID || euid == 0 {
 		return false
 	}
-	// Explicit cache redirection is the documented custom-UID mitigation; a UID
-	// that set it (HOME may still be /) has working caches, so don't nag.
-	if getenv("RENOVATE_CUSTOM_ENV_VARIABLES") != "" ||
-		getenv("GOCACHE") != "" ||
-		getenv("npm_config_cache") != "" {
+	// RENOVATE_CUSTOM_ENV_VARIABLES is the documented mitigation: it is what forwards the
+	// redirected caches to Renovate's artifact subprocesses (go/npm), where lockfile
+	// regeneration runs. GOCACHE / npm_config_cache set on the scheduler alone do NOT reach
+	// those subprocesses (Renovate forwards only an allowlist -- GOPATH yes, those two no),
+	// so they are not a reliable "caches work" signal and must not suppress on their own.
+	// (Redirecting via a Renovate config.js customEnvVariables is equally valid but not
+	// visible here, so that setup sees a benign false-positive.)
+	if getenv("RENOVATE_CUSTOM_ENV_VARIABLES") != "" {
 		return false
 	}
 	return true

@@ -1,3 +1,5 @@
+// Package main implements docker-renovate-scheduler, a resident daemon that
+// wraps self-hosted Renovate with an interval scheduler and advisory overlap guard.
 package main
 
 import (
@@ -120,9 +122,15 @@ func loadInterval() (interval time.Duration, scheduleEnabled bool) {
 				"value", raw, "default", defaultInterval)
 		case d > 0:
 			interval = d
-		default:
+		case d == 0:
 			// Zero duration ("0", "0s") disables built-in scheduling.
 			scheduleEnabled = false
+		default:
+			// A negative duration is not a valid interval and not a documented disable
+			// sentinel (off/disabled/0/0s); warn and fall back to the default rather than
+			// silently idling, which would mask a typo.
+			slog.Warn("SCHED_INTERVAL is negative, using default",
+				"value", raw, "default", defaultInterval)
 		}
 	}
 	return interval, scheduleEnabled
@@ -132,7 +140,7 @@ func loadInterval() (interval time.Duration, scheduleEnabled bool) {
 // defaultRunTimeout on unset or unparseable values, logging a warning
 // rather than refusing to start.
 func loadRunTimeout() time.Duration {
-	raw := os.Getenv("SCHED_TIMEOUT")
+	raw := strings.TrimSpace(os.Getenv("SCHED_TIMEOUT"))
 	if raw == "" {
 		return defaultRunTimeout
 	}
@@ -156,19 +164,27 @@ func verifyBaseDir(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("mkdir base dir %q: %w", dir, err)
-	}
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("base dir verification timed out: %w", err)
-	}
+	done := make(chan error, 1)
+	go func() {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			done <- fmt.Errorf("mkdir base dir %q: %w", dir, err)
+			return
+		}
+		testFile := filepath.Join(dir, ".write_test")
+		f, err := os.Create(testFile) // #nosec G304 -- fixed filename in the operator-provided base dir
+		if err != nil {
+			done <- fmt.Errorf("base dir %q not writable: %w", dir, err)
+			return
+		}
+		_ = f.Close()
+		_ = os.Remove(testFile)
+		done <- nil
+	}()
 
-	testFile := filepath.Join(dir, ".write_test")
-	f, err := os.Create(testFile) // #nosec G304 -- fixed filename in the operator-provided base dir
-	if err != nil {
-		return fmt.Errorf("base dir %q not writable: %w", dir, err)
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("base dir verification timed out: %w", ctx.Err())
+	case err := <-done:
+		return err
 	}
-	_ = f.Close()
-	_ = os.Remove(testFile)
-	return nil
 }
