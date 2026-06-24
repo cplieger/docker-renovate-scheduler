@@ -270,8 +270,8 @@ func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	tests := []struct {
 		name    string
 		runner  commandRunner
-		timeout time.Duration
 		wantMsg string
+		timeout time.Duration
 	}{
 		{
 			name: "timeout logs renovate run timed out",
