@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -125,5 +126,63 @@ func TestRunInFlight_PropagatesProbeError(t *testing.T) {
 	}
 	if inFlight {
 		t.Error("runInFlight() = true on a probe error, want false")
+	}
+}
+
+// countOpenFDs returns the number of open file descriptors held by the current
+// process by reading /proc/self/fd. The readdir's own transient directory
+// descriptor is counted symmetrically on every call, so it cancels out when
+// callers compare two counts. The repo targets Linux (container deployment)
+// and CI runs on Linux, so the path is always present there; the skip guards a
+// non-Linux developer run.
+func countOpenFDs(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("/proc/self/fd unreadable, FD-leak detection unavailable: %v", err)
+	}
+	return len(entries)
+}
+
+// TestMarkRerunPending_closesDescriptorOnSuccess verifies markRerunPending
+// closes the descriptor it opens on the success path, so repeated coalescing
+// triggers do not leak file descriptors.
+//
+// os.OpenFile runs unconditionally, so the flag file lands on disk whether or
+// not the success path closes the descriptor -- every rerunPending-based
+// assertion (see TestRerunFlag) passes either way. The only observable
+// difference is the descriptor: closing it synchronously before returning keeps
+// the process FD count flat across many calls (the descriptor number is
+// reused), whereas skipping the close leaks one descriptor per call and the
+// count grows by one each time.
+//
+// The loop performs only a handful of tiny allocations, far below Go's GC
+// trigger, so no *os.File finalizer runs to mask a leak; the growth would be
+// deterministic. No runtime.GC() is invoked (that would close any leaked
+// descriptors and weaken the check), and the test is intentionally not parallel
+// so no sibling test churns FDs during the measurement window.
+func TestMarkRerunPending_closesDescriptorOnSuccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rerun.flag")
+
+	// Warm up: create the flag file and trip any lazy descriptor
+	// initialisation so the baseline below is stable. After this, every
+	// subsequent open takes the identical (file-already-exists) code path.
+	for range 5 {
+		markRerunPending(path)
+	}
+
+	const iters = 64
+	const maxGrowth = iters / 4 // 16
+
+	before := countOpenFDs(t)
+	for range iters {
+		markRerunPending(path)
+	}
+	after := countOpenFDs(t)
+
+	growth := after - before
+	if growth >= maxGrowth {
+		t.Errorf("markRerunPending(path) leaked descriptors: FD growth over %d calls = %d, want < %d (success path must Close the opened file)",
+			iters, growth, maxGrowth)
 	}
 }
