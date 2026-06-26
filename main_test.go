@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -271,5 +272,47 @@ func TestRunBuiltin_FiresIntervalRunAfterStartup(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("runBuiltin did not return after shutdown")
+	}
+}
+
+// TestRun_ReturnsErrorWhenBaseDirUnwritable pins the daemon composition root's
+// fail-fast contract: an unwritable RENOVATE_BASE_DIR makes run return a
+// non-nil error (which main turns into a non-zero exit) instead of proceeding
+// to schedule runs against a base dir Renovate cannot use. The error is
+// returned before any signal handler or health marker is wired, so the check
+// is fast and leaves no /tmp state behind.
+func TestRun_ReturnsErrorWhenBaseDirUnwritable(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Setenv("RENOVATE_BASE_DIR", file)
+
+	if err := run(context.Background()); err == nil {
+		t.Error("run() = nil, want a non-nil error when the base dir is unwritable")
+	}
+}
+
+// TestRunRun_ReturnsExitOneWhenBaseDirUnwritable pins the external `run`
+// subcommand's exit-code contract: an unwritable RENOVATE_BASE_DIR must exit
+// non-zero (1) so the external trigger (an Ofelia job-exec / Komodo action,
+// which treats a non-zero exit as a failed job) surfaces the misconfiguration
+// instead of silently reporting success. Returns before the command runner or
+// marker is touched, so no real Renovate entrypoint or /tmp marker is involved.
+func TestRunRun_ReturnsExitOneWhenBaseDirUnwritable(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Setenv("RENOVATE_BASE_DIR", file)
+
+	if code := runRun(context.Background(), nil); code != 1 {
+		t.Errorf("runRun() = %d, want 1 when the base dir is unwritable", code)
 	}
 }
