@@ -45,30 +45,16 @@ RUN find /opt/containerbase -name docker -prune -exec rm -rf {} + \
     && ! command -v docker \
     && [ -z "$(find /opt/containerbase -name docker 2>/dev/null)" ]
 
-# DL4006: the version-assertion pipe (apt-cache policy | awk) needs a
-# pipefail-aware shell so a failing apt-cache surfaces instead of being
-# masked by awk's exit status. bash is present in the renovate/Ubuntu base.
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
-# Patch the MySQL client libraries the renovate base inherits from its Ubuntu
-# layer (pulled in transitively by containerbase's default-libmysqlclient-dev
-# build prerequisite). Renovate itself never connects to MySQL, but Trivy still
-# flags the stale libs against this image (CVE-2026-46862 / CVE-2026-46863).
-# Upgrade just those two packages to the patched noble-security build rather
-# than removing them, so native MySQL-driver builds during lockfile maintenance
-# keep working. Left unpinned on purpose: we always want the latest patched
-# point release, and this becomes a no-op once the base image ships it.
-# hadolint ignore=DL3008
-RUN apt-get update \
-    && apt-get install -y --only-upgrade --no-install-recommends \
-        libmysqlclient21 libmysqlclient-dev \
-    && for p in libmysqlclient21 libmysqlclient-dev; do \
-         dpkg-query -W "$p" >/dev/null 2>&1 || continue; \
-         inst="$(dpkg-query -W -f='${Version}' "$p")"; \
-         cand="$(apt-cache policy "$p" | awk '/Candidate:/{print $2}')"; \
-         [ "$inst" = "$cand" ] || { echo "FATAL: $p $inst != candidate $cand"; exit 1; }; \
-       done \
-    && rm -rf /var/lib/apt/lists/*
+# Apply all available Ubuntu security updates the renovate base inherits from
+# its Ubuntu layer. The base lags the distro security mirror between upstream
+# rebuilds, so Trivy flags stale OS packages (perl, tar, libxml2, libssh2,
+# libmysqlclient, ...) against this image even though fixed builds exist. A
+# broad apt upgrade patches them all at build time -- matching the vibekit and
+# vibecli images -- instead of enumerating packages one CVE at a time, and
+# becomes a no-op once the base ships the fixes. upgrade never removes
+# packages, so native MySQL-driver builds during lockfile maintenance keep
+# working.
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 
 COPY --chmod=755 --from=go-builder /docker-renovate-scheduler /usr/local/bin/docker-renovate-scheduler
 
