@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # package managers, and its default binarySource=install installs those tools
 # at runtime via containerbase. The upstream image assembles all of that; we
 # add only the scheduler binary on top.
-FROM renovate/renovate:43.249.0@sha256:eed860d85c1a9c47fab070106189ad4830d6044f95214fac0b129d1ed234c2f1
+FROM renovate/renovate:43.249.1@sha256:12655c96035f9a11c353d22a21249a57d1beece05b8f0c678ac78053703a9e23
 
 # Become root for the image customizations below -- strip the bundled docker CLI,
 # install the scheduler binary, create /data, and pre-install Go. The final USER
