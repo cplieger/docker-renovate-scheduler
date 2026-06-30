@@ -1,40 +1,25 @@
+# Example compose for docker-renovate-scheduler. See the README for all configuration options and hardening.
 services:
   renovate:
     image: ghcr.io/cplieger/docker-renovate-scheduler:latest
     container_name: renovate
     restart: unless-stopped
+    stop_grace_period: 10m  # let an in-flight run drain on stop instead of exit 137; see README "Graceful shutdown"
 
-    # Let an in-flight run drain on stop/redeploy instead of being SIGKILLed
-    # (exit 137). Size it to your SLOWEST run: a cold first run (empty ./data +
-    # on-demand tool installs) can take as long as the healthcheck start_period
-    # below (10m), so a shorter grace would SIGKILL that run mid-drain.
-    # See README "Graceful shutdown".
-    stop_grace_period: 10m
-
-    # Built-in scheduling (default): one run at startup, then every
-    # SCHED_INTERVAL. For external scheduling, see README "Scheduling modes".
     environment:
-      LOG_LEVEL: "info"          # debug | info | warn | error
-      LOG_FORMAT: "json"         # Renovate's own log format (for Loki/Alloy)
-      SCHED_INTERVAL: "6h"       # built-in cadence (Go duration); "off" -> external trigger
-      SCHED_TIMEOUT: "1h"        # whole-run timeout for one `renovate` invocation
-
-      # Renovate's own config (RENOVATE_*) — passed straight through, not wrapped:
+      TZ: "Europe/Paris"
+      SCHED_INTERVAL: "6h"  # built-in cadence (Go duration); "off" = external trigger; see README "Scheduling modes"
+      # Renovate's own config (RENOVATE_*) is passed straight through:
       RENOVATE_PLATFORM: "github"
-      RENOVATE_AUTODISCOVER: "true"            # or set RENOVATE_REPOSITORIES
+      RENOVATE_AUTODISCOVER: "true"  # or set RENOVATE_REPOSITORIES
       RENOVATE_TOKEN: "${RENOVATE_TOKEN}"
-      RENOVATE_GITHUB_COM_TOKEN: "${RENOVATE_GITHUB_COM_TOKEN}"   # changelogs + dodge rate limits
-      RENOVATE_PERSIST_REPO_DATA: "true"       # cache reuse: git fetch not clone (persist /data)
+      RENOVATE_GITHUB_COM_TOKEN: "${RENOVATE_GITHUB_COM_TOKEN}"  # changelogs + dodge rate limits
+      RENOVATE_PERSIST_REPO_DATA: "true"  # persist /data so runs git fetch, not clone
       RENOVATE_REPOSITORY_CACHE: "enabled"
 
-      # Runs as UID 12021 by default — recommended. Overriding `user:` needs extra cache
-      # config or tool installs fail silently; see README "Running as a non-default user".
-
-    # First run is slow (cold cache + on-demand tool installs); the image bakes a 30s
-    # start-period, so raise this or the container flaps unhealthy. See README "Healthcheck".
+    # Cold first run (on-demand tool installs) needs longer than the image's 30s default.
     healthcheck:
       start_period: 10m
 
     volumes:
-      - ./data:/data             # RENOVATE_BASE_DIR — persist clones + caches
-      # - ./config.js:/usr/src/app/config.js:ro   # optional: config.js instead of RENOVATE_* env
+      - "./data:/data"  # RENOVATE_BASE_DIR - persist clones + caches
