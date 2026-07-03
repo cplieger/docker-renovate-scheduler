@@ -21,7 +21,7 @@ func TestRenovateInvocation(t *testing.T) {
 		wantArgs []string
 	}{
 		{"no repos runs configured set", nil, []string{"renovate"}},
-		{"single repo passed through", []string{"cplieger/homelab"}, []string{"renovate", "cplieger/homelab"}},
+		{"single repo passed through", []string{"owner/repo"}, []string{"renovate", "owner/repo"}},
 		{"multiple repos passed through", []string{"a/b", "c/d"}, []string{"renovate", "a/b", "c/d"}},
 	}
 	for _, tt := range tests {

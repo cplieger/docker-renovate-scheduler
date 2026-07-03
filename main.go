@@ -163,7 +163,7 @@ func runBuiltin(ctx context.Context, marker *health.Marker, interval, timeout ti
 
 // runExternal idles until shutdown. The built-in scheduler is disabled
 // (SCHED_INTERVAL=off); runs are triggered out-of-band via the `run`
-// subcommand (e.g. an Ofelia job-exec on a cron schedule, or a Komodo action
+// subcommand (e.g. an Ofelia job-exec on a cron schedule, or an external action
 // on a release webhook). The marker is set healthy on boot so an idle,
 // not-yet-triggered container reads healthy; each `run` invocation updates
 // it on disk.
@@ -185,7 +185,7 @@ func runExternal(ctx context.Context, marker *health.Marker, drainTimeout time.D
 	marker.Set(false)
 
 	// An external `run` (a separate `docker exec` process — an Ofelia job-exec
-	// or the Komodo release-trigger action) may be mid-pass when the container
+	// or an external release-trigger action) may be mid-pass when the container
 	// is asked to stop, typically a redeploy of the stack landing on top of an
 	// in-progress run. PID 1 can't wait() on that separate process, but the run
 	// holds the overlap flock, so wait for it to release before exiting. Docker

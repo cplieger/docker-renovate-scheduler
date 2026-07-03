@@ -12,7 +12,7 @@ import (
 // single overlap-prevention mechanism for both scheduling modes: the
 // built-in ticker (in-process, startup run vs interval run) and the
 // external `run` subcommand (cross-process, a scheduled Ofelia exec racing
-// a Komodo-triggered exec or the built-in ticker). flock associates the
+// an externally-triggered exec or the built-in ticker). flock associates the
 // lock with the open file description, so two independent os.OpenFile calls
 // contend even within one process.
 type fileLock struct {

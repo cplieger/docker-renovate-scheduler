@@ -18,7 +18,7 @@ module.exports = {
   // Which repositories to process. Pick ONE approach:
   autodiscover: true,
   // autodiscoverFilter: ['cplieger/*'],
-  // repositories: ['cplieger/homelab', 'cplieger/docker-renovate-scheduler'],
+  // repositories: ['owner/repo', 'cplieger/docker-renovate-scheduler'],
 
   // Onboarding behaviour for a self-hosted org bot.
   onboardingConfig: {
