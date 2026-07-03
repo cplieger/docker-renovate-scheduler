@@ -3,7 +3,6 @@
 [![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/docker-renovate-scheduler/badges/size.json)](https://github.com/cplieger/docker-renovate-scheduler/pkgs/container/docker-renovate-scheduler)
 ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)
 ![base: renovate/renovate](https://img.shields.io/badge/base-renovate%2Frenovate-1A1F6C)
-[![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/docker-renovate-scheduler)](https://goreportcard.com/report/github.com/cplieger/docker-renovate-scheduler)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/docker-renovate-scheduler/badges/coverage.json)](https://github.com/cplieger/docker-renovate-scheduler/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/docker-renovate-scheduler/badges/mutation.json)](https://github.com/cplieger/docker-renovate-scheduler/issues?q=label%3Agremlins-tracker)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13208/badge)](https://www.bestpractices.dev/projects/13208)
@@ -16,7 +15,7 @@ Run [Renovate](https://github.com/renovatebot/renovate) as a resident, always-on
 
 The Renovate CLI is designed to run once and exit; the usual self-hosted patterns schedule it with `cron` or a Kubernetes `CronJob`. If your stack schedules every other workload with always-on containers and external triggers (Ofelia, a webhook, a central orchestrator), an ephemeral `docker run` per cycle is the odd one out. This image keeps Renovate **resident** and lets you drive it the same way as everything else, while reusing the upstream image's carefully-assembled runtime.
 
-It deliberately has **no built-in HTTP/webhook server** — triggering is delegated to whatever already schedules your containers (`docker exec`, Ofelia, a Komodo action on a release webhook, …).
+It deliberately has **no built-in HTTP/webhook server** — triggering is delegated to whatever already schedules your containers (`docker exec`, Ofelia, a webhook-driven action on a release, …).
 
 ### Not distroless — on purpose
 
@@ -54,7 +53,7 @@ Everything else is Renovate's own configuration. The essentials for a self-hoste
 
 By default the container runs as the base image's non-root user, UID `12021`, which has a writable home and a working [containerbase](https://github.com/containerbase/base): Renovate installs toolchains on demand and regenerates lockfiles out of the box.
 
-If you override the user (Compose `user:`) to match host volume ownership (e.g. a `568:568` rootless homelab UID), that UID has **no home directory** (`HOME=/`), so every tool cache that defaults under `$HOME` becomes unwritable and two things break **silently**:
+If you override the user (Compose `user:`) to match host volume ownership (e.g. a `1000:1000` rootless UID), that UID has **no home directory** (`HOME=/`), so every tool cache that defaults under `$HOME` becomes unwritable and two things break **silently**:
 
 - containerbase's on-demand tool installs fail (`binarySource=install` can't write `/opt/containerbase`); and
 - lockfile/artifact regeneration fails: `go mod tidy` can't refresh `go.sum`, `npm install` can't refresh `package-lock.json`. The dependency PR is still raised, but manifest-only (`go.mod` / `package.json`), and then fails the consuming repo's CI (`missing go.sum entry`, or `npm ci` reporting the lock out of sync).
@@ -64,7 +63,7 @@ The scheduler **logs a startup warning** when it detects this state (a non-defau
 If you must run as a custom UID, use the tools baked into the image and route every cache to a writable, mounted volume:
 
 ```yaml
-    user: "568:568"                        # your rootless UID
+    user: "1000:1000"                      # your rootless UID
     environment:
       RENOVATE_BINARY_SOURCE: "global"     # use the baked tools; skip the on-demand installer
       GOPATH: "/data/go"
@@ -129,26 +128,26 @@ The run exits 0 on success, 1 on failure, and updates the same health marker the
 > **Run the trigger as the same user the container runs as.** The run-lock and
 > health marker live in `/tmp`, owned by whoever the container runs as — the
 > image's default `12021`, or whatever you set via Compose `user:`. A bare
-> `docker exec` (and a Komodo `execute_terminal`) inherits the container's user
+> `docker exec` inherits the container's user
 > automatically, but Ofelia's `job-exec` does **not**: it runs as the image's
 > default user unless you set `user:` explicitly. If the trigger's user differs
 > from the container's, every run fails with
 > `cannot acquire run lock … permission denied`. So set Ofelia's `user:` to
-> match your Compose `user:` — e.g. `"568"` if you run the container rootless
-> as `568:568`, or leave the default `12021` if you don't override the user.
+> match your Compose `user:` — e.g. `"1000"` if you run the container rootless
+> as `1000:1000`, or leave the default `12021` if you don't override the user.
 
 The `docker exec` trigger is clean — no entrypoint prefix needed. The scheduler routes Renovate through the image entrypoint internally, so a bare exec still gets the full containerbase environment.
 
 #### Overlap & coalescing
 
-A trigger that races an in-flight run does **not** run twice and is **not** lost. The loser sets a single-slot "rerun pending" flag — any number of overlapping triggers collapse into one ("max 1 wait") — and when the active run finishes it immediately reruns once to pick up the queued work, then settles. This matters for release-driven triggering (e.g. a burst of `release` webhooks firing a Komodo action): without coalescing, a trigger that lands mid-run would otherwise wait for the next interval. Reruns are bounded by a small internal cap so a relentless trigger source can't pin the lock, and a failed run stops the loop rather than hammering a broken Renovate. Ofelia's `no-overlap` still prevents redundant _triggers_ from queuing on the scheduler side.
+A trigger that races an in-flight run does **not** run twice and is **not** lost. The loser sets a single-slot "rerun pending" flag — any number of overlapping triggers collapse into one ("max 1 wait") — and when the active run finishes it immediately reruns once to pick up the queued work, then settles. This matters for release-driven triggering (e.g. a burst of `release` webhooks firing an external action): without coalescing, a trigger that lands mid-run would otherwise wait for the next interval. Reruns are bounded by a small internal cap so a relentless trigger source can't pin the lock, and a failed run stops the loop rather than hammering a broken Renovate. Ofelia's `no-overlap` still prevents redundant _triggers_ from queuing on the scheduler side.
 
 ## Graceful shutdown
 
 On `SIGTERM`/`SIGINT` (a `docker stop`, or a redeploy that recreates the container) the scheduler does not abandon an in-flight run. It waits for the current run to finish before exiting:
 
 - **Built-in mode** waits for the in-process run (startup or interval) to complete.
-- **External mode** waits for an in-flight `run` — a separate `docker exec` process — to release the shared overlap lock. This is the case that bites a release-driven setup: a redeploy landing on top of an Ofelia- or Komodo-triggered run would otherwise `SIGKILL` it (exit 137) and report the scheduled job as failed.
+- **External mode** waits for an in-flight `run` — a separate `docker exec` process — to release the shared overlap lock. A redeploy that lands on an in-flight triggered run would otherwise `SIGKILL` it (exit 137) and report the scheduled job as failed.
 
 Docker terminates the container once the process exits **or** `stop_grace_period` elapses, whichever comes first. So set `stop_grace_period` long enough to cover your **slowest** run -- a cold first run (empty `./data` + on-demand tool installs) can take as long as the 10m healthcheck `start_period`; otherwise Docker `SIGKILL`s the run before the drain completes:
 
@@ -188,7 +187,7 @@ The image bakes a conservative `--start-period=30s`; the example `compose.yaml` 
 
 ## Security
 
-No network listener, no HTTP server, no exposed ports. The unused `docker` CLI is stripped from the base image, removing that container-execution surface along with `binarySource=docker` support. Runs as the base image's non-root user (UID `12021`) by default, or whatever you set via Compose `user:` (e.g. `568:568` to match a rootless homelab UID); the `/tmp` run-lock and health marker are owned by that user, so external run triggers must execute as it (see [Scheduling modes](#scheduling-modes)). The scheduler executes Renovate via the image entrypoint with an explicit argument slice (no shell). Renovate's token is never logged by the scheduler. The base image is Renovate's own (AGPL-3.0); the scheduler wrapper is GPL-3.0.
+No network listener, no HTTP server, no exposed ports. The unused `docker` CLI is stripped from the base image, removing that container-execution surface (see [Not distroless — on purpose](#not-distroless--on-purpose)). Runs as the base image's non-root user (UID `12021`) by default, or whatever you set via Compose `user:` (e.g. `1000:1000` to match a rootless host UID); the `/tmp` run-lock and health marker are owned by that user, so external run triggers must execute as it (see [Scheduling modes](#scheduling-modes)). The scheduler executes Renovate via the image entrypoint with an explicit argument slice (no shell). Renovate's token is never logged by the scheduler. The base image is Renovate's own (AGPL-3.0); the scheduler wrapper is GPL-3.0.
 
 ## Dependencies
 
@@ -206,7 +205,7 @@ This image packages [Renovate](https://github.com/renovatebot/renovate) by [Mend
 
 ## Disclaimer
 
-Built with care and following security best practices, but intended for **homelab use**. No guarantees of fitness for production. Use at your own risk.
+This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
 
 This project was built with AI-assisted tooling using [Claude Opus](https://www.anthropic.com/claude) and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
 
