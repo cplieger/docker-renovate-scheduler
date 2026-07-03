@@ -10,25 +10,22 @@ to preserve, and how to run the checks locally.
 
 ## Why this image wraps `renovate/renovate` (not distroless)
 
-Unlike the sibling `cplieger/docker-*` schedulers (fclones, rsync) which are
-distroless single binaries, this one's final stage is
-`FROM renovate/renovate:<version>`. Renovate is a Node + git application that
-installs tool versions on demand at runtime via containerbase
-(`binarySource=install`), so every run must inherit the containerbase
-environment (PATH, `CONTAINERBASE_*`, `USER_*`) that the upstream
-`renovate-entrypoint.sh` sets up. The scheduler therefore **execs renovate
-through that entrypoint** rather than invoking the `renovate` binary directly —
-see `renovateInvocation` in `renovate.go`. Do not "simplify" this to a bare
+The [README's "Not distroless" section](README.md#not-distroless--on-purpose)
+covers _why_ the final stage is `FROM renovate/renovate:<version>` (Renovate
+installs toolchains at runtime via containerbase, so there is no static form to
+drop on `scratch`). The contributor-facing consequence: every run must inherit
+the containerbase environment (PATH, `CONTAINERBASE_*`, `USER_*`) that the
+upstream `renovate-entrypoint.sh` sets up, so the scheduler **execs renovate
+through that entrypoint** rather than invoking the `renovate` binary directly
+(see `renovateInvocation` in `renovate.go`). Do not "simplify" this to a bare
 `exec renovate`; tool installation breaks without the entrypoint's env.
 
-The one thing we strip from that base is the bundled `docker` CLI
-(`/opt/containerbase/tools/docker` plus its shim and PATH symlink). Renovate
-shells out to it only under `binarySource=docker`; we run the default
-`binarySource=install`, so it is dead weight, and removing it clears the
-Go-stdlib CVEs scanners flag against that unused ~42 MB binary. This was
-verified against Renovate's exec layer (`lib/util/exec/`): every `docker`
-invocation is gated on `binarySource === 'docker'`, and the docker datasource
-resolves digests over HTTP, not via the CLI.
+The Dockerfile strips the bundled `docker` CLI from that base
+(`/opt/containerbase/tools/docker` plus its shim and PATH symlink); the README
+carries the user-facing rationale. That removal was verified safe against
+Renovate's exec layer (`lib/util/exec/`): every `docker` invocation is gated on
+`binarySource === 'docker'`, and the docker datasource resolves digests over
+HTTP, not via the CLI.
 
 ## Layout
 
@@ -93,8 +90,8 @@ never parses or rewrites Renovate config.
   `time.Ticker` loop, first run at start.
 - **External**: `SCHED_INTERVAL=off` (or `disabled` / `0` / `0s`) → the
   container idles and an external scheduler triggers
-  `docker exec renovate docker-renovate-scheduler run`. This is how the homelab
-  drives it (Ofelia hourly + a Komodo action for ad-hoc runs).
+  `docker exec renovate docker-renovate-scheduler run` (e.g. Ofelia on a fixed
+  cadence, or a webhook-driven action for ad-hoc runs).
 
 ## Conventions and gotchas
 
