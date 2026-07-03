@@ -47,7 +47,7 @@ const (
 	// serialises runs both in-process (the built-in ticker racing the
 	// startup run) and cross-process (an external `run` invocation racing
 	// the built-in ticker or a manual docker exec — e.g. an Ofelia tick
-	// racing a Komodo-triggered exec). Renovate is not safe to run
+	// racing an externally-triggered exec). Renovate is not safe to run
 	// concurrently against the same repositories and base dir. /tmp is
 	// writable by Renovate's non-root user, same place as the health marker.
 	lockFilePath = "/tmp/.docker-renovate-scheduler.lock"

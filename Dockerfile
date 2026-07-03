@@ -73,7 +73,7 @@ ENV RENOVATE_BASE_DIR=/data
 # lands with a stale go.sum. Installing Go here as root makes it
 # world-executable for any runtime UID; GOTOOLCHAIN=auto then lets Go fetch a
 # newer toolchain into the writable RENOVATE_BASE_DIR cache when a repo's
-# go.mod requires a higher version than the baked one. (The homelab itself now
+# go.mod requires a higher version than the baked one. (One consumer now
 # runs the image default 12021:0, but this stays load-bearing for external
 # rootless operators -- see the README "Running as a non-default user".)
 # renovate: datasource=golang-version depName=go

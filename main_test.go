@@ -298,7 +298,7 @@ func TestRun_ReturnsErrorWhenBaseDirUnwritable(t *testing.T) {
 
 // TestRunRun_ReturnsExitOneWhenBaseDirUnwritable pins the external `run`
 // subcommand's exit-code contract: an unwritable RENOVATE_BASE_DIR must exit
-// non-zero (1) so the external trigger (an Ofelia job-exec / Komodo action,
+// non-zero (1) so the external trigger (an Ofelia job-exec / external action,
 // which treats a non-zero exit as a failed job) surfaces the misconfiguration
 // instead of silently reporting success. Returns before the command runner or
 // marker is touched, so no real Renovate entrypoint or /tmp marker is involved.
