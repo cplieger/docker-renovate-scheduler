@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -66,16 +67,17 @@ const (
 // Renovate logs separately to stdout/stderr (set LOG_FORMAT=json); this
 // logger covers only the scheduler's own lifecycle lines.
 func setupLogger() {
+	// slog.Level.UnmarshalText parses debug/info/warn/error case-insensitively
+	// (and offset syntax such as "warn+1") but lacks the long-form "warning"
+	// alias, so map it before parsing. An unrecognized value keeps the Info
+	// default, matching the prior switch's fall-through.
+	name := strings.ToLower(strings.TrimSpace(getEnv("LOG_LEVEL", "info")))
+	if name == "warning" {
+		name = "warn"
+	}
 	level := slog.LevelInfo
-	switch strings.ToLower(strings.TrimSpace(getEnv("LOG_LEVEL", "info"))) {
-	case "debug":
-		level = slog.LevelDebug
-	case "info":
+	if err := level.UnmarshalText([]byte(name)); err != nil {
 		level = slog.LevelInfo
-	case "warn", "warning":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 }
@@ -83,10 +85,7 @@ func setupLogger() {
 // getEnv returns the environment value for key, or fallback when unset or
 // empty.
 func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
+	return cmp.Or(os.Getenv(key), fallback)
 }
 
 // baseDir returns Renovate's base directory (RENOVATE_BASE_DIR), defaulting
