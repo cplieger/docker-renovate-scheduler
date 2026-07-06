@@ -112,7 +112,20 @@ docker exec renovate docker-renovate-scheduler run            # all configured r
 docker exec renovate docker-renovate-scheduler run owner/repo # just one (positional args go straight to Renovate)
 ```
 
-The run exits 0 on success, 1 on failure, and updates the same health marker the long-running container reports. Example with [Ofelia](https://github.com/mcuadros/ofelia):
+The run exits 0 on success, 1 on failure, and updates the same health marker the long-running container reports.
+
+> **Log visibility in external mode.** A triggered `run` is a separate
+> `docker exec` process, so its output -- the scheduler's own `renovate run
+> starting`/`complete` lifecycle lines _and_ Renovate's streamed logs -- goes to
+> the `docker exec` caller's stream (the Ofelia job log, the webhook action's
+> output), **not** the container's main stdout. A pipeline scraping the
+> container's stdout (Docker log driver -> Alloy/Promtail/Loki) sees only the
+> daemon's boot/shutdown lines for an external-mode container, never per-run
+> outcomes -- so read triggered-run results from the trigger itself. The
+> stdout-collection note above applies to **built-in** mode, where the run is
+> PID 1.
+
+Example with [Ofelia](https://github.com/mcuadros/ofelia):
 
 ```yaml
     environment:

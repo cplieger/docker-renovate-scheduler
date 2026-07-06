@@ -85,10 +85,13 @@ USER 12021
 
 # ENTRYPOINT is inherited from the base image (renovate-entrypoint.sh, which
 # exec-chains to the containerbase docker-entrypoint.sh). It sets up the
-# containerbase environment and then execs CMD — our scheduler daemon — so the
+# containerbase environment and then execs CMD, our scheduler daemon, so the
 # daemon and the Renovate children it spawns get that environment. Runs
 # triggered by a bare `docker exec` bypass ENTRYPOINT, so the scheduler also
 # re-routes each Renovate invocation through the same entrypoint internally.
+# The HEALTHCHECK bypasses the ENTRYPOINT above, so it calls the binary by
+# absolute path (no containerbase PATH setup); the CMD below is passed through
+# the ENTRYPOINT, which sets up PATH, so its bare name resolves.
 HEALTHCHECK --interval=60s --timeout=5s --retries=3 --start-period=30s \
     CMD ["/usr/local/bin/docker-renovate-scheduler", "health"]
 CMD ["docker-renovate-scheduler", "daemon"]

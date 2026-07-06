@@ -40,7 +40,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "run":
-		os.Exit(runRun(context.Background(), os.Args[2:]))
+		os.Exit(runRun(context.Background(), os.Args[2:], defaultCommandRunner))
 	default:
 		setupLogger()
 		slog.Error("unknown subcommand", "command", cmd, "valid", "daemon, run, health")
@@ -205,7 +205,7 @@ func runExternal(ctx context.Context, marker *health.Marker, drainTimeout time.D
 // restrict the run to specific repositories. Unlike the daemon it does not
 // clean up the marker on exit — the file must persist so the running
 // container's healthcheck reflects this run.
-func runRun(ctx context.Context, repoArgs []string) int {
+func runRun(ctx context.Context, repoArgs []string, newCmd commandRunner) int {
 	setupLogger()
 	warnIfRootlessCacheUnwritable()
 
@@ -219,7 +219,7 @@ func runRun(ctx context.Context, repoArgs []string) int {
 
 	timeout := loadRunTimeout()
 	marker := health.NewMarker(healthMarkerPath)
-	if ok := runRenovatePass(ctx, ctx, timeout, "external", repoArgs, defaultCommandRunner); !ok {
+	if ok := runRenovatePass(ctx, ctx, timeout, "external", repoArgs, newCmd); !ok {
 		marker.Set(false)
 		return 1
 	}
