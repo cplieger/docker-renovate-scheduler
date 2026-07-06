@@ -312,7 +312,53 @@ func TestRunRun_ReturnsExitOneWhenBaseDirUnwritable(t *testing.T) {
 	}
 	t.Setenv("RENOVATE_BASE_DIR", file)
 
-	if code := runRun(context.Background(), nil); code != 1 {
+	if code := runRun(context.Background(), nil, defaultCommandRunner); code != 1 {
 		t.Errorf("runRun() = %d, want 1 when the base dir is unwritable", code)
+	}
+}
+
+// TestRunRun_SuccessSetsMarkerHealthyAndReturnsZero pins the external `run`
+// subcommand's success half of the exit-code contract: a Renovate pass that
+// exits 0 makes runRun set the health marker healthy and return exit 0, so the
+// external trigger (an Ofelia job-exec / release-webhook action, which reads a
+// zero exit as a successful job) sees success. A fake command runner stands in
+// for the real renovate entrypoint, which is absent in tests. Not parallel: it
+// touches the package-global lock / rerun-flag / health-marker paths in /tmp.
+func TestRunRun_SuccessSetsMarkerHealthyAndReturnsZero(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	t.Cleanup(func() { _ = os.Remove(rerunFlagPath); _ = os.Remove(healthMarkerPath) })
+	clearRerunPending(rerunFlagPath)
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+
+	code := runRun(context.Background(), nil, recordingRunner("true", nil))
+
+	if code != 0 {
+		t.Errorf("runRun() = %d, want 0 when the Renovate pass succeeds", code)
+	}
+	if _, err := os.Stat(healthMarkerPath); err != nil {
+		t.Errorf("health marker not set healthy after a successful run: %v", err)
+	}
+}
+
+// TestRunRun_RenovateFailureSetsMarkerUnhealthyAndReturnsOne pins the failure
+// half: a Renovate pass that exits non-zero makes runRun set the marker
+// unhealthy and return exit 1 (a failed job for the external trigger). Distinct
+// from the base-dir-error path in TestRunRun_ReturnsExitOneWhenBaseDirUnwritable
+// -- here the base dir is writable and the failure originates in the pass.
+func TestRunRun_RenovateFailureSetsMarkerUnhealthyAndReturnsOne(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	t.Cleanup(func() { _ = os.Remove(rerunFlagPath); _ = os.Remove(healthMarkerPath) })
+	clearRerunPending(rerunFlagPath)
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+
+	code := runRun(context.Background(), nil, recordingRunner("false", nil))
+
+	if code != 1 {
+		t.Errorf("runRun() = %d, want 1 when the Renovate pass exits non-zero", code)
+	}
+	if _, err := os.Stat(healthMarkerPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("health marker must be absent (unhealthy) after a failed run; stat err = %v, want not-exist", err)
 	}
 }

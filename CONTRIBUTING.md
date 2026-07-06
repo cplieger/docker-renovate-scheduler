@@ -34,8 +34,11 @@ Go module `github.com/cplieger/docker-renovate-scheduler`; binary
 
 - `main.go` — subcommand dispatch (`daemon` / `run` / `health`) and the
   composition roots. `runBuiltin` drives the `time.Ticker` loop; `runExternal`
-  idles until SIGTERM (external-trigger mode); both share `runRun`. Shutdown is
-  driven by `signal.NotifyContext`.
+  idles until SIGTERM (external-trigger mode); the `run` subcommand (`runRun`)
+  performs a single pass. `runBuiltin` and `runRun` both funnel through
+  `runRenovatePass`; `runExternal` runs no pass itself -- it only drains an
+  externally-triggered `run` on shutdown. Shutdown is driven by
+  `signal.NotifyContext`.
 - `config.go` — env loading. `loadInterval` parses `SCHED_INTERVAL` with the
   `off` / `disabled` / `0` / `0s` sentinels (→ external mode); `loadRunTimeout`
   parses `SCHED_TIMEOUT` (default 1h); plus `setupLogger`, `getEnv`, and the

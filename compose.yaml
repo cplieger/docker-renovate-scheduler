@@ -9,6 +9,7 @@ services:
     environment:
       TZ: "Europe/Paris"
       SCHED_INTERVAL: "6h"  # built-in cadence (Go duration); "off" = external trigger; see README "Scheduling modes"
+      LOG_FORMAT: "json"  # structured Renovate logs for Alloy/Loki/Grafana; see README "What it does"
       # Renovate's own config (RENOVATE_*) is passed straight through:
       RENOVATE_PLATFORM: "github"
       RENOVATE_AUTODISCOVER: "true"  # or set RENOVATE_REPOSITORIES
