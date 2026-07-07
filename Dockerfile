@@ -77,7 +77,7 @@ ENV RENOVATE_BASE_DIR=/data
 # runs the image default 12021:0, but this stays load-bearing for external
 # rootless operators -- see the README "Running as a non-default user".)
 # renovate: datasource=golang-version depName=go
-ARG GOLANG_VERSION=1.26.4
+ARG GOLANG_VERSION=1.26.5
 RUN install-tool golang "${GOLANG_VERSION}"
 ENV GOTOOLCHAIN=auto
 
