@@ -29,7 +29,7 @@ One deliberate trim: the bundled `docker` CLI is removed from the image. Renovat
 - Routes every Renovate invocation through the image's own entrypoint so the containerbase environment (`binarySource=install`) is set up — even for runs triggered by a bare `docker exec`, which bypasses the image `ENTRYPOINT`.
 - Overlap-guards runs with an advisory `flock`, so a scheduled run and a manually/externally triggered run never execute two Renovate processes against the same base directory at once. A trigger that arrives while a run is in flight isn't dropped — it queues a single coalesced rerun ("max 1 wait") that fires as soon as the current run finishes.
 - File-marker healthcheck via [`github.com/cplieger/health`](https://github.com/cplieger/health): unhealthy when the last run failed, recovers on the next clean run.
-- Streams Renovate's own structured logs straight through to stdout/stderr (set `LOG_FORMAT=json`) for collection by Alloy/Promtail/Loki. The scheduler neither captures nor parses Renovate's output; it emits only its own lifecycle lines.
+- Streams Renovate's own structured logs straight through to stdout/stderr (set `LOG_FORMAT=json`) for collection by Alloy/Promtail/Loki. The scheduler neither captures nor parses Renovate's output; it emits only its own lifecycle lines, which carry UTC timestamps regardless of the container's `TZ`.
 
 ## Configuration
 
