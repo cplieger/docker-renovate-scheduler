@@ -98,7 +98,7 @@ never parses or rewrites Renovate config.
 
 ## Conventions and gotchas
 
-- Logs are slog logfmt to stderr (`key=value`); always use key/value pairs,
+- Logs are slog logfmt to stderr (`key=value`) with UTC timestamps via a `utcTimeAttr` `ReplaceAttr` (so the image needs no `TZ` and embeds no `time/tzdata`); always use key/value pairs,
   never a formatted string (the `sloglint` linter enforces it).
 - `main()` orchestration and the `exec.CommandContext` call to renovate are
   intentionally not unit-tested (process-level I/O, validated by container logs
