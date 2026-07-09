@@ -27,7 +27,7 @@ NAME="smoke-renovate-scheduler-$$"
 # 60s intervals in case the first probe is slightly delayed on a cold boot.
 TIMEOUT=150
 
-# shellcheck disable=SC2329  # invoked indirectly via trap
+# shellcheck disable=SC2317,SC2329  # invoked indirectly via trap
 cleanup() {
   code=$?
   # Dump container logs only on failure (a passing run stays quiet).
