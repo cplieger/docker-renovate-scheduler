@@ -71,6 +71,20 @@ var defaultCommandRunner scheduler.CommandRunner = func() scheduler.CommandRunne
 // each pass — reruns once on completion if it was set during the pass.
 var rerunFlag = scheduler.NewRerunFlag(rerunFlagPath)
 
+// drainFlag is the daemon->exec-child shutdown latch. It reuses the shared
+// library's single-slot file-flag primitive (the same Set/Pending/Clear
+// boolean-file mechanism as rerunFlag) as a one-bit shutdown signal on a
+// distinct file: the daemon (main.go's runExternal) sets it on SIGTERM, and the
+// external `run` coalescing loop reads it before starting each pass. Because
+// `docker stop` delivers SIGTERM only to PID 1 (the daemon), never to the
+// separate `docker exec` run process, this filesystem marker is the ONLY way
+// the daemon can tell an in-flight run to stop launching coalesced reruns and
+// drain. It is the fix for the exit-137 collision where a redeploy landing on a
+// run that was coalescing a release-webhook burst killed a run still holding
+// the lock long past stop_grace_period. Same mechanism as rerunFlag, different
+// signal and different file.
+var drainFlag = scheduler.NewRerunFlag(drainMarkerPath)
+
 // maxCoalescedReruns bounds how many times one holder will rerun to drain
 // queued triggers before releasing the lock, so a relentless trigger source
 // can't pin it indefinitely. A realistic burst (many release webhooks at
@@ -78,6 +92,28 @@ var rerunFlag = scheduler.NewRerunFlag(rerunFlagPath)
 // cap only bites under a pathological continuous storm, after which the holder
 // releases the lock and the next trigger (or the next scheduled tick) resumes.
 const maxCoalescedReruns = 8
+
+// stopBeforePass reports whether the coalescing loop should stop before
+// starting the pass at index reruns because shutdown has been signalled --
+// either this process received SIGTERM (shutdownCtx: the built-in ticker's loop
+// context, or the cancelable external `run`) or the daemon received it and set
+// the drain latch (drainFlag). In external mode `docker stop` signals only PID
+// 1, so an exec-child `run` learns of the container's shutdown ONLY through the
+// latch; without stopping here it would keep launching coalesced reruns until
+// stop_grace_period expired and Docker SIGKILLed it (exit 137, the false
+// OfeliaJobFailed). It logs the reason -- distinguishing a run that never
+// started from a rerun deferred after a completed pass -- and returns true to stop.
+func stopBeforePass(shutdownCtx context.Context, trigger string, reruns int) bool {
+	if shutdownCtx.Err() == nil && !drainFlag.Pending() {
+		return false
+	}
+	if reruns == 0 {
+		slog.Info("shutdown signalled before run started; skipping", "trigger", trigger)
+	} else {
+		slog.Info("shutdown signalled during run; deferring queued rerun", "trigger", trigger)
+	}
+	return true
+}
 
 // runRenovatePass acquires the overlap lock and runs Renovate, coalescing
 // overlapping triggers. It returns ok=true on success — either the final pass
@@ -93,11 +129,13 @@ const maxCoalescedReruns = 8
 // during the pass, reruns on completion (bounded by maxCoalescedReruns). The
 // flag is cleared before the pass, not after, so a trigger arriving mid-run is
 // never lost.
-// shutdownCtx governs whether to START a pass/rerun (shutdown-aware); runCtx
-// governs execution lifetime (decoupled from shutdown in built-in mode, equal
-// to shutdownCtx in external mode). Splitting them lets an in-flight pass drain
-// uncancelled while a queued rerun is still suppressed once shutdown is
-// signalled, so a stop request is never followed by a fresh run.
+// Whether to START a pass/rerun is gated by stopBeforePass, shutdown-aware via
+// both shutdownCtx (this process's own SIGTERM) and the drain latch (the
+// daemon's SIGTERM, the only shutdown signal an external exec-child run
+// receives). runCtx governs execution lifetime (decoupled from shutdown in
+// built-in mode, equal to shutdownCtx in external mode). Splitting them lets an
+// in-flight pass drain uncancelled while a queued rerun is suppressed once
+// shutdown is signalled, so a stop request is never followed by a fresh run.
 func runRenovatePass(shutdownCtx, runCtx context.Context, timeout time.Duration, trigger string, repoArgs []string, newCmd scheduler.CommandRunner) (ok bool) {
 	lock, locked, lockErr := scheduler.TryLock(lockFilePath)
 	if !locked && lockErr == nil {
@@ -125,6 +163,13 @@ func runRenovatePass(shutdownCtx, runCtx context.Context, timeout time.Duration,
 	defer lock.Unlock()
 
 	for reruns := 0; ; reruns++ {
+		// Do not START a pass once shutdown is signalled; drain instead (see
+		// stopBeforePass). The in-flight pass, if any, already returned below and
+		// is never abandoned -- only not-yet-started work is deferred.
+		if stopBeforePass(shutdownCtx, trigger, reruns) {
+			return true
+		}
+
 		// Clear before the pass so only triggers arriving *during* it queue
 		// the next rerun (no lost wakeups). The first iteration also clears
 		// any stale flag left by a holder that exited mid-window.
@@ -143,17 +188,10 @@ func runRenovatePass(shutdownCtx, runCtx context.Context, timeout time.Duration,
 		if !rerunFlag.Pending() {
 			return true
 		}
-		// Shutdown gate: a rerun is queued, but if shutdown has been signalled
-		// don't START a fresh pass. In built-in mode runCtx is decoupled from
-		// shutdown (context.WithoutCancel), so without this check the loop would
-		// launch another runRenovateOnce that drains for a full SCHED_TIMEOUT
-		// after SIGTERM -- risking the stop_grace_period overrun (exit-137
-		// SIGKILL) this drain feature exists to prevent. The in-flight pass
-		// already completed above; we only defer the *next* one.
-		if shutdownCtx.Err() != nil {
-			slog.Info("shutdown signalled during run; deferring queued rerun", "trigger", trigger)
-			return true
-		}
+		// A rerun is queued. The pre-pass gate at the top of the next iteration
+		// re-checks shutdown (shutdownCtx and the drain latch) before actually
+		// starting it, so a stop signalled now defers the rerun instead of
+		// launching a fresh pass that would drain past stop_grace_period.
 		if reruns >= maxCoalescedReruns {
 			slog.Warn("coalesced rerun cap reached; deferring remaining work to next trigger",
 				"trigger", trigger, "cap", maxCoalescedReruns)

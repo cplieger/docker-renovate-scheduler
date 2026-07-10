@@ -63,6 +63,18 @@ const (
 	// into exactly one queued rerun ("max 1 wait"). Sibling of the lock file
 	// in the same Renovate-writable /tmp.
 	rerunFlagPath = "/tmp/.docker-renovate-scheduler.rerun"
+
+	// drainMarkerPath is the daemon->exec-child shutdown latch. On SIGTERM the
+	// daemon (PID 1) sets it; an in-flight external `run` process checks it
+	// before launching each coalesced pass and stops (drains) once it is set.
+	// It exists because `docker stop` delivers SIGTERM only to PID 1, never to
+	// the separate `docker exec` run process, so the child cannot observe the
+	// container's shutdown through its own signal context — this marker is the
+	// only channel by which the daemon can tell it to stop starting new passes
+	// and drain within stop_grace_period. Sibling of the lock and rerun flag in
+	// the same Renovate-writable /tmp; /tmp is per-container so it never
+	// survives a recreate (no cross-run staleness).
+	drainMarkerPath = "/tmp/.docker-renovate-scheduler.draining"
 )
 
 // setupLogger installs a slog text handler that emits canonical logfmt

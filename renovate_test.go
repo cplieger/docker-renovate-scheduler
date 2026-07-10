@@ -53,7 +53,23 @@ func recordingRunner(bin string, ran *bool) scheduler.CommandRunner {
 	}
 }
 
+// clearRunState resets the package-global /tmp coordination files that tests
+// share -- the rerun flag and the drain latch -- and registers their removal on
+// cleanup. Both default to absent; a leak from a prior test would otherwise
+// make the coalescing loop defer or skip a pass unexpectedly, since the loop's
+// pre-pass gate returns early when the drain latch is present.
+func clearRunState(t *testing.T) {
+	t.Helper()
+	rerunFlag.Clear()
+	drainFlag.Clear()
+	t.Cleanup(func() {
+		_ = os.Remove(rerunFlagPath)
+		_ = os.Remove(drainMarkerPath)
+	})
+}
+
 func TestRunRenovatePass_Success(t *testing.T) {
+	clearRunState(t)
 	ran := false
 	ok := runRenovatePass(context.Background(), context.Background(), time.Minute, "test", nil, recordingRunner("true", &ran))
 	if !ok {
@@ -65,6 +81,7 @@ func TestRunRenovatePass_Success(t *testing.T) {
 }
 
 func TestRunRenovatePass_Failure(t *testing.T) {
+	clearRunState(t)
 	ok := runRenovatePass(context.Background(), context.Background(), time.Minute, "test", nil, recordingRunner("false", nil))
 	if ok {
 		t.Error("runRenovatePass() = true, want false when Renovate exits non-zero")
@@ -75,8 +92,7 @@ func TestRunRenovatePass_Failure(t *testing.T) {
 // coalescing: while the lock is held, a pass is a deliberate no-op success,
 // Renovate is never invoked, and a single rerun is queued for the holder.
 func TestRunRenovatePass_QueuesRerunWhenLocked(t *testing.T) {
-	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	rerunFlag.Clear()
+	clearRunState(t)
 
 	held, ok, err := scheduler.TryLock(lockFilePath)
 	if err != nil || !ok {
@@ -115,8 +131,7 @@ func flagMarkingRunner(bin string, calls *int, markCount int) scheduler.CommandR
 // during the first pass, so the loop runs twice (initial + one rerun) then
 // stops — multiple overlapping triggers collapse into a single rerun.
 func TestRunRenovatePass_CoalescedRerun(t *testing.T) {
-	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	rerunFlag.Clear()
+	clearRunState(t)
 
 	calls := 0
 	if ok := runRenovatePass(context.Background(), context.Background(), time.Minute, "test", nil, flagMarkingRunner("true", &calls, 1)); !ok {
@@ -131,8 +146,7 @@ func TestRunRenovatePass_CoalescedRerun(t *testing.T) {
 // when a trigger keeps arriving on every pass, the holder reruns at most
 // maxCoalescedReruns times before releasing the lock.
 func TestRunRenovatePass_RerunCapBounded(t *testing.T) {
-	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	rerunFlag.Clear()
+	clearRunState(t)
 
 	calls := 0
 	// markCount exceeds the cap: every pass re-queues, so only the cap stops it.
@@ -147,8 +161,7 @@ func TestRunRenovatePass_RerunCapBounded(t *testing.T) {
 // TestRunRenovatePass_NoRerunOnFailure verifies a failed pass stops the loop
 // even when a rerun was queued, so a failing Renovate isn't hammered.
 func TestRunRenovatePass_NoRerunOnFailure(t *testing.T) {
-	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	rerunFlag.Clear()
+	clearRunState(t)
 
 	calls := 0
 	if ok := runRenovatePass(context.Background(), context.Background(), time.Minute, "test", nil, flagMarkingRunner("false", &calls, 5)); ok {
@@ -169,8 +182,7 @@ func TestRunRenovatePass_NoRerunOnFailure(t *testing.T) {
 // cancelable argument; runCtx stays uncancelable (context.Background) to mirror
 // the built-in context.WithoutCancel wiring.
 func TestRunRenovatePass_NoRerunAfterShutdown(t *testing.T) {
-	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	rerunFlag.Clear()
+	clearRunState(t)
 
 	shutdownCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -190,6 +202,49 @@ func TestRunRenovatePass_NoRerunAfterShutdown(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("Renovate invoked %d times, want 1 (no fresh run may start after shutdown is signalled)", calls)
+	}
+}
+
+// TestRunRenovatePass_NoRerunWhenDrainLatchSet verifies the external-mode
+// shutdown path: when the daemon sets the drain latch during a pass (the only
+// way an exec-child `run` learns of the container's shutdown, since docker stop
+// signals only PID 1), the coalescing loop lets the in-flight pass finish and
+// defers the queued rerun instead of launching a fresh pass that would outlive
+// stop_grace_period and be SIGKILLed (exit 137). Mirrors NoRerunAfterShutdown
+// but via the cross-process latch, with neither context ever cancelled: an exec
+// child never receives the container SIGTERM, so only the latch can stop it.
+func TestRunRenovatePass_NoRerunWhenDrainLatchSet(t *testing.T) {
+	clearRunState(t)
+
+	calls := 0
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		calls++
+		rerunFlag.Set() // a trigger arrives mid-pass: a rerun is queued
+		drainFlag.Set() // the daemon signals shutdown during the pass
+		return exec.CommandContext(ctx, "true")
+	}
+	if ok := runRenovatePass(context.Background(), context.Background(), time.Minute, "external", nil, runner); !ok {
+		t.Error("runRenovatePass() = false, want true (draining after a completed pass is a clean outcome)")
+	}
+	if calls != 1 {
+		t.Errorf("Renovate invoked %d times, want 1 (no fresh pass may start once the drain latch is set)", calls)
+	}
+}
+
+// TestRunRenovatePass_SkipsPassWhenDrainLatchAlreadySet verifies a `run`
+// triggered while the daemon is already draining does no work: the loop's
+// pre-pass gate sees the latch on the first iteration and returns cleanly
+// without invoking Renovate, so a doomed pass is not started during teardown.
+func TestRunRenovatePass_SkipsPassWhenDrainLatchAlreadySet(t *testing.T) {
+	clearRunState(t)
+	drainFlag.Set()
+
+	ran := false
+	if ok := runRenovatePass(context.Background(), context.Background(), time.Minute, "external", nil, recordingRunner("true", &ran)); !ok {
+		t.Error("runRenovatePass() = false, want true (skipping work during shutdown is a clean outcome)")
+	}
+	if ran {
+		t.Error("Renovate was invoked despite the drain latch being set before the run started")
 	}
 }
 
