@@ -159,12 +159,24 @@ func runBuiltin(ctx context.Context, marker *health.Marker, interval, timeout ti
 // (SCHED_TIMEOUT) caps the wait at a single run's own maximum lifetime.
 func runExternal(ctx context.Context, marker *health.Marker, drainTimeout time.Duration) {
 	marker.Set(true)
+	// Clear any drain latch left by a prior lifecycle before idling. /tmp is
+	// per-container so this normally finds nothing, but it recovers the case
+	// where the daemon set the latch on shutdown and was then SIGKILLed, or the
+	// container was restarted in place (not recreated): a stale latch would
+	// otherwise make the next triggered `run` skip its pass indefinitely.
+	drainFlag.Clear()
 
 	slog.Info("container started (external scheduling)",
 		"base_dir", baseDir(), "trigger", "docker-renovate-scheduler run")
 
 	<-ctx.Done()
 	slog.Info("shutting down", "cause", context.Cause(ctx))
+	// Tell any in-flight external `run` to stop launching coalesced reruns and
+	// drain (see the drainFlag var doc). `docker stop` signals only PID 1, so an
+	// exec-child run learns of the container's shutdown only through this latch;
+	// without it a run coalescing a release-webhook burst outlives
+	// stop_grace_period and is SIGKILLed (exit 137, a false OfeliaJobFailed).
+	drainFlag.Set()
 	// Mark unhealthy immediately so observers see the signal before the run
 	// drain (a Renovate run can take a while).
 	marker.Set(false)

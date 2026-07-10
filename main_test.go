@@ -112,8 +112,7 @@ func TestWaitForRunToDrain_ProbeErrorExitsWithoutDraining(t *testing.T) {
 // mid-pass (the exit-137 bug the drain was added to fix) and fail the ctxErr
 // assertion below.
 func TestRunBuiltin_DrainsInFlightRunAfterShutdown(t *testing.T) {
-	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	rerunFlag.Clear()
+	clearRunState(t)
 	started := make(chan struct{})
 	proceed := make(chan struct{})
 	var ctxErr error
@@ -156,6 +155,7 @@ func TestRunBuiltin_DrainsInFlightRunAfterShutdown(t *testing.T) {
 // idle, correctly-running container, and nothing else would catch it.
 func TestRunExternal_BootsHealthyThenDrainsOnShutdown(t *testing.T) {
 	// Not parallel: probes the package-global lockFilePath in /tmp.
+	clearRunState(t) // runExternal sets the drain latch on shutdown; reset + clean it up
 	markerPath := filepath.Join(t.TempDir(), "marker")
 	marker := health.NewMarker(markerPath)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -191,6 +191,46 @@ func TestRunExternal_BootsHealthyThenDrainsOnShutdown(t *testing.T) {
 	}
 }
 
+// TestRunExternal_SetsDrainLatchOnShutdown pins the daemon half of the
+// external-mode drain handshake: runExternal clears the drain latch on boot (so
+// a stale latch left by an in-place restart can't wedge the first triggered run
+// into skipping forever) and sets it on shutdown (so an in-flight exec-child
+// `run` stops coalescing and drains rather than being SIGKILLed at
+// stop_grace_period, the exit-137 false OfeliaJobFailed). A pre-set stale latch
+// proves the boot clear; the post-shutdown assertion proves the set.
+func TestRunExternal_SetsDrainLatchOnShutdown(t *testing.T) {
+	clearRunState(t)
+	drainFlag.Set() // stale latch from a prior lifecycle; boot must clear it
+
+	marker := health.NewMarker(filepath.Join(t.TempDir(), "marker"))
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		runExternal(ctx, marker, 50*time.Millisecond)
+		close(done)
+	}()
+
+	// Boot clears the stale latch: poll until it's gone.
+	deadline := time.Now().Add(2 * time.Second)
+	for drainFlag.Pending() {
+		if time.Now().After(deadline) {
+			t.Fatal("runExternal did not clear the stale drain latch on boot")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("runExternal did not return after shutdown")
+	}
+	if !drainFlag.Pending() {
+		t.Error("runExternal did not set the drain latch on shutdown (an in-flight run would not learn to drain)")
+	}
+}
+
 // TestRunBuiltin_SkipsStartupRunWhenAlreadyShutDown covers runBuiltin's
 // startup-run skip-on-already-shutdown guard (the boot-time-redeploy guard):
 // a stop signalled before the startup goroutine is scheduled must NOT launch a
@@ -198,8 +238,7 @@ func TestRunExternal_BootsHealthyThenDrainsOnShutdown(t *testing.T) {
 // otherwise drain for a full SCHED_TIMEOUT and risk the exit-137 SIGKILL the
 // drain exists to prevent.
 func TestRunBuiltin_SkipsStartupRunWhenAlreadyShutDown(t *testing.T) {
-	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	rerunFlag.Clear()
+	clearRunState(t)
 
 	var ran atomic.Bool
 	runner := func(_ context.Context, _ string, _ ...string) *exec.Cmd {
@@ -236,8 +275,7 @@ func TestRunBuiltin_SkipsStartupRunWhenAlreadyShutDown(t *testing.T) {
 // fires; a short interval here proves the tick arm runs a pass (startup is the
 // 1st invocation, the first tick is the 2nd).
 func TestRunBuiltin_FiresIntervalRunAfterStartup(t *testing.T) {
-	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	rerunFlag.Clear()
+	clearRunState(t)
 
 	var calls atomic.Int64
 	gotTwo := make(chan struct{})
@@ -328,8 +366,8 @@ func TestRunRun_ReturnsExitOneWhenBaseDirUnwritable(t *testing.T) {
 func TestRunRun_SuccessSetsMarkerHealthyAndReturnsZero(t *testing.T) {
 	prev := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	t.Cleanup(func() { _ = os.Remove(rerunFlagPath); _ = os.Remove(healthMarkerPath) })
-	rerunFlag.Clear()
+	clearRunState(t)
+	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 
 	code := runRun(context.Background(), nil, recordingRunner("true", nil))
@@ -350,8 +388,8 @@ func TestRunRun_SuccessSetsMarkerHealthyAndReturnsZero(t *testing.T) {
 func TestRunRun_RenovateFailureSetsMarkerUnhealthyAndReturnsOne(t *testing.T) {
 	prev := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	t.Cleanup(func() { _ = os.Remove(rerunFlagPath); _ = os.Remove(healthMarkerPath) })
-	rerunFlag.Clear()
+	clearRunState(t)
+	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 
 	code := runRun(context.Background(), nil, recordingRunner("false", nil))
