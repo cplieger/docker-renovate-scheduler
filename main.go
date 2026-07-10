@@ -5,11 +5,11 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/cplieger/health"
+	"github.com/cplieger/scheduler"
 )
 
 // --- Main ---
@@ -89,7 +89,7 @@ func run(ctx context.Context) error {
 // run takes longer than the interval. Both goroutines share the wait group
 // so shutdown waits for in-flight work. Each run sets the health marker
 // from its outcome.
-func runBuiltin(ctx context.Context, marker *health.Marker, interval, timeout time.Duration, newCmd commandRunner) {
+func runBuiltin(ctx context.Context, marker *health.Marker, interval, timeout time.Duration, newCmd scheduler.CommandRunner) {
 	// Remove any stale marker from a previous run that may have crashed
 	// before its defer ran. The first run flips it to its real value.
 	marker.Set(false)
@@ -97,48 +97,36 @@ func runBuiltin(ctx context.Context, marker *health.Marker, interval, timeout ti
 	slog.Info("container started (built-in scheduling)",
 		"interval", interval, "timeout", timeout, "base_dir", baseDir())
 
-	var wg sync.WaitGroup
-	// runCtx is deliberately decoupled from the shutdown signal so an
-	// in-flight run drains to completion (bounded by its own SCHED_TIMEOUT)
-	// instead of being cancelled mid-pass — matching external mode and the
-	// documented "does not abandon an in-flight run" contract.
-	// stop_grace_period is the real outer bound; ctx still stops *scheduling*
-	// (the ticker loop below).
+	// runCtx is deliberately decoupled from the shutdown signal so an in-flight
+	// run drains to completion (bounded by its own SCHED_TIMEOUT) instead of
+	// being cancelled mid-pass — matching external mode and the documented
+	// "does not abandon an in-flight run" contract. stop_grace_period is the
+	// real outer bound; ctx still stops *scheduling* (RunLoop stops firing new
+	// passes once ctx is cancelled), and runRenovatePass takes ctx as its
+	// shutdown gate so a queued rerun is never started after SIGTERM.
 	runCtx := context.WithoutCancel(ctx)
-	wg.Go(func() {
-		// Skip the startup run if shutdown was signalled before this goroutine
-		// was scheduled (a redeploy landing in the container's first instant).
-		// Mirrors the ticker arm below: a stop request is never followed by a
-		// fresh run, which -- because runCtx is WithoutCancel -- would otherwise
-		// drain for a full SCHED_TIMEOUT and risk exceeding stop_grace_period
-		// (the exit-137 SIGKILL the drain exists to prevent).
-		if ctx.Err() != nil {
-			return
-		}
-		marker.Set(runRenovatePass(ctx, runCtx, timeout, "startup", nil, newCmd))
-	})
-	wg.Go(func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				// ctx.Done() and ticker.C can both be ready once a run outlasts
-				// the interval (a tick buffers during the pass) and shutdown has
-				// been signalled; select then picks pseudo-randomly. Re-check
-				// shutdown so a stop request is never followed by a fresh run,
-				// which would drain for another full SCHED_TIMEOUT and risk
-				// exceeding stop_grace_period -- the exit-137 SIGKILL the drain
-				// exists to prevent.
-				if ctx.Err() != nil {
-					return
-				}
-				marker.Set(runRenovatePass(ctx, runCtx, timeout, "interval", nil, newCmd))
+
+	// scheduler.RunLoop fires the startup pass immediately (FireOnStart), then
+	// one pass per interval, sequentially. It re-checks ctx before each fire —
+	// so a stop request is never followed by a fresh pass that would drain for a
+	// full SCHED_TIMEOUT and risk the stop_grace_period overrun (exit-137) the
+	// drain exists to prevent — and skips the startup fire outright if shutdown
+	// was already signalled. It runs in a goroutine so this function can flip
+	// the marker unhealthy and narrate the drain the instant SIGTERM lands, then
+	// wait for RunLoop to return once the in-flight pass (running under the
+	// uncancelled runCtx) completes.
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		startupDone := false
+		scheduler.RunLoop(ctx, func(loopCtx context.Context) {
+			trigger := "interval"
+			if !startupDone {
+				trigger, startupDone = "startup", true
 			}
-		}
-	})
+			marker.Set(runRenovatePass(loopCtx, runCtx, timeout, trigger, nil, newCmd))
+		}, scheduler.LoopOptions{Interval: interval, FireOnStart: true})
+	}()
 
 	<-ctx.Done()
 	slog.Info("shutting down", "cause", context.Cause(ctx))
@@ -148,12 +136,13 @@ func runBuiltin(ctx context.Context, marker *health.Marker, interval, timeout ti
 
 	// Narrate the drain so an operator triaging exit-137 sees the daemon was
 	// deliberately waiting on an in-flight run, mirroring external-mode waitForRunToDrain.
-	if inFlight, err := runInFlight(lockFilePath); err == nil && inFlight {
+	if inFlight, err := scheduler.InFlight(lockFilePath); err == nil && inFlight {
 		slog.Info("waiting for in-flight renovate run to finish before shutdown", "max_wait", timeout)
 	}
 
-	// Wait for the startup run and any in-flight ticker run to drain.
-	wg.Wait()
+	// Wait for the in-flight pass to drain (RunLoop returns once ctx is
+	// cancelled and the in-flight pass, run under the uncancelled runCtx, ends).
+	<-drained
 	slog.Info("shutdown complete")
 }
 
@@ -201,7 +190,7 @@ func runExternal(ctx context.Context, marker *health.Marker, drainTimeout time.D
 // restrict the run to specific repositories. Unlike the daemon it does not
 // clean up the marker on exit — the file must persist so the running
 // container's healthcheck reflects this run.
-func runRun(ctx context.Context, repoArgs []string, newCmd commandRunner) int {
+func runRun(ctx context.Context, repoArgs []string, newCmd scheduler.CommandRunner) int {
 	setupLogger()
 	warnIfRootlessCacheUnwritable()
 
@@ -240,7 +229,7 @@ const drainPollInterval = 500 * time.Millisecond
 // that, so the drain may give up mid-coalescing; stop_grace_period (the real
 // outer bound) is what actually caps shutdown.
 func waitForRunToDrain(lockPath string, poll, maxWait time.Duration) bool {
-	inFlight, err := runInFlight(lockPath)
+	inFlight, err := scheduler.InFlight(lockPath)
 	if err != nil {
 		slog.Warn("cannot probe the run lock during shutdown; exiting without draining", "error", err)
 		return false
@@ -250,27 +239,16 @@ func waitForRunToDrain(lockPath string, poll, maxWait time.Duration) bool {
 	}
 
 	slog.Info("waiting for in-flight renovate run to finish before shutdown", "max_wait", maxWait)
-	deadline := time.NewTimer(maxWait)
-	defer deadline.Stop()
-	ticker := time.NewTicker(poll)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-deadline.C:
-			slog.Warn("in-flight renovate run did not finish within the drain window; exiting (container stop will terminate it)",
-				"max_wait", maxWait)
-			return false
-		case <-ticker.C:
-			inFlight, err := runInFlight(lockPath)
-			if err != nil {
-				slog.Warn("cannot probe the run lock during shutdown; exiting without draining", "error", err)
-				return false
-			}
-			if !inFlight {
-				slog.Info("in-flight renovate run finished; proceeding with shutdown")
-				return true
-			}
-		}
+	// context.Background(): the drain runs AFTER the shutdown signal, so it has
+	// no live parent context to honour — scheduler.WaitForDrain is bounded solely
+	// by maxWait (a single run's own SCHED_TIMEOUT); stop_grace_period is the
+	// real outer bound on shutdown. It polls the shared flock (released when the
+	// separate `run` process finishes or dies) exactly as the hand-rolled loop did.
+	if scheduler.WaitForDrain(context.Background(), lockPath, poll, maxWait) {
+		slog.Info("in-flight renovate run finished; proceeding with shutdown")
+		return true
 	}
+	slog.Warn("in-flight renovate run did not finish within the drain window; exiting (container stop will terminate it)",
+		"max_wait", maxWait)
+	return false
 }

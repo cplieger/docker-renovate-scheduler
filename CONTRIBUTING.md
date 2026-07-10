@@ -33,26 +33,26 @@ Go module `github.com/cplieger/docker-renovate-scheduler`; binary
 `docker-renovate-scheduler`. Flat package (mirrors `docker-rsync-scheduler`):
 
 - `main.go` — subcommand dispatch (`daemon` / `run` / `health`) and the
-  composition roots. `runBuiltin` drives the `time.Ticker` loop; `runExternal`
-  idles until SIGTERM (external-trigger mode); the `run` subcommand (`runRun`)
-  performs a single pass. `runBuiltin` and `runRun` both funnel through
+  composition roots. `runBuiltin` drives the built-in loop (`scheduler.RunLoop`);
+  `runExternal` idles until SIGTERM (external-trigger mode); the `run` subcommand
+  (`runRun`) performs a single pass. `runBuiltin` and `runRun` both funnel through
   `runRenovatePass`; `runExternal` runs no pass itself -- it only drains an
-  externally-triggered `run` on shutdown. Shutdown is driven by
-  `signal.NotifyContext`.
-- `config.go` — env loading. `loadInterval` parses `SCHED_INTERVAL` with the
-  `off` / `disabled` / `0` / `0s` sentinels (→ external mode); `loadRunTimeout`
-  parses `SCHED_TIMEOUT` (default 1h); plus `setupLogger`, `getEnv`, and the
-  base-dir verification.
+  externally-triggered `run` on shutdown (`scheduler.WaitForDrain`). Shutdown is
+  driven by `signal.NotifyContext`.
+- `config.go` — env loading. `loadInterval` parses `SCHED_INTERVAL` via
+  `scheduler.ParseInterval` (the `off` / `disabled` / `0` / `0s` sentinels →
+  external mode); `loadRunTimeout` parses `SCHED_TIMEOUT` (default 1h); plus
+  `setupLogger` (`slogx`), `getEnv`, and the base-dir verification.
 - `renovate.go` — `renovateInvocation` builds the command that routes through
   `/usr/local/sbin/renovate-entrypoint.sh`; `runRenovatePass` is the
   flock-guarded coalescing loop (queue-on-overlap → rerun-on-completion,
   bounded by `maxCoalescedReruns`) and `runRenovateOnce` is a single pass.
-  `defaultCommandRunner` carries the gosec `#nosec G702` annotation on the
-  `exec.CommandContext` call.
-- `lock.go` — `flock(2)` overlap guard (proven, from the rsync sibling) so a
-  built-in tick never overlaps an external `run` invocation, plus the
-  single-slot rerun-coalescing flag primitives (`markRerunPending` /
-  `rerunPending` / `clearRerunPending`).
+  `defaultCommandRunner` wraps `scheduler.NewCommandRunner` (wiring `Stdout` /
+  `Stderr` to the process streams); `rerunFlag` is `scheduler.NewRerunFlag`.
+- The `flock(2)` overlap guard, the rerun flag, the interval parser, the drain,
+  and the graceful command runner all come from the `scheduler` library — there
+  is no in-repo `lock.go` (removed on adoption; the app keeps only the
+  rerun-coalescing loop in `renovate.go`).
 - `health.go` — thin wrapper over `github.com/cplieger/health` (file marker).
 
 ## Env-var convention (don't collide with Renovate)
@@ -72,12 +72,13 @@ never parses or rewrites Renovate config.
   each language cache must be redirected to a writable volume and forwarded via
   `RENOVATE_CUSTOM_ENV_VARIABLES` (see "Running as a non-default user" in the
   README); don't try to paper over that inside the image.
-- Every renovate run is serialized by the `flock` in `lock.go` — the built-in
-  ticker and an external `docker exec … run` can both fire, and the lock is what
-  stops them overlapping. A trigger that loses the lock sets a single-slot rerun
-  flag instead of being dropped, and the holder reruns once on completion if
-  it's set (bounded by `maxCoalescedReruns`, and a failed pass stops the loop).
-  Keep both the lock and the coalescing.
+- Every renovate run is serialized by the `scheduler` library's `flock`
+  (`scheduler.TryLock`) — the built-in ticker and an external `docker exec … run`
+  can both fire, and the lock is what stops them overlapping. A trigger that
+  loses the lock sets a single-slot rerun flag (`scheduler.RerunFlag`) instead of
+  being dropped, and the holder reruns once on completion if it's set (bounded by
+  the app-side `maxCoalescedReruns`, and a failed pass stops the loop). Keep both
+  the lock and the coalescing.
 - `exec.CommandContext` arg lists only — never build a `sh -c` string from env.
 - The run timeout (`SCHED_TIMEOUT`) is propagated via context so a wedged
   renovate run is killed, not left running into the next tick.
@@ -90,7 +91,7 @@ never parses or rewrites Renovate config.
 ## Scheduling modes
 
 - **Built-in** (default): `SCHED_INTERVAL=<Go duration>` (e.g. `1h`) → a
-  `time.Ticker` loop, first run at start.
+  `scheduler.RunLoop` (startup pass, then every interval).
 - **External**: `SCHED_INTERVAL=off` (or `disabled` / `0` / `0s`) → the
   container idles and an external scheduler triggers
   `docker exec renovate docker-renovate-scheduler run` (e.g. Ofelia on a fixed
@@ -98,17 +99,18 @@ never parses or rewrites Renovate config.
 
 ## Conventions and gotchas
 
-- Logs are slog logfmt to stderr (`key=value`) with UTC timestamps via a `utcTimeAttr` `ReplaceAttr` (so the image needs no `TZ` and embeds no `time/tzdata`); always use key/value pairs,
+- Logs are slog logfmt to stderr (`key=value`) with UTC timestamps via `slogx` (its `UTCTime` `ReplaceAttr`, so the image needs no `TZ` and embeds no `time/tzdata`); always use key/value pairs,
   never a formatted string (the `sloglint` linter enforces it).
-- `main()` orchestration and the `exec.CommandContext` call to renovate are
+- `main()` orchestration and the renovate subprocess exec are
   intentionally not unit-tested (process-level I/O, validated by container logs
-  and Grafana alerting). New logic in `config.go` / `renovate.go` / `lock.go`
+  and Grafana alerting). New logic in `config.go` / `renovate.go`
   is expected to come with tests.
 - Tests are table-driven + property-based
   ([rapid](https://github.com/flyingmutant/rapid)) and live beside the code
-  (`*_test.go`). They cover the interval sentinels, timeout parsing, the
-  entrypoint-routed invocation builder, the flock mutual-exclusion, and the
-  rerun coalescing (queue-on-overlap, bounded reruns, no rerun on failure).
+  (`*_test.go`). They cover the interval wiring (delegation to
+  `scheduler.ParseInterval`), timeout parsing, the entrypoint-routed invocation
+  builder, and the rerun coalescing (queue-on-overlap, bounded reruns, no rerun
+  on failure); the flock primitive itself is tested in the `scheduler` library.
 
 ## Running checks locally
 

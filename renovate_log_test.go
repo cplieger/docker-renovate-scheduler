@@ -67,7 +67,7 @@ func TestRunRenovatePass_CoalescedRerun_LabelsOnlyRerunsWithSuffix(t *testing.T)
 	// given: a holder whose first pass observes a trigger arriving mid-run,
 	// so the loop runs an initial pass plus exactly one coalesced rerun.
 	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	clearRerunPending(rerunFlagPath)
+	rerunFlag.Clear()
 
 	captured := &triggerCapture{}
 	t.Cleanup(swapLogger(captured))
@@ -94,7 +94,7 @@ func TestRunRenovatePass_CoalescedRerun_LogsOneBasedRerunCounter(t *testing.T) {
 	// given: one trigger arrives during the first pass, producing exactly one
 	// coalescing-rerun log line.
 	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	clearRerunPending(rerunFlagPath)
+	rerunFlag.Clear()
 
 	captured := &triggerCapture{}
 	t.Cleanup(swapLogger(captured))

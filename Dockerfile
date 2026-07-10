@@ -50,7 +50,7 @@ RUN find /opt/containerbase -name docker -prune -exec rm -rf {} + \
 # rebuilds, so Trivy flags stale OS packages (perl, tar, libxml2, libssh2,
 # libmysqlclient, ...) against this image even though fixed builds exist. A
 # broad apt upgrade patches them all at build time -- matching the vibekit and
-# vibecli images -- instead of enumerating packages one CVE at a time, and
+# web-terminal-kiro images -- instead of enumerating packages one CVE at a time, and
 # becomes a no-op once the base ships the fixes. upgrade never removes
 # packages, so native MySQL-driver builds during lockfile maintenance keep
 # working.

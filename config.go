@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cplieger/scheduler"
+	"github.com/cplieger/slogx"
 )
 
 // --- Configuration ---
@@ -67,31 +70,10 @@ const (
 // Renovate logs separately to stdout/stderr (set LOG_FORMAT=json); this
 // logger covers only the scheduler's own lifecycle lines.
 func setupLogger() {
-	// slog.Level.UnmarshalText parses debug/info/warn/error case-insensitively
-	// (and offset syntax such as "warn+1") but lacks the long-form "warning"
-	// alias, so map it before parsing. An unrecognized value keeps the Info
-	// default, matching the prior switch's fall-through.
-	name := strings.ToLower(strings.TrimSpace(getEnv("LOG_LEVEL", "info")))
-	if name == "warning" {
-		name = "warn"
-	}
-	level := slog.LevelInfo
-	if err := level.UnmarshalText([]byte(name)); err != nil {
-		level = slog.LevelInfo
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level, ReplaceAttr: utcTimeAttr})))
-}
-
-// utcTimeAttr is a slog ReplaceAttr that renders the record's built-in time
-// key in UTC, so log-line timestamps are zone-stable regardless of the
-// container's TZ (the fleet logs-in-UTC standard). It rewrites only the
-// top-level time attribute; a user attribute that happens to share the "time"
-// key inside a group is left untouched.
-func utcTimeAttr(groups []string, a slog.Attr) slog.Attr {
-	if len(groups) == 0 && a.Key == slog.TimeKey && a.Value.Kind() == slog.KindTime {
-		a.Value = slog.TimeValue(a.Value.Time().UTC())
-	}
-	return a
+	// An unrecognized value keeps the Info default (silent, matching the prior
+	// switch's fall-through); Renovate itself also honours LOG_LEVEL.
+	level, _ := slogx.ParseLevel(getEnv("LOG_LEVEL", "info"), slog.LevelInfo)
+	slogx.Setup(slogx.Options{Level: level})
 }
 
 // getEnv returns the environment value for key, or fallback when unset or
@@ -108,43 +90,19 @@ func baseDir() string {
 }
 
 // loadInterval parses SCHED_INTERVAL and reports the built-in scheduler
-// cadence and whether the built-in scheduler runs at all. SCHED_INTERVAL is
-// a Go duration ("1h", "30m") that sets the interval. The sentinels "off"
-// and "disabled" (case-insensitive) or any zero duration ("0", "0s")
-// disable the built-in scheduler: the container idles and runs are
-// triggered out-of-band via the `run` subcommand. Unset defaults to
-// defaultInterval with the scheduler enabled. Any other parse failure falls
-// back to defaultInterval and logs a warning rather than refusing to start.
+// cadence and whether the built-in scheduler runs at all. It delegates to
+// scheduler.ParseInterval, the fleet-standard *_INTERVAL parser: a Go
+// duration ("1h", "30m") sets the interval; the sentinels "off"/"disabled"
+// (case-insensitive) or a zero duration ("0", "0s") select external mode
+// (the built-in scheduler idles and runs are triggered out-of-band via the
+// `run` subcommand); unset, negative, or unparseable falls back to
+// defaultInterval with the scheduler enabled (a warning is logged for the
+// negative and unparseable cases). scheduleEnabled is true only in built-in
+// mode.
 func loadInterval() (interval time.Duration, scheduleEnabled bool) {
-	interval = defaultInterval
-	scheduleEnabled = true
-	raw := strings.TrimSpace(os.Getenv("SCHED_INTERVAL"))
-	if raw == "" {
-		return interval, scheduleEnabled
-	}
-	switch strings.ToLower(raw) {
-	case "off", "disabled":
-		scheduleEnabled = false
-	default:
-		d, perr := time.ParseDuration(raw)
-		switch {
-		case perr != nil:
-			slog.Warn("cannot parse SCHED_INTERVAL, using default",
-				"value", raw, "default", defaultInterval)
-		case d > 0:
-			interval = d
-		case d == 0:
-			// Zero duration ("0", "0s") disables built-in scheduling.
-			scheduleEnabled = false
-		default:
-			// A negative duration is not a valid interval and not a documented disable
-			// sentinel (off/disabled/0/0s); warn and fall back to the default rather than
-			// silently idling, which would mask a typo.
-			slog.Warn("SCHED_INTERVAL is negative, using default",
-				"value", raw, "default", defaultInterval)
-		}
-	}
-	return interval, scheduleEnabled
+	s := scheduler.ParseInterval(os.Getenv("SCHED_INTERVAL"), defaultInterval,
+		scheduler.WithName("SCHED_INTERVAL"))
+	return s.Interval, s.Mode == scheduler.ModeBuiltin
 }
 
 // loadRunTimeout reads SCHED_TIMEOUT (a Go duration) and falls back to

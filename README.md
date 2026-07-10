@@ -187,6 +187,52 @@ The drain is internally capped at `SCHED_TIMEOUT` (a run can't outlast its own t
 | `/data`                  | `RENOVATE_BASE_DIR` — repository clones, caches, and dynamically installed tools. Persist it (the image creates it owned by the image's non-root user). |
 | `/usr/src/app/config.js` | Optional — a Renovate `config.js` if you prefer it over `RENOVATE_*` env vars.                                                                          |
 
+## Alerting
+
+docker-renovate-scheduler has no metrics endpoint; its operational state is in its logs. The scheduler emits its own lifecycle lines as structured `slog` logfmt to the container log (`level=INFO msg="renovate run complete"` on success; `level=ERROR msg="renovate run failed"` or `msg="renovate run timed out"` on failure). Ship the container's logs to Loki (Grafana Alloy's Docker log discovery does this with no configuration) and evaluate these with [Loki's ruler](https://grafana.com/docs/loki/latest/alert/); firing alerts deliver through your Alertmanager exactly like Prometheus metric alerts.
+
+These rules apply to **built-in scheduling** (`SCHED_INTERVAL` set to a duration), where each run is PID 1 and its lifecycle lines reach the container log. In **external-trigger mode** (`SCHED_INTERVAL=off`) each run is a separate `docker exec` process whose output goes to the trigger's own log, not the container's (see [Scheduling modes](#scheduling-modes)), so neither rule sees per-run outcomes; alert on your trigger's job result instead.
+
+```yaml
+groups:
+  - name: docker-renovate-scheduler
+    rules:
+      - alert: RenovateRunFailed
+        expr: |
+          sum by (container) (count_over_time(
+            {container="renovate"} |= `level=ERROR` [15m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "renovate: a scheduled run failed"
+          description: >
+            The scheduler logged an error: a run that exited non-zero
+            (`renovate run failed`), a run that hit SCHED_TIMEOUT
+            (`renovate run timed out`), or a base-directory or lock error. No
+            dependency PRs are raised until the next clean run. Check the
+            container logs, RENOVATE_TOKEN, and platform reachability. A
+            graceful shutdown logs at WARN, so a redeploy does not trip this.
+      - alert: RenovateNoRecentRun
+        expr: |
+          absent_over_time({container="renovate"} |= `renovate run complete` [13h])
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "renovate has not completed a run in 13h"
+          description: >
+            In built-in mode the scheduler logs `renovate run complete` at
+            startup and then every SCHED_INTERVAL (default 6h). None in 13h
+            while the container is up means the interval loop is wedged and no
+            dependency PRs are being raised even though nothing logged an error.
+            Restart the container. The 13h window spans two default 6h intervals
+            plus margin; adjust it to your SCHED_INTERVAL.
+```
+
+Thresholds and the `severity` label are starting points; adjust the deadman window to your `SCHED_INTERVAL` and the `container` selector (or `job` / `service`, depending on your log collector) to your deployment, and route by whatever labels your Alertmanager uses.
+
 ## Healthcheck
 
 `docker-renovate-scheduler health` checks a marker file set after each run. In **built-in** mode the container starts unhealthy and flips to healthy after the first successful run (size `healthcheck.start_period` for the time a first run may take); a failed run flips it unhealthy, and it recovers on the next clean run. In **external** mode it starts healthy (idle, nothing has failed) and each triggered `run` updates the marker.
@@ -206,11 +252,13 @@ No network listener, no HTTP server, no exposed ports. The unused `docker` CLI i
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
 
-| Dependency                                                         | Source                                                                      |
-| ------------------------------------------------------------------ | --------------------------------------------------------------------------- |
-| renovate/renovate                                                  | [Docker Hub](https://hub.docker.com/r/renovate/renovate) (the runtime base) |
-| golang                                                             | [Go](https://hub.docker.com/_/golang) (builder stage only)                  |
-| [`github.com/cplieger/health`](https://github.com/cplieger/health) | file-marker healthcheck                                                     |
+| Dependency                                                               | Source                                                                      |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| renovate/renovate                                                        | [Docker Hub](https://hub.docker.com/r/renovate/renovate) (the runtime base) |
+| golang                                                                   | [Go](https://hub.docker.com/_/golang) (builder stage only)                  |
+| [`github.com/cplieger/health`](https://github.com/cplieger/health)       | file-marker healthcheck                                                     |
+| [`github.com/cplieger/scheduler`](https://github.com/cplieger/scheduler) | interval parsing, overlap flock, rerun flag, drain, graceful command runner |
+| [`github.com/cplieger/slogx`](https://github.com/cplieger/slogx)         | slog setup (UTC logfmt)                                                     |
 
 ## Credits
 
