@@ -6,8 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"syscall"
 	"time"
+
+	"github.com/cplieger/scheduler"
 )
 
 // --- Renovate engine ---
@@ -43,29 +44,32 @@ func renovateInvocation(repoArgs []string) (name string, args []string) {
 	return renovateEntrypoint, args
 }
 
-// commandRunner constructs a configured *exec.Cmd. It decouples
-// orchestration from subprocess construction so tests can inject a fake.
-type commandRunner func(ctx context.Context, name string, args ...string) *exec.Cmd
+// defaultCommandRunner builds one Renovate subprocess command: the shared
+// scheduler library supplies graceful shutdown (SIGTERM on context
+// cancellation, then a DefaultGrace 5s window before SIGKILL), and this
+// wrapper streams the child's stdout/stderr straight through to the
+// container's stdout/stderr. Renovate is the logging authority — set
+// LOG_FORMAT=json and let Alloy/Loki ingest its structured output; the
+// scheduler neither captures nor parses it. The subprocess inherits the parent
+// environment, so Renovate's RENOVATE_* configuration and tokens flow through
+// unchanged. The binary path is the fixed renovateEntrypoint const and the
+// only variable args are operator-supplied repo slugs, so there is no
+// untrusted-input boundary here.
+var defaultCommandRunner scheduler.CommandRunner = func() scheduler.CommandRunner {
+	base := scheduler.NewCommandRunner(scheduler.DefaultGrace)
+	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		cmd := base(ctx, name, args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd
+	}
+}()
 
-// defaultCommandRunner returns an exec.Cmd that streams the child's
-// stdout/stderr straight through to the container's stdout/stderr and shuts
-// down gracefully (SIGTERM on context cancellation, 5s grace before
-// SIGKILL). Renovate is the logging authority — set LOG_FORMAT=json and let
-// Alloy/Loki ingest its structured output; the scheduler neither captures
-// nor parses it. The subprocess inherits the parent environment, so
-// Renovate's RENOVATE_* configuration and tokens flow through unchanged.
-func defaultCommandRunner(ctx context.Context, name string, cmdArgs ...string) *exec.Cmd {
-	// #nosec G702 -- fixed binary path (renovateInvocation returns the const
-	// renovateEntrypoint) and a discrete argv slice exec'd with no shell; the
-	// only variable args are repo slugs forwarded to Renovate, supplied by the
-	// operator via the scheduler / docker exec, not an untrusted boundary.
-	cmd := exec.CommandContext(ctx, name, cmdArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
-	cmd.WaitDelay = 5 * time.Second
-	return cmd
-}
+// rerunFlag is the shared scheduler library's single-slot coalescing flag
+// backing the overlap guard's "max 1 wait" rerun: a trigger arriving while a
+// run holds the lock sets it, and the active holder — which clears it before
+// each pass — reruns once on completion if it was set during the pass.
+var rerunFlag = scheduler.NewRerunFlag(rerunFlagPath)
 
 // maxCoalescedReruns bounds how many times one holder will rerun to drain
 // queued triggers before releasing the lock, so a relentless trigger source
@@ -94,20 +98,20 @@ const maxCoalescedReruns = 8
 // to shutdownCtx in external mode). Splitting them lets an in-flight pass drain
 // uncancelled while a queued rerun is still suppressed once shutdown is
 // signalled, so a stop request is never followed by a fresh run.
-func runRenovatePass(shutdownCtx, runCtx context.Context, timeout time.Duration, trigger string, repoArgs []string, newCmd commandRunner) (ok bool) {
-	lock, locked, lockErr := tryLock(lockFilePath)
+func runRenovatePass(shutdownCtx, runCtx context.Context, timeout time.Duration, trigger string, repoArgs []string, newCmd scheduler.CommandRunner) (ok bool) {
+	lock, locked, lockErr := scheduler.TryLock(lockFilePath)
 	if !locked && lockErr == nil {
 		// A run is already in flight. Queue a single coalesced rerun instead
 		// of dropping this trigger; the active holder reruns on completion.
-		markRerunPending(rerunFlagPath)
+		rerunFlag.Set()
 		// Narrow the lost-wakeup window: the holder may have already passed its
-		// final rerunPending() check and be between there and releasing the
+		// final rerunFlag.Pending() check and be between there and releasing the
 		// lock when we set the flag above, leaving no holder to observe it.
 		// Retry the lock once; if the holder has since released it we now own the
 		// run and drain the flag ourselves. A residual window remains (holder still
 		// holding across both our attempts); it loses no work -- the next
 		// tick/trigger clears the flag and runs -- only latency until that run.
-		lock, locked, lockErr = tryLock(lockFilePath)
+		lock, locked, lockErr = scheduler.TryLock(lockFilePath)
 	}
 	if lockErr != nil {
 		slog.Error("cannot acquire run lock",
@@ -118,13 +122,13 @@ func runRenovatePass(shutdownCtx, runCtx context.Context, timeout time.Duration,
 		slog.Info("renovate already running, queued rerun", "trigger", trigger)
 		return true
 	}
-	defer lock.unlock()
+	defer lock.Unlock()
 
 	for reruns := 0; ; reruns++ {
 		// Clear before the pass so only triggers arriving *during* it queue
 		// the next rerun (no lost wakeups). The first iteration also clears
 		// any stale flag left by a holder that exited mid-window.
-		clearRerunPending(rerunFlagPath)
+		rerunFlag.Clear()
 
 		passTrigger := trigger
 		if reruns > 0 {
@@ -136,7 +140,7 @@ func runRenovatePass(shutdownCtx, runCtx context.Context, timeout time.Duration,
 			// or external trigger to retry.
 			return false
 		}
-		if !rerunPending(rerunFlagPath) {
+		if !rerunFlag.Pending() {
 			return true
 		}
 		// Shutdown gate: a rerun is queued, but if shutdown has been signalled
@@ -163,7 +167,7 @@ func runRenovatePass(shutdownCtx, runCtx context.Context, timeout time.Duration,
 // overlap lock and reports whether it exited cleanly. The pass is bounded by
 // timeout (SCHED_TIMEOUT); on cancellation the command runner sends SIGTERM
 // with a short grace before SIGKILL.
-func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string, repoArgs []string, newCmd commandRunner) (ok bool) {
+func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string, repoArgs []string, newCmd scheduler.CommandRunner) (ok bool) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

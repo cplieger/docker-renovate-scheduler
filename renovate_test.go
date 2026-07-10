@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cplieger/scheduler"
 )
 
 func TestRenovateInvocation(t *testing.T) {
@@ -38,11 +40,11 @@ func TestRenovateInvocation(t *testing.T) {
 	}
 }
 
-// recordingRunner returns a commandRunner that records whether it was called
+// recordingRunner returns a scheduler.CommandRunner that records whether it was called
 // and runs the fixed binary bin instead of the real entrypoint (which is not
 // present in the test environment). /usr/bin/true and /usr/bin/false give
 // deterministic exit codes.
-func recordingRunner(bin string, ran *bool) commandRunner {
+func recordingRunner(bin string, ran *bool) scheduler.CommandRunner {
 	return func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		if ran != nil {
 			*ran = true
@@ -74,13 +76,13 @@ func TestRunRenovatePass_Failure(t *testing.T) {
 // Renovate is never invoked, and a single rerun is queued for the holder.
 func TestRunRenovatePass_QueuesRerunWhenLocked(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	clearRerunPending(rerunFlagPath)
+	rerunFlag.Clear()
 
-	held, ok, err := tryLock(lockFilePath)
+	held, ok, err := scheduler.TryLock(lockFilePath)
 	if err != nil || !ok {
 		t.Fatalf("failed to pre-acquire lock: ok=%v err=%v", ok, err)
 	}
-	t.Cleanup(held.unlock)
+	t.Cleanup(held.Unlock)
 
 	ran := false
 	if ok := runRenovatePass(context.Background(), context.Background(), time.Minute, "test", nil, recordingRunner("true", &ran)); !ok {
@@ -89,20 +91,20 @@ func TestRunRenovatePass_QueuesRerunWhenLocked(t *testing.T) {
 	if ran {
 		t.Error("Renovate was invoked despite the overlap lock being held")
 	}
-	if !rerunPending(rerunFlagPath) {
+	if !rerunFlag.Pending() {
 		t.Error("overlapping trigger did not queue a rerun")
 	}
 }
 
-// flagMarkingRunner returns a commandRunner that records its invocation count
+// flagMarkingRunner returns a scheduler.CommandRunner that records its invocation count
 // and, on the first markCount invocations, sets the rerun flag during the
 // pass (simulating a trigger arriving mid-run). bin selects the exit code
 // ("true"/"false").
-func flagMarkingRunner(bin string, calls *int, markCount int) commandRunner {
+func flagMarkingRunner(bin string, calls *int, markCount int) scheduler.CommandRunner {
 	return func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		*calls++
 		if *calls <= markCount {
-			markRerunPending(rerunFlagPath)
+			rerunFlag.Set()
 		}
 		return exec.CommandContext(ctx, bin)
 	}
@@ -114,7 +116,7 @@ func flagMarkingRunner(bin string, calls *int, markCount int) commandRunner {
 // stops — multiple overlapping triggers collapse into a single rerun.
 func TestRunRenovatePass_CoalescedRerun(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	clearRerunPending(rerunFlagPath)
+	rerunFlag.Clear()
 
 	calls := 0
 	if ok := runRenovatePass(context.Background(), context.Background(), time.Minute, "test", nil, flagMarkingRunner("true", &calls, 1)); !ok {
@@ -130,7 +132,7 @@ func TestRunRenovatePass_CoalescedRerun(t *testing.T) {
 // maxCoalescedReruns times before releasing the lock.
 func TestRunRenovatePass_RerunCapBounded(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	clearRerunPending(rerunFlagPath)
+	rerunFlag.Clear()
 
 	calls := 0
 	// markCount exceeds the cap: every pass re-queues, so only the cap stops it.
@@ -146,7 +148,7 @@ func TestRunRenovatePass_RerunCapBounded(t *testing.T) {
 // even when a rerun was queued, so a failing Renovate isn't hammered.
 func TestRunRenovatePass_NoRerunOnFailure(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	clearRerunPending(rerunFlagPath)
+	rerunFlag.Clear()
 
 	calls := 0
 	if ok := runRenovatePass(context.Background(), context.Background(), time.Minute, "test", nil, flagMarkingRunner("false", &calls, 5)); ok {
@@ -168,7 +170,7 @@ func TestRunRenovatePass_NoRerunOnFailure(t *testing.T) {
 // the built-in context.WithoutCancel wiring.
 func TestRunRenovatePass_NoRerunAfterShutdown(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	clearRerunPending(rerunFlagPath)
+	rerunFlag.Clear()
 
 	shutdownCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -179,7 +181,7 @@ func TestRunRenovatePass_NoRerunAfterShutdown(t *testing.T) {
 	// the queued rerun.
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		calls++
-		markRerunPending(rerunFlagPath)
+		rerunFlag.Set()
 		cancel()
 		return exec.CommandContext(ctx, "true")
 	}
@@ -269,7 +271,7 @@ func TestRunRenovateOnce_ShutdownInterruptLogsWarnNotError(t *testing.T) {
 func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	tests := []struct {
 		name    string
-		runner  commandRunner
+		runner  scheduler.CommandRunner
 		wantMsg string
 		timeout time.Duration
 	}{

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/cplieger/health"
+	"github.com/cplieger/scheduler"
 )
 
 // TestWaitForRunToDrain_NoRunReturnsImmediately verifies the fast path: with
@@ -41,7 +42,7 @@ func TestWaitForRunToDrain_WaitsForReleaseThenSucceeds(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "run.lock")
 
-	held, ok, err := tryLock(path)
+	held, ok, err := scheduler.TryLock(path)
 	if err != nil || !ok {
 		t.Fatalf("failed to acquire the in-flight lock: ok=%v err=%v", ok, err)
 	}
@@ -50,7 +51,7 @@ func TestWaitForRunToDrain_WaitsForReleaseThenSucceeds(t *testing.T) {
 	// delay so the drain succeeds on release, not on timeout.
 	go func() {
 		time.Sleep(40 * time.Millisecond)
-		held.unlock()
+		held.Unlock()
 	}()
 
 	drained := waitForRunToDrain(path, 10*time.Millisecond, 5*time.Second)
@@ -67,11 +68,11 @@ func TestWaitForRunToDrain_TimesOutWhileHeld(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "run.lock")
 
-	held, ok, err := tryLock(path)
+	held, ok, err := scheduler.TryLock(path)
 	if err != nil || !ok {
 		t.Fatalf("failed to acquire the in-flight lock: ok=%v err=%v", ok, err)
 	}
-	t.Cleanup(held.unlock)
+	t.Cleanup(held.Unlock)
 
 	start := time.Now()
 	drained := waitForRunToDrain(path, 10*time.Millisecond, 60*time.Millisecond)
@@ -86,7 +87,7 @@ func TestWaitForRunToDrain_TimesOutWhileHeld(t *testing.T) {
 }
 
 // TestWaitForRunToDrain_ProbeErrorExitsWithoutDraining covers the probe-error
-// fast exit: when runInFlight cannot open the lock (unopenable path, here a
+// fast exit: when the in-flight lock probe cannot open the lock (unopenable path, here a
 // missing parent dir), the drain logs a warning and returns false immediately
 // rather than arming the wait — a broken lock must not hang shutdown.
 func TestWaitForRunToDrain_ProbeErrorExitsWithoutDraining(t *testing.T) {
@@ -112,7 +113,7 @@ func TestWaitForRunToDrain_ProbeErrorExitsWithoutDraining(t *testing.T) {
 // assertion below.
 func TestRunBuiltin_DrainsInFlightRunAfterShutdown(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	clearRerunPending(rerunFlagPath)
+	rerunFlag.Clear()
 	started := make(chan struct{})
 	proceed := make(chan struct{})
 	var ctxErr error
@@ -198,7 +199,7 @@ func TestRunExternal_BootsHealthyThenDrainsOnShutdown(t *testing.T) {
 // drain exists to prevent.
 func TestRunBuiltin_SkipsStartupRunWhenAlreadyShutDown(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	clearRerunPending(rerunFlagPath)
+	rerunFlag.Clear()
 
 	var ran atomic.Bool
 	runner := func(_ context.Context, _ string, _ ...string) *exec.Cmd {
@@ -236,7 +237,7 @@ func TestRunBuiltin_SkipsStartupRunWhenAlreadyShutDown(t *testing.T) {
 // 1st invocation, the first tick is the 2nd).
 func TestRunBuiltin_FiresIntervalRunAfterStartup(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
-	clearRerunPending(rerunFlagPath)
+	rerunFlag.Clear()
 
 	var calls atomic.Int64
 	gotTwo := make(chan struct{})
@@ -328,7 +329,7 @@ func TestRunRun_SuccessSetsMarkerHealthyAndReturnsZero(t *testing.T) {
 	prev := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	t.Cleanup(func() { _ = os.Remove(rerunFlagPath); _ = os.Remove(healthMarkerPath) })
-	clearRerunPending(rerunFlagPath)
+	rerunFlag.Clear()
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 
 	code := runRun(context.Background(), nil, recordingRunner("true", nil))
@@ -350,7 +351,7 @@ func TestRunRun_RenovateFailureSetsMarkerUnhealthyAndReturnsOne(t *testing.T) {
 	prev := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	t.Cleanup(func() { _ = os.Remove(rerunFlagPath); _ = os.Remove(healthMarkerPath) })
-	clearRerunPending(rerunFlagPath)
+	rerunFlag.Clear()
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 
 	code := runRun(context.Background(), nil, recordingRunner("false", nil))
