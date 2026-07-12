@@ -65,8 +65,8 @@ const (
 	rerunFlagPath = "/tmp/.docker-renovate-scheduler.rerun"
 
 	// drainMarkerPath is the daemon->exec-child shutdown latch. On SIGTERM the
-	// daemon (PID 1) sets it; an in-flight external `run` process checks it
-	// before launching each coalesced pass and stops (drains) once it is set.
+	// daemon (PID 1) raises it; an in-flight external `run` process checks it
+	// before launching each coalesced pass and stops (drains) once it is raised.
 	// It exists because `docker stop` delivers SIGTERM only to PID 1, never to
 	// the separate `docker exec` run process, so the child cannot observe the
 	// container's shutdown through its own signal context — this marker is the

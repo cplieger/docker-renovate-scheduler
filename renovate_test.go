@@ -61,7 +61,7 @@ func recordingRunner(bin string, ran *bool) scheduler.CommandRunner {
 func clearRunState(t *testing.T) {
 	t.Helper()
 	rerunFlag.Clear()
-	drainFlag.Clear()
+	drainLatch.Clear()
 	t.Cleanup(func() {
 		_ = os.Remove(rerunFlagPath)
 		_ = os.Remove(drainMarkerPath)
@@ -219,8 +219,8 @@ func TestRunRenovatePass_NoRerunWhenDrainLatchSet(t *testing.T) {
 	calls := 0
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		calls++
-		rerunFlag.Set() // a trigger arrives mid-pass: a rerun is queued
-		drainFlag.Set() // the daemon signals shutdown during the pass
+		rerunFlag.Set()        // a trigger arrives mid-pass: a rerun is queued
+		_ = drainLatch.Raise() // the daemon signals shutdown during the pass
 		return exec.CommandContext(ctx, "true")
 	}
 	if ok := runRenovatePass(context.Background(), context.Background(), time.Minute, "external", nil, runner); !ok {
@@ -237,7 +237,7 @@ func TestRunRenovatePass_NoRerunWhenDrainLatchSet(t *testing.T) {
 // without invoking Renovate, so a doomed pass is not started during teardown.
 func TestRunRenovatePass_SkipsPassWhenDrainLatchAlreadySet(t *testing.T) {
 	clearRunState(t)
-	drainFlag.Set()
+	_ = drainLatch.Raise()
 
 	ran := false
 	if ok := runRenovatePass(context.Background(), context.Background(), time.Minute, "external", nil, recordingRunner("true", &ran)); !ok {
