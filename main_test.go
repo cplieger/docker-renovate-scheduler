@@ -200,7 +200,7 @@ func TestRunExternal_BootsHealthyThenDrainsOnShutdown(t *testing.T) {
 // proves the boot clear; the post-shutdown assertion proves the set.
 func TestRunExternal_SetsDrainLatchOnShutdown(t *testing.T) {
 	clearRunState(t)
-	drainFlag.Set() // stale latch from a prior lifecycle; boot must clear it
+	_ = drainLatch.Raise() // stale latch from a prior lifecycle; boot must clear it
 
 	marker := health.NewMarker(filepath.Join(t.TempDir(), "marker"))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -213,7 +213,7 @@ func TestRunExternal_SetsDrainLatchOnShutdown(t *testing.T) {
 
 	// Boot clears the stale latch: poll until it's gone.
 	deadline := time.Now().Add(2 * time.Second)
-	for drainFlag.Pending() {
+	for drainLatch.Raised() {
 		if time.Now().After(deadline) {
 			t.Fatal("runExternal did not clear the stale drain latch on boot")
 		}
@@ -226,8 +226,8 @@ func TestRunExternal_SetsDrainLatchOnShutdown(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("runExternal did not return after shutdown")
 	}
-	if !drainFlag.Pending() {
-		t.Error("runExternal did not set the drain latch on shutdown (an in-flight run would not learn to drain)")
+	if !drainLatch.Raised() {
+		t.Error("runExternal did not raise the drain latch on shutdown (an in-flight run would not learn to drain)")
 	}
 }
 
