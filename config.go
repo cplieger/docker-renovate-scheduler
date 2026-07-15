@@ -3,7 +3,6 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -12,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cplieger/envx"
 	"github.com/cplieger/scheduler"
 	"github.com/cplieger/slogx"
 )
@@ -84,21 +84,15 @@ const (
 func setupLogger() {
 	// An unrecognized value keeps the Info default (silent, matching the prior
 	// switch's fall-through); Renovate itself also honours LOG_LEVEL.
-	level, _ := slogx.ParseLevel(getEnv("LOG_LEVEL", "info"), slog.LevelInfo)
+	level, _ := slogx.ParseLevel(envx.String("LOG_LEVEL", "info"), slog.LevelInfo)
 	slogx.Setup(slogx.Options{Level: level})
-}
-
-// getEnv returns the environment value for key, or fallback when unset or
-// empty.
-func getEnv(key, fallback string) string {
-	return cmp.Or(os.Getenv(key), fallback)
 }
 
 // baseDir returns Renovate's base directory (RENOVATE_BASE_DIR), defaulting
 // to defaultBaseDir. It is read — never set — by the scheduler so it can
 // verify the directory is writable before handing off to Renovate.
 func baseDir() string {
-	return getEnv("RENOVATE_BASE_DIR", defaultBaseDir)
+	return envx.String("RENOVATE_BASE_DIR", defaultBaseDir)
 }
 
 // loadInterval parses SCHED_INTERVAL and reports the built-in scheduler

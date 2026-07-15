@@ -71,17 +71,6 @@ func TestLoadRunTimeout(t *testing.T) {
 	})
 }
 
-func TestGetEnv(t *testing.T) {
-	t.Setenv("TEST_RENOVATE_ENV", "value")
-	if got := getEnv("TEST_RENOVATE_ENV", "fallback"); got != "value" {
-		t.Errorf("getEnv = %q, want value", got)
-	}
-	t.Setenv("TEST_RENOVATE_ENV", "")
-	if got := getEnv("TEST_RENOVATE_ENV", "fallback"); got != "fallback" {
-		t.Errorf("getEnv = %q, want fallback", got)
-	}
-}
-
 func TestBaseDir(t *testing.T) {
 	t.Run("default when unset", func(t *testing.T) {
 		t.Setenv("RENOVATE_BASE_DIR", "")
