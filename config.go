@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/cplieger/envx"
@@ -112,17 +111,15 @@ func loadInterval() (interval time.Duration, scheduleEnabled bool) {
 }
 
 // loadRunTimeout reads SCHED_TIMEOUT (a Go duration) and falls back to
-// defaultRunTimeout on unset or unparseable values, logging a warning
-// rather than refusing to start.
+// defaultRunTimeout on unset or unparseable values (envx.Duration warns on
+// malformed input), logging a warning rather than refusing to start. The
+// positive-only rule stays app-side: a zero or negative timeout would expire
+// every run before it starts.
 func loadRunTimeout() time.Duration {
-	raw := strings.TrimSpace(os.Getenv("SCHED_TIMEOUT"))
-	if raw == "" {
-		return defaultRunTimeout
-	}
-	d, err := time.ParseDuration(raw)
-	if err != nil || d <= 0 {
-		slog.Warn("cannot parse SCHED_TIMEOUT, using default",
-			"value", raw, "default", defaultRunTimeout)
+	d := envx.Duration("SCHED_TIMEOUT", defaultRunTimeout)
+	if d <= 0 {
+		slog.Warn("SCHED_TIMEOUT must be positive, using default",
+			"value", d.String(), "default", defaultRunTimeout)
 		return defaultRunTimeout
 	}
 	return d
