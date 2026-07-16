@@ -168,11 +168,11 @@ The drain is internally capped at `SCHED_TIMEOUT` (a run can't outlast its own t
 
 ## Subcommands
 
-| Command            | Purpose                                                                                                                                                                                                                            |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `daemon` (default) | PID 1; owns every Renovate run, serves the trigger socket, and drives the built-in interval when `SCHED_INTERVAL` is a duration.                                                                                                   |
+| Command            | Purpose                                                                                                                                                                                                                                                     |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `daemon` (default) | PID 1; owns every Renovate run, serves the trigger socket, and drives the built-in interval when `SCHED_INTERVAL` is a duration.                                                                                                                            |
 | `run [repo …]`     | Submit one run to the daemon and wait for it (exit 0 on success, 1 on failure — the run's own result). The external-trigger entry point; extra args are passed through to Renovate as repository slugs, and the exec's environment is forwarded to the run. |
-| `health`           | The Docker healthcheck probe (stats the marker file).                                                                                                                                                                             |
+| `health`           | The Docker healthcheck probe (stats the marker file).                                                                                                                                                                                                       |
 
 ## Volumes
 
