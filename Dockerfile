@@ -40,10 +40,16 @@ USER root
 # the assertion below then failed the build on). Deleting every entry named
 # `docker` under the containerbase tree, plus the PATH symlink, is layout-stable
 # and won't silently fall behind the next base-image bump.
+#
+# The final assertion pins the base image's own entrypoint script: the
+# scheduler routes every Renovate invocation through it (renovateEntrypoint in
+# renovate.go), so a base bump that relocates that private path must fail THIS
+# build, not every run at runtime.
 RUN find /opt/containerbase -name docker -prune -exec rm -rf {} + \
     && rm -f /usr/local/bin/docker \
     && ! command -v docker \
-    && [ -z "$(find /opt/containerbase -name docker 2>/dev/null)" ]
+    && [ -z "$(find /opt/containerbase -name docker 2>/dev/null)" ] \
+    && test -x /usr/local/sbin/renovate-entrypoint.sh
 
 # Apply all available Ubuntu security updates the renovate base inherits from
 # its Ubuntu layer. The base lags the distro security mirror between upstream
@@ -85,10 +91,12 @@ USER 12021
 
 # ENTRYPOINT is inherited from the base image (renovate-entrypoint.sh, which
 # exec-chains to the containerbase docker-entrypoint.sh). It sets up the
-# containerbase environment and then execs CMD, our scheduler daemon, so the
-# daemon and the Renovate children it spawns get that environment. Runs
-# triggered by a bare `docker exec` bypass ENTRYPOINT, so the scheduler also
-# re-routes each Renovate invocation through the same entrypoint internally.
+# containerbase environment and then execs CMD, our scheduler daemon. The
+# daemon owns every Renovate run as a child process; a run triggered via
+# `docker exec … run` executes with the CLIENT's forwarded environment (which
+# never passed through this ENTRYPOINT), so the daemon routes each child
+# through the same entrypoint internally to re-establish containerbase per
+# run regardless of the environment it starts from.
 # The HEALTHCHECK bypasses the ENTRYPOINT above, so it calls the binary by
 # absolute path (no containerbase PATH setup); the CMD below is passed through
 # the ENTRYPOINT, which sets up PATH, so its bare name resolves.

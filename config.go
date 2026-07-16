@@ -1,5 +1,6 @@
 // Package main implements docker-renovate-scheduler, a resident daemon that
-// wraps self-hosted Renovate with an interval scheduler and advisory overlap guard.
+// wraps self-hosted Renovate: PID 1 owns every run as a child process, driven
+// by a built-in interval scheduler and/or a unix-socket trigger client.
 package main
 
 import (
@@ -11,7 +12,7 @@ import (
 	"time"
 
 	"github.com/cplieger/envx"
-	"github.com/cplieger/scheduler"
+	scheduler "github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/slogx"
 )
 
@@ -46,34 +47,13 @@ const (
 	// a persisted volume; this matches Renovate's own default otherwise.
 	defaultBaseDir = "/tmp/renovate"
 
-	// lockFilePath guards against overlapping runs. flock(2) on this file
-	// serialises runs both in-process (the built-in ticker racing the
-	// startup run) and cross-process (an external `run` invocation racing
-	// the built-in ticker or a manual docker exec — e.g. an Ofelia tick
-	// racing an externally-triggered exec). Renovate is not safe to run
-	// concurrently against the same repositories and base dir. /tmp is
-	// writable by Renovate's non-root user, same place as the health marker.
-	lockFilePath = "/tmp/.docker-renovate-scheduler.lock"
-
-	// rerunFlagPath is the single-slot coalescing flag for the overlap guard.
-	// When a trigger arrives while lockFilePath is held, the loser touches
-	// this file instead of dropping the request; the active holder reruns once
-	// on completion if it is set. Any number of overlapping triggers collapse
-	// into exactly one queued rerun ("max 1 wait"). Sibling of the lock file
-	// in the same Renovate-writable /tmp.
-	rerunFlagPath = "/tmp/.docker-renovate-scheduler.rerun"
-
-	// drainMarkerPath is the daemon->exec-child shutdown latch. On SIGTERM the
-	// daemon (PID 1) raises it; an in-flight external `run` process checks it
-	// before launching each coalesced pass and stops (drains) once it is raised.
-	// It exists because `docker stop` delivers SIGTERM only to PID 1, never to
-	// the separate `docker exec` run process, so the child cannot observe the
-	// container's shutdown through its own signal context — this marker is the
-	// only channel by which the daemon can tell it to stop starting new passes
-	// and drain within stop_grace_period. Sibling of the lock and rerun flag in
-	// the same Renovate-writable /tmp; /tmp is per-container so it never
-	// survives a recreate (no cross-run staleness).
-	drainMarkerPath = "/tmp/.docker-renovate-scheduler.draining"
+	// socketPath is the daemon's trigger socket. The `run` subcommand dials
+	// it to submit a run request; the daemon — the single owner of Renovate
+	// execution — serves requests from its queue in order. /tmp is writable
+	// by the image's non-root user and is per-container, and the socket file
+	// is owner-only (0600), so trigger authority is scoped to the container's
+	// own user — the same boundary `docker exec` already enforces.
+	socketPath = "/tmp/docker-renovate-scheduler.sock"
 )
 
 // setupLogger installs a slog text handler that emits canonical logfmt
@@ -125,11 +105,20 @@ func loadRunTimeout() time.Duration {
 	return d
 }
 
+// logBaseDirError reports the "base directory not writable" failure with its
+// remediation hint, so the boot-time and per-run checks cannot drift.
+func logBaseDirError(err error) {
+	slog.Error("base directory not writable", "path", baseDir(), "error", err,
+		"hint", "mount a writable volume at RENOVATE_BASE_DIR (the image default is /data); a read_only container needs a /data volume or tmpfs")
+}
+
 // verifyBaseDir creates Renovate's base directory if missing and confirms a
 // file can be written inside it, failing fast with an actionable hint when
 // the filesystem is read-only or the volume is unwritable (the common
 // misconfiguration: a read_only container without a writable volume or
-// tmpfs at RENOVATE_BASE_DIR).
+// tmpfs at RENOVATE_BASE_DIR). Checked at daemon boot and again before each
+// run, so a volume that degrades after boot fails loudly instead of deep
+// inside Renovate.
 func verifyBaseDir(ctx context.Context) error {
 	dir := baseDir()
 
