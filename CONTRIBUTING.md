@@ -15,9 +15,11 @@ covers _why_ the final stage is `FROM renovate/renovate:<version>` (Renovate
 installs toolchains at runtime via containerbase, so there is no static form to
 drop on `scratch`). The contributor-facing consequence: every run must inherit
 the containerbase environment (PATH, `CONTAINERBASE_*`, `USER_*`) that the
-upstream `renovate-entrypoint.sh` sets up, so the scheduler **execs renovate
+upstream `renovate-entrypoint.sh` sets up, so the daemon **execs renovate
 through that entrypoint** rather than invoking the `renovate` binary directly
-(see `renovateInvocation` in `renovate.go`). Do not "simplify" this to a bare
+(see `renovateInvocation` in `runner.go`). This matters doubly now: a
+triggered run executes with the CLIENT's forwarded environment, which never
+passed through the image ENTRYPOINT at all. Do not "simplify" this to a bare
 `exec renovate`; tool installation breaks without the entrypoint's env.
 
 The Dockerfile strips the bundled `docker` CLI from that base
@@ -30,30 +32,44 @@ HTTP, not via the CLI.
 ## Layout
 
 Go module `github.com/cplieger/docker-renovate-scheduler`; binary
-`docker-renovate-scheduler`. Flat package (mirrors `docker-rsync-scheduler`):
+`docker-renovate-scheduler`. Flat package. The architecture is
+**single-owner**: the daemon (PID 1) executes every Renovate run as its own
+child; triggers only submit requests.
 
-- `main.go` — subcommand dispatch (`daemon` / `run` / `health`) and the
-  composition roots. `runBuiltin` drives the built-in loop (`scheduler.RunLoop`);
-  `runExternal` idles until SIGTERM (external-trigger mode); the `run` subcommand
-  (`runRun`) performs a single pass. `runBuiltin` and `runRun` both funnel through
-  `runRenovatePass`; `runExternal` runs no pass itself -- it only drains an
-  externally-triggered `run` on shutdown (`scheduler.WaitForDrain`). Shutdown is
-  driven by `signal.NotifyContext`.
-- `config.go` — env loading. `loadInterval` parses `SCHED_INTERVAL` via
-  `scheduler.ParseInterval` (the `off` / `disabled` / `0` / `0s` sentinels →
-  external mode); `loadRunTimeout` parses `SCHED_TIMEOUT` (default 1h); plus
-  `setupLogger` (`slogx`), `getEnv`, and the base-dir verification.
-- `renovate.go` — `renovateInvocation` builds the command that routes through
-  `/usr/local/sbin/renovate-entrypoint.sh`; `runRenovatePass` is the
-  flock-guarded coalescing loop (queue-on-overlap → rerun-on-completion,
-  bounded by `maxCoalescedReruns`) and `runRenovateOnce` is a single pass.
-  `defaultCommandRunner` wraps `scheduler.NewCommandRunner` (wiring `Stdout` /
-  `Stderr` to the process streams); `rerunFlag` is `scheduler.NewRerunFlag`.
-- The `flock(2)` overlap guard, the rerun flag, the interval parser, the drain,
-  and the graceful command runner all come from the `scheduler` library — there
-  is no in-repo `lock.go` (removed on adoption; the app keeps only the
-  rerun-coalescing loop in `renovate.go`).
+- `main.go` — subcommand dispatch (`daemon` / `run` / `health`).
+- `daemon.go` — the daemon composition root (`runDaemon`): health marker,
+  trigger socket, the executor goroutine (`runJobs` — the ONLY code that
+  starts Renovate), and the built-in ticker (`startTicker`, a
+  `scheduler.RunLoop` that submits tick jobs like any other trigger).
+  Shutdown is `signal.NotifyContext` + queue close: the in-flight run drains
+  uncancelled (bounded by `SCHED_TIMEOUT`), queued requests are cancelled
+  with explicit results.
+- `queue.go` — the bounded FIFO between triggers and the executor. Every
+  accepted job is guaranteed exactly one result; a full or closed queue
+  rejects immediately.
+- `server.go` — the unix-socket trigger server: owner-only socket in `/tmp`,
+  one connection per request, `queued` / `started` / `done` event stream.
+- `client.go` — the `run` subcommand: a thin synchronous client that forwards
+  its repo args and its **complete environment** (that is what makes
+  `docker exec -e RENOVATE_X=… … run` overrides reach Renovate) and exits
+  with the run's own result.
+- `protocol.go` — the newline-delimited-JSON wire types shared by both sides
+  (same binary ships both, so there is no version negotiation).
+- `runner.go` — `renovateInvocation` builds the command that routes through
+  `/usr/local/sbin/renovate-entrypoint.sh` (re-establishing containerbase per
+  run, whatever environment the request carried; the Dockerfile asserts the
+  path at build time); `runRenovateOnce` executes one pass under
+  `SCHED_TIMEOUT`; `defaultCommandRunner` wraps `scheduler.NewCommandRunner`
+  (wiring `Stdout`/`Stderr` to the daemon's streams, so every run's output
+  lands in the container log).
+- `config.go` — env loading (`loadInterval` via `scheduler.ParseInterval`,
+  `loadRunTimeout`), `setupLogger` (`slogx`), and the base-dir verification
+  (boot + per-run).
 - `health.go` — thin wrapper over `github.com/cplieger/health` (file marker).
+
+There is no cross-process coordination state: no flock, no rerun flag, no
+drain latch. Mutual exclusion is the executor loop; the socket is the only
+trigger path.
 
 ## Env-var convention (don't collide with Renovate)
 
@@ -72,13 +88,17 @@ never parses or rewrites Renovate config.
   each language cache must be redirected to a writable volume and forwarded via
   `RENOVATE_CUSTOM_ENV_VARIABLES` (see "Running as a non-default user" in the
   README); don't try to paper over that inside the image.
-- Every renovate run is serialized by the `scheduler` library's `flock`
-  (`scheduler.TryLock`) — the built-in ticker and an external `docker exec … run`
-  can both fire, and the lock is what stops them overlapping. A trigger that
-  loses the lock sets a single-slot rerun flag (`scheduler.RerunFlag`) instead of
-  being dropped, and the holder reruns once on completion if it's set (bounded by
-  the app-side `maxCoalescedReruns`, and a failed pass stops the loop). Keep both
-  the lock and the coalescing.
+- Every renovate run is executed by the daemon's single executor goroutine —
+  that is the overlap guard. Do not add a second execution path (a client
+  that runs Renovate itself, a bypass around the queue): the built-in ticker
+  and every external trigger MUST submit through the queue, or two Renovate
+  processes can race the same base directory. Every accepted request gets its
+  own run and its own true exit code; keep both properties.
+- The trigger socket stays owner-only (`0600`) and in-container. Do not add a
+  TCP/HTTP listener; "no network listener" is a documented product
+  differentiator, and the forwarded request environment (which can carry
+  `RENOVATE_TOKEN`) must never cross a wider boundary than the same-user
+  socket.
 - `exec.CommandContext` arg lists only — never build a `sh -c` string from env.
 - The run timeout (`SCHED_TIMEOUT`) is propagated via context so a wedged
   renovate run is killed, not left running into the next tick.
@@ -105,12 +125,14 @@ never parses or rewrites Renovate config.
   intentionally not unit-tested (process-level I/O, validated by container logs
   and Grafana alerting). New logic in `config.go` / `renovate.go`
   is expected to come with tests.
-- Tests are table-driven + property-based
-  ([rapid](https://github.com/flyingmutant/rapid)) and live beside the code
-  (`*_test.go`). They cover the interval wiring (delegation to
-  `scheduler.ParseInterval`), timeout parsing, the entrypoint-routed invocation
-  builder, and the rerun coalescing (queue-on-overlap, bounded reruns, no rerun
-  on failure); the flock primitive itself is tested in the `scheduler` library.
+- Tests are table-driven and live beside the code (`*_test.go`). They cover
+  the queue contract (FIFO, backpressure, close semantics), the wire protocol
+  and event sequence over a real unix socket, scope + environment forwarding
+  end-to-end (the client's env reaches the Renovate child), the executor's
+  shutdown drain (in-flight finishes, queued cancelled explicitly), the
+  entrypoint-routed invocation builder, and timeout-vs-failure log
+  classification. Fake command runners (`true`/`false`/`sh -c` assertions)
+  stand in for the real entrypoint, which is absent outside the image.
 
 ## Running checks locally
 

@@ -6,6 +6,7 @@ require github.com/cplieger/health v1.3.0
 
 require github.com/cplieger/slogx v1.3.0
 
-require github.com/cplieger/scheduler v1.2.0
-
-require github.com/cplieger/envx v1.2.0
+require (
+	github.com/cplieger/envx v1.2.0
+	github.com/cplieger/scheduler/v2 v2.0.0
+)

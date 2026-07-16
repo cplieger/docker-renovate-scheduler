@@ -26,10 +26,11 @@ One deliberate trim: the bundled `docker` CLI is removed from the image. Renovat
 ## What it does
 
 - Runs `renovate` on a **built-in interval** (`SCHED_INTERVAL=6h`) — one run at startup for immediate freshness, then every interval — **or** stays idle and runs on an **external trigger** (`SCHED_INTERVAL=off` + `docker exec … run`).
-- Routes every Renovate invocation through the image's own entrypoint so the containerbase environment (`binarySource=install`) is set up — even for runs triggered by a bare `docker exec`, which bypasses the image `ENTRYPOINT`.
-- Overlap-guards runs with an advisory `flock`, so a scheduled run and a manually/externally triggered run never execute two Renovate processes against the same base directory at once. A trigger that arrives while a run is in flight isn't dropped — it queues a single coalesced rerun ("max 1 wait") that fires as soon as the current run finishes.
+- **The daemon owns every run.** PID 1 executes Renovate as its own child process, whichever trigger asked; the `run` subcommand is a thin client that submits the request over an in-container unix socket — forwarding its repo arguments **and its environment**, so a `docker exec -e RENOVATE_X=… … run` override reaches Renovate exactly as if Renovate ran in that exec — and exits with that run's true result.
+- **One run at a time, every request served.** Requests queue in order behind an in-flight run (never two Renovate processes against the same base directory); each gets its own run and its own exit code. See [One run at a time](#one-run-at-a-time-queueing).
+- Routes every Renovate child through the image's own entrypoint so the containerbase environment (`binarySource=install`) is established per run, whatever environment the request carried.
 - File-marker healthcheck via [`github.com/cplieger/health`](https://github.com/cplieger/health): unhealthy when the last run failed, recovers on the next clean run.
-- Streams Renovate's own structured logs straight through to stdout/stderr (set `LOG_FORMAT=json`) for collection by Alloy/Promtail/Loki. The scheduler neither captures nor parses Renovate's output; it emits only its own lifecycle lines, which carry UTC timestamps regardless of the container's `TZ`.
+- Streams Renovate's own structured logs straight through to the container's stdout/stderr (set `LOG_FORMAT=json`) for collection by Alloy/Promtail/Loki — **in both scheduling modes**, because every run is the daemon's child. The scheduler neither captures nor parses Renovate's output; it emits only its own lifecycle lines, which carry UTC timestamps regardless of the container's `TZ`.
 
 ## Configuration
 
@@ -112,18 +113,9 @@ docker exec renovate docker-renovate-scheduler run            # all configured r
 docker exec renovate docker-renovate-scheduler run owner/repo # just one (positional args go straight to Renovate)
 ```
 
-The run exits 0 on success, 1 on failure, and updates the same health marker the long-running container reports.
+The `run` command submits the request to the daemon and blocks until that run completes, exiting 0 on success and 1 on failure — the exit code is the run's own result, even when the run waited its turn behind an in-flight pass. Because the daemon executes the run, its full Renovate output lands on the **container's** log stream in this mode too; the `run` command's own output is just its lifecycle (`triggered run accepted` / `started` / `complete`), which is what the trigger's log (an Ofelia job log, a webhook action's output) shows. Read per-run detail from `docker logs` / Loki; read the outcome from the exit code.
 
-> **Log visibility in external mode.** A triggered `run` is a separate
-> `docker exec` process, so its output -- the scheduler's own `renovate run
-> starting`/`complete` lifecycle lines _and_ Renovate's streamed logs -- goes to
-> the `docker exec` caller's stream (the Ofelia job log, the webhook action's
-> output), **not** the container's main stdout. A pipeline scraping the
-> container's stdout (Docker log driver -> Alloy/Promtail/Loki) sees only the
-> daemon's boot/shutdown lines for an external-mode container, never per-run
-> outcomes -- so read triggered-run results from the trigger itself. The
-> stdout-collection note above applies to **built-in** mode, where the run is
-> PID 1.
+Environment overrides ride along: `docker exec -e RENOVATE_AUTODISCOVER=false renovate docker-renovate-scheduler run owner/repo` forwards the exec's environment with the request, and the daemon starts that run's Renovate child with exactly that environment.
 
 Example with [Ofelia](https://github.com/mcuadros/ofelia):
 
@@ -138,29 +130,31 @@ Example with [Ofelia](https://github.com/mcuadros/ofelia):
       ofelia.job-exec.renovate-run.no-overlap: "true"
 ```
 
-> **Run the trigger as the same user the container runs as.** The run-lock and
-> health marker live in `/tmp`, owned by whoever the container runs as — the
-> image's default `12021`, or whatever you set via Compose `user:`. A bare
-> `docker exec` inherits the container's user
+> **Run the trigger as the same user the container runs as.** The daemon's
+> trigger socket lives in `/tmp`, owner-only (`0600`), owned by whoever the
+> container runs as — the image's default `12021`, or whatever you set via
+> Compose `user:`. A bare `docker exec` inherits the container's user
 > automatically, but Ofelia's `job-exec` does **not**: it runs as the image's
-> default user unless you set `user:` explicitly. If the trigger's user differs
-> from the container's, every run fails with
-> `cannot acquire run lock … permission denied`. So set Ofelia's `user:` to
-> match your Compose `user:` — e.g. `"1000"` if you run the container rootless
-> as `1000:1000`, or leave the default `12021` if you don't override the user.
+> default user unless you set `user:` explicitly. A mismatched trigger user
+> fails immediately and loudly at connect (`cannot reach the scheduler
+> daemon … permission denied`). So set Ofelia's `user:` to match your Compose
+> `user:` — e.g. `"1000"` if you run the container rootless as `1000:1000`,
+> or leave the default `12021` if you don't override the user.
 
-The `docker exec` trigger is clean — no entrypoint prefix needed. The scheduler routes Renovate through the image entrypoint internally, so a bare exec still gets the full containerbase environment.
+The `docker exec` trigger is clean — no entrypoint prefix needed. The daemon routes each Renovate child through the image entrypoint internally, so every run gets the full containerbase environment.
 
-#### Overlap & coalescing
+#### One run at a time (queueing)
 
-A trigger that races an in-flight run does **not** run twice and is **not** lost. The loser sets a single-slot "rerun pending" flag — any number of overlapping triggers collapse into one ("max 1 wait") — and when the active run finishes it immediately reruns once to pick up the queued work, then settles. This matters for release-driven triggering (e.g. a burst of `release` webhooks firing an external action): without coalescing, a trigger that lands mid-run would otherwise wait for the next interval. Reruns are bounded by a small internal cap so a relentless trigger source can't pin the lock, and a failed run stops the loop rather than hammering a broken Renovate. Ofelia's `no-overlap` still prevents redundant _triggers_ from queuing on the scheduler side.
+Two Renovate processes never run against the same base directory: the daemon executes requests **strictly one at a time, in arrival order**. A trigger that lands while a run is in flight is not dropped and not merged — it waits its turn, then runs **exactly what it asked** (its repos, its environment), and its `run` command exits with that run's own result. For release-driven triggering (a burst of `release` webhooks firing an external action) this means every request is served back-to-back after the in-flight pass; runs are idempotent, so a burst costs only time.
+
+The queue is bounded (16 pending). A trigger arriving on a full queue is rejected immediately with exit 1 and a clear reason — honest backpressure, instead of unbounded queueing. Ofelia's `no-overlap` still prevents redundant _triggers_ from stacking up on the scheduler side.
 
 ## Graceful shutdown
 
-On `SIGTERM`/`SIGINT` (a `docker stop`, or a redeploy that recreates the container) the scheduler does not abandon an in-flight run. It waits for the current run to finish before exiting:
+On `SIGTERM`/`SIGINT` (a `docker stop`, or a redeploy that recreates the container) the scheduler does not abandon an in-flight run — every run is the daemon's own child, so shutdown is ordinary draining:
 
-- **Built-in mode** waits for the in-process run (startup or interval) to complete.
-- **External mode** waits for an in-flight `run` — a separate `docker exec` process — to release the shared overlap lock. A redeploy that lands on an in-flight triggered run would otherwise `SIGKILL` it (exit 137) and report the scheduled job as failed.
+- The **in-flight run** completes with its real outcome (bounded by its own `SCHED_TIMEOUT`); its waiting trigger still receives the true exit code.
+- **Queued requests are cancelled explicitly**: each waiting `run` command receives a "scheduler shutting down" result and exits 1, so the trigger reports a failed job instead of hanging or being silently dropped. No new requests are accepted.
 
 Docker terminates the container once the process exits **or** `stop_grace_period` elapses, whichever comes first. So set `stop_grace_period` long enough to cover your **slowest** run -- a cold first run (empty `./data` + on-demand tool installs) can take as long as the 10m healthcheck `start_period`; otherwise Docker `SIGKILL`s the run before the drain completes:
 
@@ -174,11 +168,11 @@ The drain is internally capped at `SCHED_TIMEOUT` (a run can't outlast its own t
 
 ## Subcommands
 
-| Command            | Purpose                                                                                                                                                         |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `daemon` (default) | PID 1; dispatches built-in vs external based on `SCHED_INTERVAL`.                                                                                               |
-| `run [repo …]`     | One Renovate run, then exit (exit 0 on success, 1 on failure). The external-trigger entry point; extra args are passed through to Renovate as repository slugs. |
-| `health`           | The Docker healthcheck probe (stats the marker file).                                                                                                           |
+| Command            | Purpose                                                                                                                                                                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `daemon` (default) | PID 1; owns every Renovate run, serves the trigger socket, and drives the built-in interval when `SCHED_INTERVAL` is a duration.                                                                                                   |
+| `run [repo …]`     | Submit one run to the daemon and wait for it (exit 0 on success, 1 on failure — the run's own result). The external-trigger entry point; extra args are passed through to Renovate as repository slugs, and the exec's environment is forwarded to the run. |
+| `health`           | The Docker healthcheck probe (stats the marker file).                                                                                                                                                                             |
 
 ## Volumes
 
@@ -191,7 +185,7 @@ The drain is internally capped at `SCHED_TIMEOUT` (a run can't outlast its own t
 
 docker-renovate-scheduler has no metrics endpoint; its operational state is in its logs. The scheduler emits its own lifecycle lines as structured `slog` logfmt to the container log (`level=INFO msg="renovate run complete"` on success; `level=ERROR msg="renovate run failed"` or `msg="renovate run timed out"` on failure). Ship the container's logs to Loki (Grafana Alloy's Docker log discovery does this with no configuration) and evaluate these with [Loki's ruler](https://grafana.com/docs/loki/latest/alert/); firing alerts deliver through your Alertmanager exactly like Prometheus metric alerts.
 
-These rules apply to **built-in scheduling** (`SCHED_INTERVAL` set to a duration), where each run is PID 1 and its lifecycle lines reach the container log. In **external-trigger mode** (`SCHED_INTERVAL=off`) each run is a separate `docker exec` process whose output goes to the trigger's own log, not the container's (see [Scheduling modes](#scheduling-modes)), so neither rule sees per-run outcomes; alert on your trigger's job result instead.
+These rules work in **both scheduling modes**: every run — interval-fired or externally triggered — executes inside the daemon, so its lifecycle lines and Renovate's own output always reach the container log. In external-trigger mode your trigger additionally sees each run's exit code (the `run` command returns the run's own result), so trigger-side job alerting works as a second, independent signal.
 
 ```yaml
 groups:
@@ -210,7 +204,7 @@ groups:
           description: >
             The scheduler logged an error: a run that exited non-zero
             (`renovate run failed`), a run that hit SCHED_TIMEOUT
-            (`renovate run timed out`), or a base-directory or lock error. No
+            (`renovate run timed out`), or a base-directory error. No
             dependency PRs are raised until the next clean run. Check the
             container logs, RENOVATE_TOKEN, and platform reachability. A
             graceful shutdown logs at WARN, so a redeploy does not trip this.
@@ -223,19 +217,21 @@ groups:
         annotations:
           summary: "renovate has not completed a run in 13h"
           description: >
-            In built-in mode the scheduler logs `renovate run complete` at
-            startup and then every SCHED_INTERVAL (default 6h). None in 13h
-            while the container is up means the interval loop is wedged and no
-            dependency PRs are being raised even though nothing logged an error.
-            Restart the container. The 13h window spans two default 6h intervals
-            plus margin; adjust it to your SCHED_INTERVAL.
+            The scheduler logs `renovate run complete` after every run in
+            both modes (built-in: at startup and then every SCHED_INTERVAL,
+            default 6h; external: per trigger). None in 13h while the
+            container is up means the schedule is wedged or the triggers
+            stopped arriving, and no dependency PRs are being raised even
+            though nothing logged an error. Restart the container (or check
+            the trigger source). The 13h window spans two default 6h
+            intervals plus margin; adjust it to your cadence.
 ```
 
 Thresholds and the `severity` label are starting points; adjust the deadman window to your `SCHED_INTERVAL` and the `container` selector (or `job` / `service`, depending on your log collector) to your deployment, and route by whatever labels your Alertmanager uses.
 
 ## Healthcheck
 
-`docker-renovate-scheduler health` checks a marker file set after each run. In **built-in** mode the container starts unhealthy and flips to healthy after the first successful run (size `healthcheck.start_period` for the time a first run may take); a failed run flips it unhealthy, and it recovers on the next clean run. In **external** mode it starts healthy (idle, nothing has failed) and each triggered `run` updates the marker.
+`docker-renovate-scheduler health` checks a marker file the daemon sets after each run (the daemon executes every run, so it is the marker's single writer). In **built-in** mode the container starts unhealthy and flips to healthy after the first successful run (size `healthcheck.start_period` for the time a first run may take); a failed run flips it unhealthy, and it recovers on the next clean run. In **external** mode it starts healthy (idle, nothing has failed) and each triggered run updates it.
 
 ```dockerfile
 HEALTHCHECK --interval=60s --timeout=5s --retries=3 --start-period=30s \
@@ -246,7 +242,7 @@ The image bakes a conservative `--start-period=30s`; the example `compose.yaml` 
 
 ## Security
 
-No network listener, no HTTP server, no exposed ports. The unused `docker` CLI is stripped from the base image, removing that container-execution surface (see [Not distroless — on purpose](#not-distroless--on-purpose)). Runs as the base image's non-root user (UID `12021`) by default, or whatever you set via Compose `user:` (e.g. `1000:1000` to match a rootless host UID); the `/tmp` run-lock and health marker are owned by that user, so external run triggers must execute as it (see [Scheduling modes](#scheduling-modes)). The scheduler executes Renovate via the image entrypoint with an explicit argument slice (no shell). Renovate's token is never logged by the scheduler. The base image is Renovate's own (AGPL-3.0); the scheduler wrapper is GPL-3.0.
+No network listener, no HTTP server, no exposed ports — triggering happens over an **in-container unix socket** in `/tmp`, owner-only (`0600`), so trigger authority is scoped to the container's own user (the same boundary `docker exec` already enforces; a mismatched trigger user fails loudly at connect). The unused `docker` CLI is stripped from the base image, removing that container-execution surface (see [Not distroless — on purpose](#not-distroless--on-purpose)). Runs as the base image's non-root user (UID `12021`) by default, or whatever you set via Compose `user:` (e.g. `1000:1000` to match a rootless host UID); the socket and health marker are owned by that user, so external run triggers must execute as it (see [Scheduling modes](#scheduling-modes)). The daemon executes Renovate via the image entrypoint with an explicit argument slice (no shell); a triggered run's forwarded environment crosses only that same-user socket — no broader boundary than the exec that carried it. Renovate's token is never logged by the scheduler. The base image is Renovate's own (AGPL-3.0); the scheduler wrapper is GPL-3.0.
 
 ## Dependencies
 
@@ -257,7 +253,7 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 | renovate/renovate                                                        | [Docker Hub](https://hub.docker.com/r/renovate/renovate) (the runtime base) |
 | golang                                                                   | [Go](https://hub.docker.com/_/golang) (builder stage only)                  |
 | [`github.com/cplieger/health`](https://github.com/cplieger/health)       | file-marker healthcheck                                                     |
-| [`github.com/cplieger/scheduler`](https://github.com/cplieger/scheduler) | interval parsing, overlap flock, rerun flag, drain, graceful command runner |
+| [`github.com/cplieger/scheduler`](https://github.com/cplieger/scheduler) | interval parsing, run loop, graceful command runner                         |
 | [`github.com/cplieger/slogx`](https://github.com/cplieger/slogx)         | slog setup (UTC logfmt)                                                     |
 
 ## Credits
