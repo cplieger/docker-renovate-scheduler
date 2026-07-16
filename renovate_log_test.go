@@ -7,54 +7,57 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/cplieger/slogx/capture"
 )
 
-// triggerCapture is a slog.Handler that records, in invocation order, the
-// "trigger" attribute of every "renovate run starting" record and the "rerun"
-// attribute of every "trigger arrived during run; coalescing rerun" record.
-// The scheduler is logs-only (it emits no metrics and exposes no API), so
-// these structured log lines are its observable output: the per-pass trigger
-// label proves which iteration of the coalescing loop produced the pass, and
-// the rerun counter proves the value the loop logs. Asserting on them lets a
-// test pin the coalescing branch (reruns > 0) and the counter arithmetic
-// (reruns+1) through behaviour rather than internal state.
-type triggerCapture struct {
-	starts []string // trigger= of each "renovate run starting", in order
-	reruns []int64  // rerun= of each "coalescing rerun", in order
-}
+// The scheduler is logs-only (it emits no metrics and exposes no API), so its
+// structured log lines are its observable output: the per-pass trigger label
+// proves which iteration of the coalescing loop produced the pass, and the
+// rerun counter proves the value the loop logs. The helpers below extract
+// those attrs from a capture.Recorder so a test can pin the coalescing branch
+// (reruns > 0) and the counter arithmetic (reruns+1) through behaviour rather
+// than internal state.
 
-func (c *triggerCapture) Enabled(context.Context, slog.Level) bool { return true }
-func (c *triggerCapture) WithAttrs([]slog.Attr) slog.Handler       { return c }
-func (c *triggerCapture) WithGroup(string) slog.Handler            { return c }
-
-func (c *triggerCapture) Handle(_ context.Context, r slog.Record) error {
-	switch r.Message {
-	case "renovate run starting":
+// messageAttrs collects, in capture order, the named attr's value from every
+// record whose Message is exactly msg.
+func messageAttrs(rec *capture.Recorder, msg, key string) []slog.Value {
+	var out []slog.Value
+	for _, r := range rec.Records() {
+		if r.Message != msg {
+			continue
+		}
 		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "trigger" {
-				c.starts = append(c.starts, a.Value.String())
-				return false
-			}
-			return true
-		})
-	case "trigger arrived during run; coalescing rerun":
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "rerun" {
-				c.reruns = append(c.reruns, a.Value.Int64())
+			if a.Key == key {
+				out = append(out, a.Value)
 				return false
 			}
 			return true
 		})
 	}
-	return nil
+	return out
 }
 
-// swapLogger installs h as the default slog handler and returns a restore
-// func. Callers must not run in parallel: slog.Default is process-global.
-func swapLogger(h slog.Handler) (restore func()) {
-	prev := slog.Default()
-	slog.SetDefault(slog.New(h))
-	return func() { slog.SetDefault(prev) }
+// startTriggers returns the trigger= attr of each "renovate run starting"
+// record, in order.
+func startTriggers(rec *capture.Recorder) []string {
+	values := messageAttrs(rec, "renovate run starting", "trigger")
+	out := make([]string, len(values))
+	for i, v := range values {
+		out[i] = v.String()
+	}
+	return out
+}
+
+// rerunCounters returns the rerun= attr of each "trigger arrived during run;
+// coalescing rerun" record, in order.
+func rerunCounters(rec *capture.Recorder) []int64 {
+	values := messageAttrs(rec, "trigger arrived during run; coalescing rerun", "rerun")
+	out := make([]int64, len(values))
+	for i, v := range values {
+		out[i] = v.Int64()
+	}
+	return out
 }
 
 // TestRunRenovatePass_CoalescedRerun_LabelsOnlyRerunsWithSuffix verifies the
@@ -69,8 +72,8 @@ func TestRunRenovatePass_CoalescedRerun_LabelsOnlyRerunsWithSuffix(t *testing.T)
 	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
 	rerunFlag.Clear()
 
-	captured := &triggerCapture{}
-	t.Cleanup(swapLogger(captured))
+	// Not parallel: capture.Default swaps the global slog default.
+	rec := capture.Default(t)
 	calls := 0
 
 	// when
@@ -81,8 +84,8 @@ func TestRunRenovatePass_CoalescedRerun_LabelsOnlyRerunsWithSuffix(t *testing.T)
 		t.Fatal("runRenovatePass() = false, want true (initial pass + one coalesced rerun both succeed)")
 	}
 	wantStarts := []string{"tick", "tick+rerun"}
-	if !slices.Equal(captured.starts, wantStarts) {
-		t.Errorf("logged start triggers = %v, want %v (only reruns carry the +rerun suffix; the first pass is the bare trigger)", captured.starts, wantStarts)
+	if got := startTriggers(rec); !slices.Equal(got, wantStarts) {
+		t.Errorf("logged start triggers = %v, want %v (only reruns carry the +rerun suffix; the first pass is the bare trigger)", got, wantStarts)
 	}
 }
 
@@ -96,8 +99,8 @@ func TestRunRenovatePass_CoalescedRerun_LogsOneBasedRerunCounter(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(rerunFlagPath) })
 	rerunFlag.Clear()
 
-	captured := &triggerCapture{}
-	t.Cleanup(swapLogger(captured))
+	// Not parallel: capture.Default swaps the global slog default.
+	rec := capture.Default(t)
 	calls := 0
 
 	// when
@@ -108,7 +111,7 @@ func TestRunRenovatePass_CoalescedRerun_LogsOneBasedRerunCounter(t *testing.T) {
 		t.Fatal("runRenovatePass() = false, want true")
 	}
 	wantReruns := []int64{1}
-	if !slices.Equal(captured.reruns, wantReruns) {
-		t.Errorf("logged coalescing rerun counters = %v, want %v (the first coalesced rerun is numbered 1, i.e. reruns+1 with reruns=0)", captured.reruns, wantReruns)
+	if got := rerunCounters(rec); !slices.Equal(got, wantReruns) {
+		t.Errorf("logged coalescing rerun counters = %v, want %v (the first coalesced rerun is numbered 1, i.e. reruns+1 with reruns=0)", got, wantReruns)
 	}
 }
