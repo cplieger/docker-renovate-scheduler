@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"syscall"
 	"time"
 
 	scheduler "github.com/cplieger/scheduler/v2"
@@ -57,12 +58,24 @@ func renovateInvocation(repos []string) (name string, args []string) {
 // binary path is the fixed renovateEntrypoint const and the only variable
 // args are operator-supplied repo slugs, so there is no untrusted-input
 // boundary here.
+//
+// Setpgid puts the child in its OWN process group. PID 1 is the base image's
+// dumb-init, which forwards a `docker stop` SIGTERM to the daemon's entire
+// process group — without Setpgid the in-flight Renovate child shares that
+// group and is TERMed out-of-band in the same instant as the daemon (exit
+// 143), silently defeating the shutdown drain (runCtx's WithoutCancel never
+// gets a say). With its own group the child only ever receives signals the
+// daemon sends it (the SCHED_TIMEOUT cancellation path), so a container
+// recreate mid-run drains the pass to completion as designed, bounded by
+// stop_grace_period. Log capture is unaffected: the child inherits the
+// daemon's stdout/stderr fds regardless of process group.
 var defaultCommandRunner scheduler.CommandRunner = func() scheduler.CommandRunner {
 	base := scheduler.NewCommandRunner(scheduler.DefaultGrace)
 	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
 		cmd := base(ctx, name, args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		return cmd
 	}
 }()
