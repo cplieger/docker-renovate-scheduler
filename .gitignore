@@ -9,3 +9,7 @@
 
 # Built binary
 /docker-renovate-scheduler
+
+# Go workspace
+go.work
+go.work.sum
