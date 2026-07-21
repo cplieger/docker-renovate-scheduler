@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -34,6 +35,35 @@ type daemon struct {
 	// mid-pass; the container's stop_grace_period is the real outer bound.
 	runCtx  context.Context
 	timeout time.Duration
+	// healthMu orders the shutdown health transition against per-run marker
+	// updates: once beginShutdown flips stopping, a draining run's completion
+	// must not write the marker back to healthy. The health library's own
+	// mutex only serializes individual Set calls; it gives the shutdown write
+	// no precedence, so the ordering guard lives here.
+	healthMu sync.Mutex
+	stopping bool
+}
+
+// beginShutdown records that shutdown has begun and marks the daemon
+// unhealthy. After this, setRunHealth becomes a no-op: the shutdown state is
+// final until Cleanup, no matter when a draining run completes.
+func (d *daemon) beginShutdown() {
+	d.healthMu.Lock()
+	defer d.healthMu.Unlock()
+	d.stopping = true
+	d.marker.Set(false)
+}
+
+// setRunHealth records a run outcome on the health marker, unless shutdown
+// has already begun — a late completion of the draining in-flight run must
+// not resurrect a healthy marker after observers were told the daemon is
+// going down.
+func (d *daemon) setRunHealth(ok bool) {
+	d.healthMu.Lock()
+	defer d.healthMu.Unlock()
+	if !d.stopping {
+		d.marker.Set(ok)
+	}
 }
 
 // runDaemon is the composition root for the long-running container (the
@@ -108,8 +138,9 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	<-ctx.Done()
 	slog.Info("shutting down", "cause", context.Cause(ctx))
 	// Mark unhealthy immediately so observers see the signal before the run
-	// drain (a Renovate run can take a while).
-	marker.Set(false)
+	// drain (a Renovate run can take a while); beginShutdown also pins the
+	// state so the draining run's completion cannot flip it back healthy.
+	d.beginShutdown()
 
 	// Stop admission (socket + queue), then wait: the executor finishes the
 	// in-flight run uncancelled (runCtx) and delivers cancellation results to
@@ -205,7 +236,7 @@ func (d *daemon) execute(shutdownCtx context.Context, j *job) {
 	dir := baseDirForEnv(j.env)
 	if err := verifyBaseDirAt(d.runCtx, dir); err != nil {
 		logBaseDirError(dir, err)
-		d.marker.Set(false)
+		d.setRunHealth(false)
 		j.finish(runOutcome{ok: false, duration: time.Since(start), reason: "base directory not writable"})
 		return
 	}
@@ -216,6 +247,6 @@ func (d *daemon) execute(shutdownCtx context.Context, j *job) {
 	}
 
 	ok := runRenovateOnce(d.runCtx, d.timeout, j.trigger, j.repos, j.env, d.newCmd)
-	d.marker.Set(ok)
+	d.setRunHealth(ok)
 	j.finish(runOutcome{ok: ok, duration: time.Since(start)})
 }

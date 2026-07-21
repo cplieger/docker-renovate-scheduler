@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -147,6 +146,15 @@ func verifyBaseDir(ctx context.Context) error {
 	return verifyBaseDirAt(ctx, baseDir())
 }
 
+// verifySlot is a process-wide one-slot semaphore serializing base-dir
+// verification probes. The 10-second context bounds only the caller's wait,
+// not the filesystem syscalls in the probe goroutine: on a hung bind/network
+// filesystem the goroutine stays blocked after the caller returns. The slot
+// is released only when that goroutine actually finishes, so later calls
+// time out waiting for the slot instead of stacking another blocked
+// goroutine (and potentially an OS thread) per probe.
+var verifySlot = make(chan struct{}, 1)
+
 // verifyBaseDirAt is verifyBaseDir against an explicit directory — the
 // per-run form, so a job's forwarded RENOVATE_BASE_DIR is validated instead
 // of the daemon's own.
@@ -154,21 +162,16 @@ func verifyBaseDirAt(ctx context.Context, dir string) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
+	select {
+	case verifySlot <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("base dir verification timed out: %w", ctx.Err())
+	}
+
 	done := make(chan error, 1)
 	go func() {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			done <- fmt.Errorf("mkdir base dir %q: %w", dir, err)
-			return
-		}
-		testFile := filepath.Join(dir, ".write_test")
-		f, err := os.Create(testFile) // #nosec G304 -- fixed filename in the operator-provided base dir
-		if err != nil {
-			done <- fmt.Errorf("base dir %q not writable: %w", dir, err)
-			return
-		}
-		_ = f.Close()
-		_ = os.Remove(testFile)
-		done <- nil
+		defer func() { <-verifySlot }()
+		done <- probeBaseDirWrite(dir)
 	}()
 
 	select {
@@ -177,4 +180,36 @@ func verifyBaseDirAt(ctx context.Context, dir string) error {
 	case err := <-done:
 		return err
 	}
+}
+
+// probeBaseDirWrite proves the base directory is genuinely writable: create
+// it if missing, then create a unique probe file, write and sync one byte,
+// and close and remove it — every stage checked. A filesystem can accept the
+// directory entry yet reject the first data write, surface a delayed failure
+// only at Sync/Close, or deny cleanup; each of those breaks the preflight
+// promise ("Renovate can write here"), so each fails the probe.
+func probeBaseDirWrite(dir string) (err error) {
+	if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
+		return fmt.Errorf("mkdir base dir %q: %w", dir, mkErr)
+	}
+	f, err := os.CreateTemp(dir, ".write_test-*")
+	if err != nil {
+		return fmt.Errorf("base dir %q not writable: %w", dir, err)
+	}
+	testFile := f.Name()
+	defer func() {
+		if closeErr := f.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("close base-dir probe %q: %w", testFile, closeErr)
+		}
+		if removeErr := os.Remove(testFile); err == nil && removeErr != nil {
+			err = fmt.Errorf("remove base-dir probe %q: %w", testFile, removeErr)
+		}
+	}()
+	if _, writeErr := f.Write([]byte{0}); writeErr != nil {
+		return fmt.Errorf("write base-dir probe %q: %w", testFile, writeErr)
+	}
+	if syncErr := f.Sync(); syncErr != nil {
+		return fmt.Errorf("sync base-dir probe %q: %w", testFile, syncErr)
+	}
+	return nil
 }

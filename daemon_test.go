@@ -204,9 +204,10 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 		t.Fatalf("submit(queued) = %v", err)
 	}
 
-	cancel()        // SIGTERM lands mid-run
-	d.queue.close() // daemon stops admission
-	close(proceed)  // the in-flight child finishes its pass
+	cancel()          // SIGTERM lands mid-run
+	d.beginShutdown() // runDaemon's immediate unhealthy transition
+	d.queue.close()   // daemon stops admission
+	close(proceed)    // the in-flight child finishes its pass
 
 	select {
 	case out := <-inflight.result:
@@ -215,6 +216,9 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("in-flight result not delivered")
+	}
+	if d.marker.Healthy() {
+		t.Error("health marker became healthy after shutdown began (the draining run's completion must not overwrite the shutdown state)")
 	}
 	select {
 	case out := <-queued.result:

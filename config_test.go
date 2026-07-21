@@ -136,23 +136,42 @@ func TestVerifyBaseDir(t *testing.T) {
 	})
 }
 
-// TestVerifyBaseDir_ReportsNotWritableWhenWriteProbeCannotBeCreated pins the
-// write-probe failure path with a root-safe fixture.
-func TestVerifyBaseDir_ReportsNotWritableWhenWriteProbeCannotBeCreated(t *testing.T) {
-	dir := t.TempDir()
-	probe := filepath.Join(dir, ".write_test")
-	if err := os.Mkdir(probe, 0o700); err != nil {
-		t.Fatalf("create blocking probe directory: %v", err)
-	}
-	t.Setenv("RENOVATE_BASE_DIR", dir)
+// TestProbeBaseDirWrite pins the staged write probe at the helper boundary:
+// a clean probe writes, syncs, closes, and removes its file (no residue), and
+// a directory that cannot take a new file reports the actionable "not
+// writable" error.
+func TestProbeBaseDirWrite(t *testing.T) {
+	t.Run("writes, syncs, and cleans up its probe file", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := probeBaseDirWrite(dir); err != nil {
+			t.Fatalf("probeBaseDirWrite() = %v, want nil", err)
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read probe dir: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("probe left %d file(s) behind, want none", len(entries))
+		}
+	})
+	t.Run("reports not writable when the probe cannot be created", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses directory write permissions")
+		}
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-	err := verifyBaseDir(context.Background())
-	if err == nil {
-		t.Fatal("verifyBaseDir() = nil, want error when the write probe cannot be created")
-	}
-	if !strings.Contains(err.Error(), "not writable") {
-		t.Errorf("verifyBaseDir() error = %v, want it to mention %q", err, "not writable")
-	}
+		err := probeBaseDirWrite(dir)
+		if err == nil {
+			t.Fatal("probeBaseDirWrite() = nil, want error when the write probe cannot be created")
+		}
+		if !strings.Contains(err.Error(), "not writable") {
+			t.Errorf("probeBaseDirWrite() error = %v, want it to mention %q", err, "not writable")
+		}
+	})
 }
 
 // TestLoadRunTimeout_ZeroIsNonPositiveAndUsesDefault pins the `d <= 0`
