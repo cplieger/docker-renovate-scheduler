@@ -83,9 +83,7 @@ func TestRunRenovateOnce_EnvHandling(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("RENOVATE_TEST_MARKER", "inherited")
-			runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-				return exec.CommandContext(ctx, "sh", "-c", tt.script)
-			}
+			runner := shellAssertRunner(tt.script)
 			if ok := runRenovateOnce(context.Background(), time.Minute, "test", nil, tt.env, runner); !ok {
 				t.Errorf("runRenovateOnce() = false: the child did not see the expected environment (env=%v)", tt.env)
 			}

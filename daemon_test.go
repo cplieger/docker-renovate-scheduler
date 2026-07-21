@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -77,24 +78,12 @@ func TestExecutor_RunsJobsInOrderWithTheirScopes(t *testing.T) {
 	if len(argsLog) != 2 {
 		t.Fatalf("runner invoked %d times, want 2", len(argsLog))
 	}
-	if want := []string{"renovate", "owner/a"}; !equalSlices(argsLog[0], want) {
+	if want := []string{"renovate", "owner/a"}; !slices.Equal(argsLog[0], want) {
 		t.Errorf("run 1 args = %v, want %v (the job's own scope)", argsLog[0], want)
 	}
-	if want := []string{"renovate"}; !equalSlices(argsLog[1], want) {
+	if want := []string{"renovate"}; !slices.Equal(argsLog[1], want) {
 		t.Errorf("run 2 args = %v, want %v (unscoped job runs argless)", argsLog[1], want)
 	}
-}
-
-func equalSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // TestExecutor_MarkerFollowsRunOutcome pins the health contract: the marker
@@ -358,4 +347,86 @@ func startTriggers(rec *capture.Recorder) []string {
 		})
 	}
 	return out
+}
+
+// TestRunDaemon_BootFailuresReturnError pins the fail-fast boot contract:
+// an unwritable base dir or an unbindable trigger socket must fail runDaemon
+// with an error (main exits non-zero, so the container restarts loudly)
+// instead of booting a daemon that cannot run or cannot be triggered.
+func TestRunDaemon_BootFailuresReturnError(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	t.Run("unwritable base dir fails boot", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "not-a-dir")
+		if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		t.Setenv("RENOVATE_BASE_DIR", file)
+		sock := filepath.Join(t.TempDir(), "trigger.sock")
+		if err := runDaemon(context.Background(), sock, recordingRunner("true", nil)); err == nil {
+			t.Error("runDaemon() = nil, want error when the base dir is unwritable at boot")
+		}
+	})
+	t.Run("unbindable socket path fails boot", func(t *testing.T) {
+		t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+		sock := filepath.Join(t.TempDir(), "missing-parent", "trigger.sock")
+		if err := runDaemon(context.Background(), sock, recordingRunner("true", nil)); err == nil {
+			t.Error("runDaemon() = nil, want error when the socket cannot be bound")
+		}
+	})
+}
+
+// TestRunDaemon_BuiltinModeStartsUnhealthyThenFlipsHealthy is the built-in
+// half of the composition-root integration test (the external half is
+// TestRunDaemon_ExternalModeBootsHealthyServesAndShutsDownCleanly): built-in
+// mode boots UNHEALTHY until the startup run proves the setup, then flips
+// healthy — the documented healthcheck contract. The runner holds the startup
+// run open so the boot state is observable without a race. Not parallel: it
+// uses the package-global healthMarkerPath.
+func TestRunDaemon_BuiltinModeStartsUnhealthyThenFlipsHealthy(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	t.Setenv("SCHED_INTERVAL", "6h") // one startup run; no further tick within the test
+	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	var once sync.Once
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		once.Do(func() { close(entered) })
+		<-proceed
+		return exec.CommandContext(ctx, "true")
+	}
+
+	sock := filepath.Join(t.TempDir(), "trigger.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var runErr error
+	go func() {
+		defer close(done)
+		runErr = runDaemon(ctx, sock, runner)
+	}()
+
+	<-entered // the startup run is executing; the marker must still be unhealthy
+	if _, err := os.Stat(healthMarkerPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("marker present before the first run completed; stat err = %v, want not-exist (built-in mode boots unhealthy)", err)
+	}
+	close(proceed) // let the startup run finish
+
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(healthMarkerPath)
+		return err == nil
+	}, "marker not set healthy after the startup run completed")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runDaemon did not return after shutdown")
+	}
+	if runErr != nil {
+		t.Errorf("runDaemon() = %v, want nil", runErr)
+	}
 }

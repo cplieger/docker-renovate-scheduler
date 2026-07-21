@@ -48,6 +48,9 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 
 	if err := verifyBaseDir(ctx); err != nil {
 		logBaseDirError(err)
+		// A docker restart preserves /tmp: overwrite a previous life's
+		// healthy marker so a crash-looping boot never probes healthy.
+		health.NewMarker(healthMarkerPath).Set(false)
 		return err
 	}
 
@@ -60,6 +63,9 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	ln, err := listenTrigger(socketPath)
 	if err != nil {
 		slog.Error("cannot bind trigger socket", "path", socketPath, "error", err)
+		// Same stale-marker guard as the base-dir failure above: a restart
+		// preserves /tmp, so a crash-looping boot must not probe healthy.
+		health.NewMarker(healthMarkerPath).Set(false)
 		return err
 	}
 	defer func() { _ = os.Remove(socketPath) }()
@@ -86,7 +92,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	}()
 
 	srv := &triggerServer{queue: d.queue}
-	go srv.serve(ln)
+	srv.handlers.Go(func() { srv.serve(ln) })
 
 	tickerDone := startTicker(ctx, d, interval, scheduleEnabled)
 
@@ -94,8 +100,8 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	if scheduleEnabled {
 		mode = "built-in"
 	}
-	slog.Info("container started ("+mode+" scheduling)",
-		"interval", interval, "timeout", timeout, "base_dir", baseDir(), "socket", socketPath)
+	slog.Info("container started",
+		"mode", mode, "interval", interval, "timeout", timeout, "base_dir", baseDir(), "socket", socketPath)
 
 	<-ctx.Done()
 	slog.Info("shutting down", "cause", context.Cause(ctx))
@@ -166,6 +172,7 @@ func (d *daemon) tick(trigger string) {
 func (d *daemon) runJobs(shutdownCtx context.Context) {
 	for j := range d.queue.jobs {
 		if shutdownCtx.Err() != nil {
+			slog.Warn("queued run cancelled by shutdown", "trigger", j.trigger, "repos", j.repos)
 			j.finish(runOutcome{ok: false, reason: "cancelled: scheduler shutting down"})
 			continue
 		}

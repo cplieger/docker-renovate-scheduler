@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -28,6 +30,10 @@ const (
 	// eventWriteTimeout bounds each status write, so a dead client cannot
 	// block a handler.
 	eventWriteTimeout = 10 * time.Second
+	// maxRequestBytes caps one request line. A forwarded environ is
+	// kernel-bounded to ~2 MiB per exec, so 8 MiB is generous headroom;
+	// anything larger is a bug or abuse and is rejected as undecodable.
+	maxRequestBytes = 8 << 20
 )
 
 // listenTrigger binds the unix socket at path with owner-only permissions.
@@ -38,8 +44,13 @@ func listenTrigger(path string) (net.Listener, error) {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	// Narrow the umask so the socket is born owner-only; the Chmod below is
+	// then belt-and-braces instead of closing a world-connectable window.
+	// Safe: listenTrigger runs before any other goroutine creates files.
+	oldMask := syscall.Umask(0o177)
 	var lc net.ListenConfig
 	ln, err := lc.Listen(context.Background(), "unix", path)
+	syscall.Umask(oldMask)
 	if err != nil {
 		return nil, err
 	}
@@ -57,10 +68,13 @@ func listenTrigger(path string) (net.Listener, error) {
 // triggerServer accepts run requests and bridges them onto the queue.
 type triggerServer struct {
 	queue *runQueue
-	// handlers tracks per-connection goroutines so shutdown can wait for
-	// every accepted request to receive its final event before the daemon
-	// exits. Bounded: every submitted job is guaranteed a result, and a
-	// not-yet-submitted connection is bounded by requestReadTimeout.
+	// handlers tracks the accept loop plus per-connection goroutines so
+	// shutdown can wait for every accepted request to receive its final
+	// event before the daemon exits. The serve loop registers itself here
+	// too (its caller uses handlers.Go), keeping the counter non-zero until
+	// Accept has failed with net.ErrClosed -- so no handler Add can race
+	// Wait at zero. Bounded: every submitted job is guaranteed a result,
+	// and a not-yet-submitted connection is bounded by requestReadTimeout.
 	handlers sync.WaitGroup
 }
 
@@ -86,7 +100,7 @@ func (s *triggerServer) serve(ln net.Listener) {
 func (s *triggerServer) handle(conn net.Conn) {
 	var req wireRequest
 	_ = conn.SetReadDeadline(time.Now().Add(requestReadTimeout))
-	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(conn, maxRequestBytes)).Decode(&req); err != nil {
 		slog.Warn("trigger request rejected: undecodable", "error", err)
 		writeEvent(conn, wireEvent{Event: eventDone, OK: false, Reason: "undecodable request"})
 		return
@@ -102,8 +116,13 @@ func (s *triggerServer) handle(conn net.Conn) {
 	slog.Info("triggered run queued", "repos", req.Repos)
 	writeEvent(conn, wireEvent{Event: eventQueued})
 
-	// Relay the start signal if it comes; a job cancelled before starting
-	// delivers its result without ever starting, so wait on both.
+	relayEvents(conn, j)
+}
+
+// relayEvents streams the job's lifecycle to the client: a started event if
+// the run begins (a job cancelled before starting delivers its result without
+// ever starting, so it waits on both), then exactly one final done event.
+func relayEvents(conn net.Conn, j *job) {
 	started := j.started
 	for {
 		select {
@@ -111,6 +130,17 @@ func (s *triggerServer) handle(conn net.Conn) {
 			writeEvent(conn, wireEvent{Event: eventStarted})
 			started = nil // block this case from now on; wait for the result
 		case out := <-j.result:
+			if started != nil {
+				// Both channels can be ready in one select round (a fast
+				// run), so drain the start signal first: the wire order the
+				// protocol documents (queued -> started -> done) must hold
+				// for a run that actually started.
+				select {
+				case <-started:
+					writeEvent(conn, wireEvent{Event: eventStarted})
+				default:
+				}
+			}
 			writeEvent(conn, wireEvent{
 				Event:      eventDone,
 				OK:         out.ok,

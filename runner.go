@@ -76,6 +76,16 @@ var defaultCommandRunner scheduler.CommandRunner = func() scheduler.CommandRunne
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			// Signal the child's whole process group (Setpgid makes it the
+			// leader): the run's package-manager grandchildren must stop
+			// with it, or they keep writing to the base dir past the timeout.
+			err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
 		return cmd
 	}
 }()
@@ -108,6 +118,12 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string,
 		slog.Info("renovate run complete", "trigger", trigger, "duration_ms", durationMs)
 		return true
 	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
+		// Sweep the child's process group: os/exec's WaitDelay SIGKILL hits
+		// only the direct child, and surviving package-manager grandchildren
+		// would race the next run against the same base directory.
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
 		// The run exceeded SCHED_TIMEOUT. Logged distinctly from a genuine
 		// non-zero Renovate exit so operators can tell a slow run from a
 		// real failure during triage.

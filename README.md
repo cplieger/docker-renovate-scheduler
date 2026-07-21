@@ -207,7 +207,8 @@ groups:
             (`renovate run timed out`), or a base-directory error. No
             dependency PRs are raised until the next clean run. Check the
             container logs, RENOVATE_TOKEN, and platform reachability. A
-            graceful shutdown logs at WARN, so a redeploy does not trip this.
+            graceful shutdown drains the in-flight run and logs no error,
+            so a redeploy does not trip this.
       - alert: RenovateNoRecentRun
         expr: |
           absent_over_time({container="renovate"} |= `renovate run complete` [13h])

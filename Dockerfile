@@ -43,7 +43,7 @@ USER root
 #
 # The final assertion pins the base image's own entrypoint script: the
 # scheduler routes every Renovate invocation through it (renovateEntrypoint in
-# renovate.go), so a base bump that relocates that private path must fail THIS
+# runner.go), so a base bump that relocates that private path must fail THIS
 # build, not every run at runtime.
 RUN find /opt/containerbase -name docker -prune -exec rm -rf {} + \
     && rm -f /usr/local/bin/docker \

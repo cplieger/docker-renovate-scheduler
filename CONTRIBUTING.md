@@ -123,7 +123,7 @@ never parses or rewrites Renovate config.
   never a formatted string (the `sloglint` linter enforces it).
 - `main()` orchestration and the renovate subprocess exec are
   intentionally not unit-tested (process-level I/O, validated by container logs
-  and Grafana alerting). New logic in `config.go` / `renovate.go`
+  and Grafana alerting). New logic in `config.go` / `runner.go`
   is expected to come with tests.
 - Tests are table-driven and live beside the code (`*_test.go`). They cover
   the queue contract (FIFO, backpressure, close semantics), the wire protocol

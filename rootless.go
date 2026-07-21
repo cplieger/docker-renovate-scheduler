@@ -55,8 +55,5 @@ func rootlessCacheLikelyUnwritable(euid int, getenv func(string) string) bool {
 	// so they are not a reliable "caches work" signal and must not suppress on their own.
 	// (Redirecting via a Renovate config.js customEnvVariables is equally valid but not
 	// visible here, so that setup sees a benign false-positive.)
-	if getenv("RENOVATE_CUSTOM_ENV_VARIABLES") != "" {
-		return false
-	}
-	return true
+	return getenv("RENOVATE_CUSTOM_ENV_VARIABLES") == ""
 }

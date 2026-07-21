@@ -38,7 +38,7 @@ func startTestServer(t *testing.T, runner scheduler.CommandRunner) (sock string,
 		t.Fatalf("listenTrigger() = %v", err)
 	}
 	srv := &triggerServer{queue: d.queue}
-	go srv.serve(ln)
+	srv.handlers.Go(func() { srv.serve(ln) })
 
 	t.Cleanup(func() {
 		_ = ln.Close()
@@ -266,7 +266,7 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 		t.Fatalf("listenTrigger() = %v", err)
 	}
 	srv := &triggerServer{queue: d.queue}
-	go srv.serve(ln)
+	srv.handlers.Go(func() { srv.serve(ln) })
 
 	// Occupy the executor, then queue a second request over the wire.
 	decA, _ := rawRequest(t, sock, wireRequest{})
@@ -310,4 +310,34 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 
 	<-execDone
 	srv.handlers.Wait()
+}
+
+// TestServer_DepartedClientDoesNotBlockRunOrShutdown pins writeEvent's
+// best-effort contract: a client that disconnects right after submitting
+// forfeits only its own visibility — the run still executes, and the handler
+// goroutine still terminates so shutdown never hangs on a dead connection.
+func TestServer_DepartedClientDoesNotBlockRunOrShutdown(t *testing.T) {
+	ran := make(chan struct{})
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		close(ran)
+		return exec.CommandContext(ctx, "true")
+	}
+	sock, _ := startTestServer(t, runner)
+
+	conn, err := net.DialTimeout("unix", sock, time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if err := json.NewEncoder(conn).Encode(wireRequest{Repos: []string{"owner/gone"}}); err != nil {
+		t.Fatalf("send request: %v", err)
+	}
+	_ = conn.Close() // depart before any event arrives
+
+	select {
+	case <-ran:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the run did not execute after the client departed")
+	}
+	// startTestServer's cleanup does srv.handlers.Wait(); reaching the end of
+	// the test without a hang is the shutdown half of the assertion.
 }
