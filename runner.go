@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -90,13 +91,42 @@ var defaultCommandRunner scheduler.CommandRunner = func() scheduler.CommandRunne
 	}
 }()
 
+// withDumbInitInGroup returns the Renovate child's environment — the
+// forwarded env when non-nil, else the daemon's own — with DUMB_INIT_SETSID
+// forced to 0 (any pre-existing entry is dropped first). The entrypoint chain
+// (renovate-entrypoint.sh → containerbase docker-entrypoint.sh) execs a
+// nested per-run `dumb-init --`, and default-mode dumb-init forks Renovate
+// into a NEW session/process group below the Setpgid group the scheduler
+// created. Both escalation stages (the Cancel group SIGTERM and the
+// post-timeout group SIGKILL in runRenovateOnce) address only
+// -cmd.Process.Pid, so a session-escaped Renovate tree would survive them,
+// keep writing the base dir, and overlap the next FIFO job. DUMB_INIT_SETSID=0
+// keeps dumb-init in signal-proxy mode without the setsid, so the
+// scheduler-created group stays the one containment boundary.
+func withDumbInitInGroup(env []string) []string {
+	if env == nil {
+		env = os.Environ()
+	}
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "DUMB_INIT_SETSID=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "DUMB_INIT_SETSID=0")
+}
+
 // runRenovateOnce executes exactly one Renovate pass and reports whether it
 // exited cleanly. The pass is bounded by timeout (SCHED_TIMEOUT); on expiry
 // the command runner sends SIGTERM with a short grace before SIGKILL. env,
 // when non-nil, replaces the child's environment wholesale (a socket client's
-// forwarded environment); nil inherits the daemon's. The context is never
-// cancelled by shutdown — the daemon does not abandon an in-flight run — so
-// the only cancellation cause is the timeout.
+// forwarded environment); nil inherits the daemon's — either way with ONE
+// scheduler-internal override, DUMB_INIT_SETSID=0, so the nested per-run
+// dumb-init cannot detach the Renovate tree from the scheduler's process
+// group (see withDumbInitInGroup). The context is never cancelled by
+// shutdown — the daemon does not abandon an in-flight run — so the only
+// cancellation cause is the timeout.
 func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string, repos, env []string, newCmd scheduler.CommandRunner) (ok bool) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -107,9 +137,7 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string,
 	slog.Info("renovate run starting", "trigger", trigger, "repos", repos, "timeout", timeout)
 
 	cmd := newCmd(runCtx, name, args...)
-	if env != nil {
-		cmd.Env = env
-	}
+	cmd.Env = withDumbInitInGroup(env)
 	runErr := cmd.Run()
 	durationMs := time.Since(start).Milliseconds()
 

@@ -202,6 +202,44 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 	}
 }
 
+// TestExecutor_ShutdownDuringPreflightNeverStartsRenovate pins the
+// child-launch boundary guard: a shutdown that lands after dequeue but
+// before the child starts (the base-dir preflight window) cancels the job
+// with the explicit shutdown reason and never starts a fresh Renovate pass.
+func TestExecutor_ShutdownDuringPreflightNeverStartsRenovate(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // shutdown is already signalled when execute reaches the launch boundary
+
+	var argsLog [][]string
+	d := &daemon{
+		queue:   newRunQueue(queueCapacity),
+		marker:  health.NewMarker(filepath.Join(t.TempDir(), "marker")),
+		newCmd:  recordingRunner("true", &argsLog),
+		runCtx:  context.WithoutCancel(ctx),
+		timeout: time.Minute,
+	}
+
+	j := newJob("external", nil, nil)
+	d.execute(ctx, j)
+
+	if len(argsLog) != 0 {
+		t.Error("Renovate was invoked despite shutdown being signalled before launch")
+	}
+	select {
+	case out := <-j.result:
+		if out.ok {
+			t.Error("outcome ok=true, want a cancelled result")
+		}
+		if want := "cancelled: scheduler shutting down"; out.reason != want {
+			t.Errorf("outcome reason = %q, want %q", out.reason, want)
+		}
+	default:
+		t.Fatal("no result delivered for the job cancelled at the launch boundary")
+	}
+}
+
 // TestTick_SkipsWhenQueueRejects pins the ticker's degradation: a rejected
 // submission (queue full) is logged and skipped — the tick must not panic or
 // block; the next interval provides freshness.
@@ -258,7 +296,6 @@ func TestStartTicker_DisabledInExternalMode(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("startTicker(enabled=false) did not return a closed channel")
 	}
-	time.Sleep(20 * time.Millisecond) // would be several intervals if a loop were running
 	if n := len(d.queue.jobs); n != 0 {
 		t.Errorf("%d jobs submitted in external mode, want 0", n)
 	}

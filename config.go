@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/cplieger/envx"
@@ -74,6 +76,28 @@ func baseDir() string {
 	return envx.String("RENOVATE_BASE_DIR", defaultBaseDir)
 }
 
+// baseDirForEnv resolves the base directory from the environment the child
+// will actually receive: a job's forwarded environment (last value wins for
+// duplicate keys, matching exec semantics), or the daemon's own environment
+// when env is nil (ticker-submitted runs). This keeps the per-run preflight
+// validating the same directory Renovate will use, honouring the documented
+// complete RENOVATE_* passthrough.
+func baseDirForEnv(env []string) string {
+	if env == nil {
+		return baseDir()
+	}
+	for _, kv := range slices.Backward(env) {
+		key, value, ok := strings.Cut(kv, "=")
+		if ok && key == "RENOVATE_BASE_DIR" {
+			if value == "" {
+				return defaultBaseDir
+			}
+			return value
+		}
+	}
+	return defaultBaseDir
+}
+
 // loadInterval parses SCHED_INTERVAL and reports the built-in scheduler
 // cadence and whether the built-in scheduler runs at all. It delegates to
 // scheduler.ParseInterval, the fleet-standard *_INTERVAL parser: a Go
@@ -107,8 +131,8 @@ func loadRunTimeout() time.Duration {
 
 // logBaseDirError reports the "base directory not writable" failure with its
 // remediation hint, so the boot-time and per-run checks cannot drift.
-func logBaseDirError(err error) {
-	slog.Error("base directory not writable", "path", baseDir(), "error", err,
+func logBaseDirError(dir string, err error) {
+	slog.Error("base directory not writable", "path", dir, "error", err,
 		"hint", "mount a writable volume at RENOVATE_BASE_DIR (the image default is /data); a read_only container needs a /data volume or tmpfs")
 }
 
@@ -120,8 +144,13 @@ func logBaseDirError(err error) {
 // run, so a volume that degrades after boot fails loudly instead of deep
 // inside Renovate.
 func verifyBaseDir(ctx context.Context) error {
-	dir := baseDir()
+	return verifyBaseDirAt(ctx, baseDir())
+}
 
+// verifyBaseDirAt is verifyBaseDir against an explicit directory — the
+// per-run form, so a job's forwarded RENOVATE_BASE_DIR is validated instead
+// of the daemon's own.
+func verifyBaseDirAt(ctx context.Context, dir string) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 

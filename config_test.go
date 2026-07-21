@@ -109,29 +109,22 @@ func TestVerifyBaseDir(t *testing.T) {
 	})
 }
 
-// TestVerifyBaseDir_ReportsNotWritableWhenDirExistsButUnwritable covers the
-// os.Create error branch (config.go ~line 173): the base dir already exists
-// (so MkdirAll is a no-op) but is not writable, so creating .write_test fails
-// and verifyBaseDir must report "not writable" -- distinct from the "mkdir"
-// error the existing regular-file case exercises. Skipped as root, which
-// bypasses directory write permissions and makes the branch unreachable.
-func TestVerifyBaseDir_ReportsNotWritableWhenDirExistsButUnwritable(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory write permissions; the unwritable-dir branch is unreachable as root")
+// TestVerifyBaseDir_ReportsNotWritableWhenWriteProbeCannotBeCreated pins the
+// write-probe failure path with a root-safe fixture.
+func TestVerifyBaseDir_ReportsNotWritableWhenWriteProbeCannotBeCreated(t *testing.T) {
+	dir := t.TempDir()
+	probe := filepath.Join(dir, ".write_test")
+	if err := os.Mkdir(probe, 0o700); err != nil {
+		t.Fatalf("create blocking probe directory: %v", err)
 	}
-	dir := filepath.Join(t.TempDir(), "ro-base")
-	if err := os.Mkdir(dir, 0o555); err != nil { // readable + executable, not writable
-		t.Fatalf("setup: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) }) // let TempDir cleanup remove it
 	t.Setenv("RENOVATE_BASE_DIR", dir)
 
 	err := verifyBaseDir(context.Background())
 	if err == nil {
-		t.Fatal("verifyBaseDir() = nil, want error when the base dir exists but is not writable")
+		t.Fatal("verifyBaseDir() = nil, want error when the write probe cannot be created")
 	}
 	if !strings.Contains(err.Error(), "not writable") {
-		t.Errorf("verifyBaseDir() error = %v, want it to mention \"not writable\"", err)
+		t.Errorf("verifyBaseDir() error = %v, want it to mention %q", err, "not writable")
 	}
 }
 

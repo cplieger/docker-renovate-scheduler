@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -165,6 +166,80 @@ func TestRunRenovateOnce_TimeoutCancelsRun(t *testing.T) {
 	}
 }
 
+// TestRunRenovateOnce_EnvForcesDumbInitInGroup pins the one scheduler-
+// internal environment override: whatever env a run starts from (nil/ticker
+// or a forwarded client environ, even one that tries to re-enable setsid),
+// the child sees exactly DUMB_INIT_SETSID=0, so the nested per-run dumb-init
+// in the image entrypoint chain stays in signal-proxy mode instead of
+// detaching Renovate into a new session the group signals cannot reach.
+func TestRunRenovateOnce_EnvForcesDumbInitInGroup(t *testing.T) {
+	tests := []struct {
+		name string
+		env  []string
+	}{
+		{"ticker run (nil env inherits daemon environ)", nil},
+		{"forwarded env without the variable", []string{"RENOVATE_X=y", "PATH=" + os.Getenv("PATH")}},
+		{"forwarded env re-enabling setsid is overridden", []string{"DUMB_INIT_SETSID=1", "PATH=" + os.Getenv("PATH")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("DUMB_INIT_SETSID", "1") // daemon environ must be overridden too
+			runner := shellAssertRunner(`[ "$DUMB_INIT_SETSID" = "0" ]`)
+			if ok := runRenovateOnce(context.Background(), time.Minute, "test", nil, tt.env, runner); !ok {
+				t.Errorf("runRenovateOnce() = false: child did not see DUMB_INIT_SETSID=0 (env=%v)", tt.env)
+			}
+		})
+	}
+}
+
+// TestRunRenovateOnce_TimeoutKillsSessionEscapedDescendants is the process-
+// level regression test for the containment boundary: the image entrypoint
+// chain ends in a nested per-run dumb-init whose DEFAULT mode forks Renovate
+// into a new session/process group, out of reach of both group escalation
+// stages (Cancel's SIGTERM and the post-timeout SIGKILL, both aimed at
+// -cmd.Process.Pid). The fake entrypoint here models exactly that split: it
+// honors DUMB_INIT_SETSID the way dumb-init does — "0" keeps the payload in
+// the scheduler-created group, anything else setsids it away. With
+// runRenovateOnce forcing DUMB_INIT_SETSID=0, the long-running payload must
+// be dead after the timeout; if the override regresses, the payload escapes
+// into its own session, survives the sweep, and this test fails.
+func TestRunRenovateOnce_TimeoutKillsSessionEscapedDescendants(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("setsid unavailable; cannot model dumb-init's session split")
+	}
+	pidPath := t.TempDir() + "/payload.pid"
+	// $1 is pidPath. The payload records its own PID, then blocks well past
+	// the run timeout. In-group branch: the payload replaces the entrypoint
+	// (stays in the scheduler's group). Default branch: setsid -w detaches
+	// it into a new session, exactly like unfixed dumb-init.
+	const fakeDumbInit = `if [ "$DUMB_INIT_SETSID" = "0" ]; then
+	exec sh -c 'echo $$ > "$0"; exec sleep 30' "$1"
+fi
+exec setsid -w sh -c 'echo $$ > "$0"; exec sleep 30' "$1"`
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		cmd := defaultCommandRunner(ctx, "sh", "-c", fakeDumbInit, "sh", pidPath)
+		cmd.Stdout, cmd.Stderr = nil, nil // the payload must not hold the test's stdout pipe
+		return cmd
+	}
+
+	if ok := runRenovateOnce(context.Background(), 500*time.Millisecond, "test", nil, nil, runner); ok {
+		t.Fatal("runRenovateOnce() = true for a run that exceeded the timeout, want false")
+	}
+
+	raw, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("payload never recorded its PID (entrypoint model did not start): %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("bad PID file content %q: %v", raw, err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+	}, "a descendant of the run survived the timeout: the process-group containment is broken")
+}
+
 // TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly pins the distinct
 // ERROR messages for a timed-out run vs a genuine non-zero exit. Both return
 // false, so a boolean-only assertion can't tell them apart; alerting keys on
@@ -221,19 +296,34 @@ func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 // `sleep 30 & wait` makes the trap fire promptly (a foreground sleep would
 // defer it until the sleep returned); Stdout/Stderr are detached so the
 // backgrounded sleep, reparented when the shell exits, does not hold the test
-// process's stdout pipe open and stall `go test`.
+// process's stdout pipe open and stall `go test`. The child creates a
+// readiness marker AFTER installing its trap, and the test polls that
+// observable event before cancelling — a fixed sleep would race the trap
+// install under load and make a correct runner look like SIGKILL behavior.
 func TestDefaultCommandRunner_CancelSendsSIGTERMNotSIGKILL(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := defaultCommandRunner(ctx, "sh", "-c", "trap 'exit 42' TERM; sleep 30 & wait")
+	readyPath := t.TempDir() + "/ready"
+	cmd := defaultCommandRunner(ctx, "sh", "-c", `trap 'exit 42' TERM; : > "$1"; sleep 30 & wait`, "sh", readyPath)
 	cmd.Stdout, cmd.Stderr = nil, nil
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Start() = %v", err)
 	}
-	time.Sleep(100 * time.Millisecond) // let the shell install its trap before cancelling
+	waited := false
+	t.Cleanup(func() {
+		if !waited {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Wait()
+		}
+	})
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(readyPath)
+		return err == nil
+	}, "child did not install its SIGTERM trap")
 	cancel()
 
 	err := cmd.Wait()
+	waited = true
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) {
 		t.Fatalf("Wait() = %v, want *exec.ExitError from the SIGTERM trap (SIGKILL would not run it)", err)

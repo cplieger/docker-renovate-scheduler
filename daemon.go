@@ -47,7 +47,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	warnIfRootlessCacheUnwritable()
 
 	if err := verifyBaseDir(ctx); err != nil {
-		logBaseDirError(err)
+		logBaseDirError(baseDir(), err)
 		// A docker restart preserves /tmp: overwrite a previous life's
 		// healthy marker so a crash-looping boot never probes healthy.
 		health.NewMarker(healthMarkerPath).Set(false)
@@ -172,26 +172,42 @@ func (d *daemon) tick(trigger string) {
 func (d *daemon) runJobs(shutdownCtx context.Context) {
 	for j := range d.queue.jobs {
 		if shutdownCtx.Err() != nil {
-			slog.Warn("queued run cancelled by shutdown", "trigger", j.trigger, "repos", j.repos)
-			j.finish(runOutcome{ok: false, reason: "cancelled: scheduler shutting down"})
+			cancelJobForShutdown(j, 0)
 			continue
 		}
-		d.execute(j)
+		d.execute(shutdownCtx, j)
 	}
+}
+
+// cancelJobForShutdown delivers the explicit shutdown-cancellation result —
+// the shared bookkeeping for both the already-shutting-down dequeue branch
+// and the post-preflight re-check in execute.
+func cancelJobForShutdown(j *job, duration time.Duration) {
+	slog.Warn("queued run cancelled by shutdown", "trigger", j.trigger, "repos", j.repos)
+	j.finish(runOutcome{ok: false, duration: duration, reason: "cancelled: scheduler shutting down"})
 }
 
 // execute performs one job: signal the waiter, re-verify the base directory
 // (a volume can degrade after boot; failing here beats a confusing Renovate
 // error), run the pass, record the outcome on the health marker, and deliver
-// the result.
-func (d *daemon) execute(j *job) {
+// the result. The base-dir preflight runs on the uncancelled runCtx (it can
+// take up to 10s), so shutdownCtx is re-checked after it succeeds: a SIGTERM
+// that lands during the preflight must cancel the job, never start a fresh
+// Renovate pass after shutdown was requested.
+func (d *daemon) execute(shutdownCtx context.Context, j *job) {
 	close(j.started)
 	start := time.Now()
 
-	if err := verifyBaseDir(d.runCtx); err != nil {
-		logBaseDirError(err)
+	dir := baseDirForEnv(j.env)
+	if err := verifyBaseDirAt(d.runCtx, dir); err != nil {
+		logBaseDirError(dir, err)
 		d.marker.Set(false)
 		j.finish(runOutcome{ok: false, duration: time.Since(start), reason: "base directory not writable"})
+		return
+	}
+
+	if shutdownCtx.Err() != nil {
+		cancelJobForShutdown(j, time.Since(start))
 		return
 	}
 
