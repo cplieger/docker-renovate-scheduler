@@ -178,7 +178,7 @@ The drain is internally capped at `SCHED_TIMEOUT` (a run can't outlast its own t
 
 | Mount                    | Description                                                                                                                                             |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/data`                  | `RENOVATE_BASE_DIR` — repository clones, caches, and dynamically installed tools. Persist it (the image creates it owned by the image's non-root user). |
+| `/data`                  | `RENOVATE_BASE_DIR` — repository clones, caches, and dynamically installed tools. Persist it. For an `./data` bind mount, create the directory first and run `chown 12021:0 ./data`; the mount hides the image path's ownership (a fresh auto-created root-owned dir fails the non-root daemon's boot write check). |
 | `/usr/src/app/config.js` | Optional — a Renovate `config.js` if you prefer it over `RENOVATE_*` env vars.                                                                          |
 
 ## Alerting

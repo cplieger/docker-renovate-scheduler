@@ -409,7 +409,13 @@ func TestRunDaemon_BuiltinModeStartsUnhealthyThenFlipsHealthy(t *testing.T) {
 		runErr = runDaemon(ctx, sock, runner)
 	}()
 
-	<-entered // the startup run is executing; the marker must still be unhealthy
+	select {
+	case <-entered: // the startup run is executing; the marker must still be unhealthy
+	case <-done: // boot failed before the startup run; fail fast with the cause
+		t.Fatalf("runDaemon returned before the startup run began: %v", runErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup run did not begin")
+	}
 	if _, err := os.Stat(healthMarkerPath); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("marker present before the first run completed; stat err = %v, want not-exist (built-in mode boots unhealthy)", err)
 	}

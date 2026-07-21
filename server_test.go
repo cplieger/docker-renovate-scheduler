@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,8 +54,8 @@ func startTestServer(t *testing.T, runner scheduler.CommandRunner) (sock string,
 // TestListenTrigger_RemovesStaleSocketAndSetsOwnerOnly pins the boot hygiene:
 // a stale socket file from a SIGKILLed predecessor is replaced, and the live
 // socket is owner-only (triggering scoped to the container's user).
+// Not parallel: listenTrigger temporarily changes the process-wide umask.
 func TestListenTrigger_RemovesStaleSocketAndSetsOwnerOnly(t *testing.T) {
-	t.Parallel()
 	sock := filepath.Join(t.TempDir(), "trigger.sock")
 
 	stale, err := net.Listen("unix", sock)
@@ -318,8 +319,12 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 // goroutine still terminates so shutdown never hangs on a dead connection.
 func TestServer_DepartedClientDoesNotBlockRunOrShutdown(t *testing.T) {
 	ran := make(chan struct{})
+	proceed := make(chan struct{})
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(proceed) }) }) // never leave the run held on an early exit
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		close(ran)
+		<-proceed // hold job completion until the client has definitely departed
 		return exec.CommandContext(ctx, "true")
 	}
 	sock, _ := startTestServer(t, runner)
@@ -332,6 +337,9 @@ func TestServer_DepartedClientDoesNotBlockRunOrShutdown(t *testing.T) {
 		t.Fatalf("send request: %v", err)
 	}
 	_ = conn.Close() // depart before any event arrives
+	// Only now let the run complete: the done write is guaranteed to hit the
+	// closed connection, exercising writeEvent's error branch.
+	release.Do(func() { close(proceed) })
 
 	select {
 	case <-ran:

@@ -22,4 +22,4 @@ services:
       start_period: 10m
 
     volumes:
-      - "./data:/data"  # RENOVATE_BASE_DIR - persist clones + caches; chown 12021:0 ./data first (a fresh bind dir is auto-created root-owned and the non-root daemon then fails at boot)
+      - "./data:/data"  # persist clones + caches; create ./data owned by UID 12021 first (see README "Volumes")
