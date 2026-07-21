@@ -159,6 +159,14 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string,
 			"trigger", trigger, "duration_ms", durationMs, "timeout", timeout)
 		return false
 	default:
+		// Sweep the group here too: a hard-crashed Renovate (e.g. an
+		// OOM-killed node process) exits without reaping its
+		// package-manager children, and survivors would race the next
+		// FIFO job against the same base directory. On a normal non-zero
+		// exit the group is already empty and the kill is a no-op (ESRCH).
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
 		slog.Error("renovate run failed",
 			"trigger", trigger, "duration_ms", durationMs, "error", runErr)
 		return false

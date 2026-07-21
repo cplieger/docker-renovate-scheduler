@@ -232,7 +232,7 @@ Thresholds and the `severity` label are starting points; adjust the deadman wind
 
 ## Healthcheck
 
-`docker-renovate-scheduler health` checks a marker file the daemon sets after each run (the daemon executes every run, so it is the marker's single writer). In **built-in** mode the container starts unhealthy and flips to healthy after the first successful run (size `healthcheck.start_period` for the time a first run may take); a failed run flips it unhealthy, and it recovers on the next clean run. In **external** mode it starts healthy (idle, nothing has failed) and each triggered run updates it.
+`docker-renovate-scheduler health` checks a marker file the daemon sets after each run (the daemon executes every run, so it is the marker's single writer). In **built-in** mode the container starts unhealthy and flips to healthy after the first successful run (size `healthcheck.start_period` for the time a first run may take); a failed run flips it unhealthy, and it recovers on the next clean run. Built-in mode additionally treats a stale marker as unhealthy: if no run has refreshed it within `2*SCHED_INTERVAL + SCHED_TIMEOUT`, the probe fails, so a wedged interval loop surfaces as an unhealthy container instead of a silently idle one. External mode applies no such deadline (an idle container between sparse triggers stays healthy). In **external** mode it starts healthy (idle, nothing has failed) and each triggered run updates it.
 
 ```dockerfile
 HEALTHCHECK --interval=60s --timeout=5s --retries=3 --start-period=30s \

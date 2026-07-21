@@ -87,6 +87,11 @@ func (s *triggerServer) serve(ln net.Listener) {
 				return
 			}
 			slog.Warn("trigger socket accept failed", "error", err)
+			// A persistent accept error (e.g. fd exhaustion) must not hot-spin:
+			// pace retries so the log gets one warn per second, not a flood.
+			// Shutdown still exits promptly: ln.Close() makes the next Accept
+			// return net.ErrClosed after at most this pause.
+			time.Sleep(time.Second)
 			continue
 		}
 		s.handlers.Go(func() {
@@ -105,8 +110,6 @@ func (s *triggerServer) handle(conn net.Conn) {
 		writeEvent(conn, wireEvent{Event: eventDone, OK: false, Reason: "undecodable request"})
 		return
 	}
-	_ = conn.SetReadDeadline(time.Time{})
-
 	j := newJob("external", req.Repos, req.Env)
 	if err := s.queue.submit(j); err != nil {
 		slog.Warn("trigger request rejected", "repos", req.Repos, "reason", err)

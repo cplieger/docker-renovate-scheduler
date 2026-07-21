@@ -13,8 +13,9 @@ import (
 // main dispatches on the first argument: `health` runs the Docker probe,
 // `run` triggers one Renovate pass via the daemon's socket and exits with
 // that run's result (the external-trigger entry point; any further arguments
-// are passed through to Renovate as repository slugs), and anything else
-// (including no argument) runs the long-lived daemon that owns all runs.
+// are passed through to Renovate as repository slugs), and `daemon` — the
+// default when no argument is given — runs the long-lived daemon that owns
+// all runs. Any other subcommand is rejected loudly with exit code 2.
 func main() {
 	// CLI health probe for the Docker healthcheck. Checked before the logger
 	// is configured because RunProbe calls os.Exit.

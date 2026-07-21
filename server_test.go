@@ -152,7 +152,7 @@ func TestServer_ForwardsScopeAndEnvironmentToTheRun(t *testing.T) {
 
 	dec, _ := rawRequest(t, sock, wireRequest{
 		Repos: []string{"cplieger/homelab"},
-		Env:   []string{"RENOVATE_TEST_MARKER=from-client", "PATH=" + os.Getenv("PATH")},
+		Env:   []string{"RENOVATE_TEST_MARKER=from-client", "RENOVATE_BASE_DIR=" + t.TempDir(), "PATH=" + os.Getenv("PATH")},
 	})
 	var final wireEvent
 	for {

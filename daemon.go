@@ -46,11 +46,16 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	setupLogger()
 	warnIfRootlessCacheUnwritable()
 
+	// The marker is created up front so every boot-failure path can
+	// overwrite a previous life's healthy marker (a docker restart
+	// preserves /tmp; a crash-looping boot must never probe healthy).
+	// Cleanup is deferred only after boot succeeds: a failed boot leaves
+	// the unhealthy marker in place.
+	marker := health.NewMarker(healthMarkerPath)
+
 	if err := verifyBaseDir(ctx); err != nil {
 		logBaseDirError(baseDir(), err)
-		// A docker restart preserves /tmp: overwrite a previous life's
-		// healthy marker so a crash-looping boot never probes healthy.
-		health.NewMarker(healthMarkerPath).Set(false)
+		marker.Set(false)
 		return err
 	}
 
@@ -63,14 +68,11 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	ln, err := listenTrigger(socketPath)
 	if err != nil {
 		slog.Error("cannot bind trigger socket", "path", socketPath, "error", err)
-		// Same stale-marker guard as the base-dir failure above: a restart
-		// preserves /tmp, so a crash-looping boot must not probe healthy.
-		health.NewMarker(healthMarkerPath).Set(false)
+		marker.Set(false)
 		return err
 	}
 	defer func() { _ = os.Remove(socketPath) }()
 
-	marker := health.NewMarker(healthMarkerPath)
 	defer marker.Cleanup()
 	// Built-in mode starts unhealthy until the first run proves the setup
 	// (the startup pass flips it); external mode starts healthy — idle,
@@ -172,7 +174,7 @@ func (d *daemon) tick(trigger string) {
 func (d *daemon) runJobs(shutdownCtx context.Context) {
 	for j := range d.queue.jobs {
 		if shutdownCtx.Err() != nil {
-			cancelJobForShutdown(j, 0)
+			cancelJobForShutdown(j)
 			continue
 		}
 		d.execute(shutdownCtx, j)
@@ -181,10 +183,12 @@ func (d *daemon) runJobs(shutdownCtx context.Context) {
 
 // cancelJobForShutdown delivers the explicit shutdown-cancellation result —
 // the shared bookkeeping for both the already-shutting-down dequeue branch
-// and the post-preflight re-check in execute.
-func cancelJobForShutdown(j *job, duration time.Duration) {
+// and the post-preflight re-check in execute. The duration is always zero:
+// the wire contract (wireEvent.DurationMs) reports execution time only for a
+// request that actually ran, and a shutdown-cancelled job never does.
+func cancelJobForShutdown(j *job) {
 	slog.Warn("queued run cancelled by shutdown", "trigger", j.trigger, "repos", j.repos)
-	j.finish(runOutcome{ok: false, duration: duration, reason: "cancelled: scheduler shutting down"})
+	j.finish(runOutcome{ok: false, reason: "cancelled: scheduler shutting down"})
 }
 
 // execute performs one job: signal the waiter, re-verify the base directory
@@ -207,7 +211,7 @@ func (d *daemon) execute(shutdownCtx context.Context, j *job) {
 	}
 
 	if shutdownCtx.Err() != nil {
-		cancelJobForShutdown(j, time.Since(start))
+		cancelJobForShutdown(j)
 		return
 	}
 

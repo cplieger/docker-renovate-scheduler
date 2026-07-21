@@ -86,6 +86,33 @@ func TestBaseDir(t *testing.T) {
 	})
 }
 
+// TestBaseDirForEnv pins the per-run base-dir resolution from a job's
+// forwarded environment: exec semantics (wholesale replacement, last value
+// wins for duplicates), the empty-value fallback, and the nil-env inherit.
+func TestBaseDirForEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{"nil env uses the daemon's own base dir", nil, "/daemon-dir"},
+		{"forwarded env with the key uses its value", []string{"RENOVATE_BASE_DIR=/from-client"}, "/from-client"},
+		{"forwarded env without the key uses the default, not the daemon's", []string{"PATH=/usr/bin"}, defaultBaseDir},
+		{"empty value falls back to the default", []string{"RENOVATE_BASE_DIR="}, defaultBaseDir},
+		{"duplicate keys: last value wins (exec semantics)", []string{"RENOVATE_BASE_DIR=/first", "RENOVATE_BASE_DIR=/second"}, "/second"},
+		{"malformed entry without '=' is skipped", []string{"RENOVATE_BASE_DIR", "PATH=/usr/bin"}, defaultBaseDir},
+		{"empty non-nil env uses the default", []string{}, defaultBaseDir},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RENOVATE_BASE_DIR", "/daemon-dir")
+			if got := baseDirForEnv(tt.env); got != tt.want {
+				t.Errorf("baseDirForEnv(%v) = %q, want %q", tt.env, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestVerifyBaseDir(t *testing.T) {
 	t.Run("creates and verifies a writable dir", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "renovate-data")

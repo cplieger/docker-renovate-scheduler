@@ -149,6 +149,33 @@ func TestExecutor_BaseDirFailureFailsRunAndMarker(t *testing.T) {
 	}
 }
 
+// TestExecutor_PreflightValidatesForwardedBaseDir pins the per-run preflight
+// against the job's FORWARDED environment: a triggered run whose forwarded
+// RENOVATE_BASE_DIR is unwritable must fail with an actionable reason and
+// never invoke Renovate, even though the daemon's own base dir is writable.
+func TestExecutor_PreflightValidatesForwardedBaseDir(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir()) // the daemon's own dir is writable
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	var argsLog [][]string
+	d, _, _ := newTestDaemon(t, recordingRunner("true", &argsLog))
+
+	j := newJob("external", nil, []string{"RENOVATE_BASE_DIR=" + file, "PATH=" + os.Getenv("PATH")})
+	out := submitWait(t, d, j)
+	if out.ok {
+		t.Error("outcome ok=true with an unwritable forwarded base dir, want false")
+	}
+	if out.reason == "" {
+		t.Error("outcome carries no reason; the client would report a bare failure")
+	}
+	if len(argsLog) != 0 {
+		t.Error("Renovate was invoked despite the forwarded base-dir preflight failing")
+	}
+}
+
 // TestExecutor_ShutdownCancelsQueuedButFinishesInFlight pins the drain
 // contract: SIGTERM never abandons the in-flight run (it completes with its
 // real outcome) and never starts queued work (it is cancelled with an

@@ -156,7 +156,7 @@ func verifyBaseDirAt(ctx context.Context, dir string) error {
 
 	done := make(chan error, 1)
 	go func() {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			done <- fmt.Errorf("mkdir base dir %q: %w", dir, err)
 			return
 		}
