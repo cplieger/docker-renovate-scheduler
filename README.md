@@ -101,7 +101,7 @@ services:
       RENOVATE_PERSIST_REPO_DATA: "true"
       RENOVATE_REPOSITORY_CACHE: "enabled"
     volumes:
-      - ./data:/data            # RENOVATE_BASE_DIR — persist clones + caches
+      - ./data:/data            # persist clones + caches; create ./data owned by UID 12021 first (see "Volumes")
 ```
 
 ### External scheduler
