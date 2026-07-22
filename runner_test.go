@@ -380,3 +380,70 @@ func TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild(t *testing.T) {
 		t.Errorf("missing the shutdown-cancellation Warn line; got:\n%s", out)
 	}
 }
+
+// TestStopUncommittedRun_SweepsTermIgnoringDescendant is the regression test
+// for the partial-group shutdown case: the group leader honors SIGTERM and
+// exits promptly while a same-group descendant (a package manager, here a
+// TERM-ignoring subshell) survives it. stopUncommittedRun must not return on
+// the leader's exit alone — it must keep the DefaultGrace window open for
+// the WHOLE group and SIGKILL-sweep the survivors on expiry, or the
+// descendant keeps writing the base dir past shutdown. The helper is driven
+// directly rather than through runRenovateOnce: the post-Start handshake
+// sends SIGTERM microseconds after Start, racing the leader's trap install,
+// so the trap-and-survive setup needs a readiness handshake BEFORE the
+// signal — the runRenovateOnce routing itself is already pinned by
+// TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild. The child records
+// the descendant's PID before signalling ready; after stopUncommittedRun
+// returns, the leader must be reaped and the descendant gone.
+func TestStopUncommittedRun_SweepsTermIgnoringDescendant(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	descPath := dir + "/desc.pid"
+	readyPath := dir + "/ready"
+	// $1 = descendant PID file, $2 = readiness marker. The subshell ignores
+	// TERM and respawns its sleep, so only a group SIGKILL removes it; the
+	// leader traps TERM and exits promptly (sleep 30 & wait fires the trap
+	// as soon as the signal lands).
+	script := `( trap '' TERM; while :; do sleep 1; done ) & echo $! > "$1"; trap 'exit 0' TERM; : > "$2"; sleep 30 & wait`
+	cmd := defaultCommandRunner(context.Background(), "sh", "-c", script, "sh", descPath, readyPath)
+	cmd.Stdout, cmd.Stderr = nil, nil
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start() = %v", err)
+	}
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Wait()
+		}
+	})
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(readyPath)
+		return err == nil
+	}, "child did not finish its trap/descendant setup")
+	pidBytes, err := os.ReadFile(descPath)
+	if err != nil {
+		t.Fatalf("descendant pid not recorded: %v", err)
+	}
+	descPid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		t.Fatalf("descendant pid %q not a PID: %v", pidBytes, err)
+	}
+
+	start := time.Now()
+	stopUncommittedRun(cmd)
+	stopped = true
+	elapsed := time.Since(start)
+
+	if cmd.ProcessState == nil {
+		t.Fatal("leader not reaped: Wait never completed")
+	}
+	// The SIGKILLed orphan may linger as a zombie until init reaps it; poll
+	// briefly rather than asserting instantly.
+	waitFor(t, 5*time.Second, func() bool {
+		return errors.Is(syscall.Kill(descPid, 0), syscall.ESRCH)
+	}, "TERM-ignoring descendant survived stopUncommittedRun's group sweep")
+	if elapsed > scheduler.DefaultGrace+10*time.Second {
+		t.Errorf("stopUncommittedRun returned after %v; the group sweep must land at grace expiry, not the run timeout", elapsed)
+	}
+}

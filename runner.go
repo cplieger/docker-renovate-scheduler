@@ -186,24 +186,63 @@ func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, tr
 	}
 }
 
+// runGroupPollInterval is how often stopUncommittedRun re-probes the child's
+// process group for surviving members inside the DefaultGrace window.
+const runGroupPollInterval = 50 * time.Millisecond
+
 // stopUncommittedRun reaps a child that started but lost the post-Start
 // shutdown handshake in runRenovateOnce: SIGTERM to the child's process
 // group (Setpgid makes it the leader, so package-manager grandchildren stop
-// with it), a DefaultGrace window to exit cleanly, then a group SIGKILL
-// sweep if it lingers. Wait is always called, so the process is reaped
-// before shutdown proceeds.
+// with it), a DefaultGrace window for the WHOLE group to exit cleanly, then
+// a group SIGKILL sweep if any member lingers. The completion condition is
+// the process group's death, not just the direct child's: a leader that
+// honors SIGTERM can exit while a package-manager descendant in the same
+// group ignores it, and returning on the leader's exit alone would leave
+// that descendant writing the base dir past shutdown. Wait is always
+// called, so the direct child is reaped before shutdown proceeds.
 func stopUncommittedRun(cmd *exec.Cmd) {
 	// ESRCH (child already gone, or a test runner without Setpgid) is fine:
 	// Wait below still reaps whatever started.
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 	done := make(chan struct{})
 	go func() { defer close(done); _ = cmd.Wait() }()
-	select {
-	case <-done:
-	case <-time.After(scheduler.DefaultGrace):
-		sweepRunProcessGroup(cmd)
-		<-done
+
+	grace := time.NewTimer(scheduler.DefaultGrace)
+	defer grace.Stop()
+	poll := time.NewTicker(runGroupPollInterval)
+	defer poll.Stop()
+
+	reaped := false
+	waitCh := done // nilled after close so the always-ready channel can't spin the loop
+	for {
+		select {
+		case <-waitCh:
+			reaped, waitCh = true, nil
+			if runProcessGroupGone(cmd) {
+				return
+			}
+		case <-poll.C:
+			if reaped && runProcessGroupGone(cmd) {
+				return
+			}
+		case <-grace.C:
+			sweepRunProcessGroup(cmd)
+			if !reaped {
+				<-done
+			}
+			return
+		}
 	}
+}
+
+// runProcessGroupGone reports whether the child's process group has no live
+// members left. Signal 0 probes membership without delivering anything;
+// ESRCH means the group is empty (or, for a non-Setpgid test runner, that no
+// group led by the child's PID exists — production children always lead
+// their own group via defaultCommandRunner's Setpgid, and Wait has already
+// reaped such a child by the time the probe's answer is acted on).
+func runProcessGroupGone(cmd *exec.Cmd) bool {
+	return errors.Is(syscall.Kill(-cmd.Process.Pid, 0), syscall.ESRCH)
 }
 
 // sweepRunProcessGroup force-kills the child's whole process group (Setpgid
