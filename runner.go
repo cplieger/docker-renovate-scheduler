@@ -167,10 +167,7 @@ func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, tr
 		slog.Info("renovate run complete", "trigger", trigger, "duration_ms", durationMs)
 		return true, false
 	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
-		if !sweepRunProcessGroup(cmd) {
-			slog.Warn("renovate run process group survived the post-timeout kill sweep; the next run may overlap it",
-				"trigger", trigger, "pid", cmd.Process.Pid)
-		}
+		sweepRunGroupOrWarn(cmd, "renovate run process group survived the post-timeout kill sweep; the next run may overlap it", trigger)
 		// The run exceeded SCHED_TIMEOUT. Logged distinctly from a genuine
 		// non-zero Renovate exit so operators can tell a slow run from a
 		// real failure during triage.
@@ -182,13 +179,20 @@ func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, tr
 		// without reaping its package-manager children. On a normal
 		// non-zero exit the group is already empty and the kill is a
 		// no-op (ESRCH).
-		if !sweepRunProcessGroup(cmd) {
-			slog.Warn("renovate run process group survived the post-failure kill sweep; the next run may overlap it",
-				"trigger", trigger, "pid", cmd.Process.Pid)
-		}
+		sweepRunGroupOrWarn(cmd, "renovate run process group survived the post-failure kill sweep; the next run may overlap it", trigger)
 		slog.Error("renovate run failed",
 			"trigger", trigger, "duration_ms", durationMs, "error", runErr)
 		return false, false
+	}
+}
+
+// sweepRunGroupOrWarn force-kills the run's process group via
+// sweepRunProcessGroup and logs msg when the group survives the bounded
+// sweep -- the shared post-op bookkeeping for the timeout and failure
+// branches of runRenovateOnce.
+func sweepRunGroupOrWarn(cmd *exec.Cmd, msg, trigger string) {
+	if !sweepRunProcessGroup(cmd) {
+		slog.Warn(msg, "trigger", trigger, "pid", cmd.Process.Pid)
 	}
 }
 

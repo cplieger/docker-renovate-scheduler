@@ -613,3 +613,91 @@ func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
 			"the sweep released the executor before observing the group's death")
 	}
 }
+
+// TestWithDumbInitInGroup pins the exactly-one-entry contract at the slice
+// level: the pre-existing DUMB_INIT_SETSID entry is DROPPED, not merely
+// overridden by appending. dumb-init is a C program whose getenv returns the
+// FIRST match in environ, while the shells the indirect tests use resolve
+// duplicates last-wins — so a drop-regression (append without drop) passes
+// every existing shell-assertion test yet lets the client's =1 win inside
+// dumb-init, silently reopening the session escape.
+func TestWithDumbInitInGroup(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		env  []string
+		want []string
+	}{
+		{
+			name: "appends the override to a forwarded env without the variable",
+			env:  []string{"PATH=/usr/bin", "RENOVATE_X=y"},
+			want: []string{"PATH=/usr/bin", "RENOVATE_X=y", "DUMB_INIT_SETSID=0"},
+		},
+		{
+			name: "drops a pre-existing entry so exactly one remains",
+			env:  []string{"DUMB_INIT_SETSID=1", "PATH=/usr/bin"},
+			want: []string{"PATH=/usr/bin", "DUMB_INIT_SETSID=0"},
+		},
+		{
+			name: "drops every duplicate pre-existing entry",
+			env:  []string{"DUMB_INIT_SETSID=1", "PATH=/usr/bin", "DUMB_INIT_SETSID="},
+			want: []string{"PATH=/usr/bin", "DUMB_INIT_SETSID=0"},
+		},
+		{
+			name: "empty non-nil env still gets the override",
+			env:  []string{},
+			want: []string{"DUMB_INIT_SETSID=0"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := withDumbInitInGroup(tt.env); !slices.Equal(got, tt.want) {
+				t.Errorf("withDumbInitInGroup(%v) = %v, want %v (getenv returns the FIRST environ match: a leftover client entry would beat the appended override inside dumb-init)", tt.env, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWithDumbInitInGroup_NilEnvUsesDaemonEnviron pins the nil branch at the
+// slice level: the daemon's own environ is inherited, its DUMB_INIT_SETSID
+// is dropped, and exactly one =0 entry remains. Not parallel: t.Setenv.
+func TestWithDumbInitInGroup_NilEnvUsesDaemonEnviron(t *testing.T) {
+	t.Setenv("DUMB_INIT_SETSID", "1")
+	t.Setenv("RENOVATE_TEST_MARKER", "daemon")
+
+	got := withDumbInitInGroup(nil)
+
+	entries := 0
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "DUMB_INIT_SETSID=") {
+			entries++
+			if kv != "DUMB_INIT_SETSID=0" {
+				t.Errorf("DUMB_INIT_SETSID entry = %q, want DUMB_INIT_SETSID=0", kv)
+			}
+		}
+	}
+	if entries != 1 {
+		t.Errorf("DUMB_INIT_SETSID entries = %d, want exactly 1 (dumb-init's getenv takes the first match, so a duplicate is a containment hazard)", entries)
+	}
+	if !slices.Contains(got, "RENOVATE_TEST_MARKER=daemon") {
+		t.Error("daemon environ not inherited for a nil env")
+	}
+}
+
+// TestSweepRunProcessGroup_NeverStartedChildIsNothingToSweep covers the
+// documented never-started contract: a cmd whose Start was never called (or
+// failed) has no process group, so the sweep reports true immediately
+// instead of dereferencing a nil Process or waiting out the grace window.
+func TestSweepRunProcessGroup_NeverStartedChildIsNothingToSweep(t *testing.T) {
+	t.Parallel()
+	cmd := exec.Command("true") // never started: cmd.Process == nil
+
+	start := time.Now()
+	if !sweepRunProcessGroup(cmd) {
+		t.Error("sweepRunProcessGroup() = false for a never-started child, want true (nothing to sweep)")
+	}
+	if elapsed := time.Since(start); elapsed >= scheduler.DefaultGrace {
+		t.Errorf("sweepRunProcessGroup returned after %v for a never-started child; it must return immediately, not wait out the %v grace", elapsed, scheduler.DefaultGrace)
+	}
+}

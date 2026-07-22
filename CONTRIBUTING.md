@@ -65,6 +65,10 @@ child; triggers only submit requests.
 - `config.go` — env loading (`loadInterval` via `scheduler.ParseInterval`,
   `loadRunTimeout`), `setupLogger` (`slogx`), and the base-dir verification
   (boot + per-run).
+- `rootless.go` — the non-default-UID startup warning
+  (`warnIfRootlessCacheUnwritable`): a custom UID with no tool-cache
+  redirection breaks lockfile regeneration silently, so it is surfaced
+  loudly at boot (see "Running as a non-default user" in the README).
 - `health.go` — thin wrapper over `github.com/cplieger/health` (file marker).
 
 There is no cross-process coordination state: no flock, no rerun flag, no
