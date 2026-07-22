@@ -76,24 +76,30 @@ func TestWarnIfRootlessCacheUnwritable_EmitsAndSuppressesWarning(t *testing.T) {
 	t.Setenv("RENOVATE_CUSTOM_ENV_VARIABLES", "")
 	rec := capture.Default(t)
 	warnIfRootlessCacheUnwritable()
-	var warn *slog.Record
-	for _, r := range rec.Records() {
-		if r.Level == slog.LevelWarn && strings.Contains(r.Message, "no tool-cache redirection") {
-			warn = &r
-			break
-		}
-	}
-	if warn == nil {
-		t.Fatalf("unmitigated custom UID emitted no matching warning; records = %v", rec.Messages())
-	}
+	warns := 0
+	warningUID := int64(-1)
 	fixHint := ""
-	warn.Attrs(func(a slog.Attr) bool {
-		if a.Key == "fix" {
-			fixHint = a.Value.String()
-			return false
+	for _, r := range rec.Records() {
+		if r.Level != slog.LevelWarn || !strings.Contains(r.Message, "no tool-cache redirection") {
+			continue
 		}
-		return true
-	})
+		warns++
+		r.Attrs(func(a slog.Attr) bool {
+			switch a.Key {
+			case "uid":
+				warningUID = a.Value.Int64()
+			case "fix":
+				fixHint = a.Value.String()
+			}
+			return true
+		})
+	}
+	if warns != 1 {
+		t.Fatalf("unmitigated custom UID emitted %d matching warnings, want exactly 1; records = %v", warns, rec.Messages())
+	}
+	if warningUID != int64(euid) {
+		t.Errorf("warning uid = %d, want process uid %d", warningUID, euid)
+	}
 	if !strings.Contains(fixHint, "RENOVATE_CUSTOM_ENV_VARIABLES") {
 		t.Errorf("warning fix hint = %q, want it to name RENOVATE_CUSTOM_ENV_VARIABLES; the remediation must be actionable from the log line", fixHint)
 	}
