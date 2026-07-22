@@ -33,7 +33,7 @@ func main() {
 
 	switch cmd {
 	case "daemon":
-		if err := runDaemon(context.Background(), socketPath, defaultCommandRunner); err != nil {
+		if err := runDaemon(context.Background(), socketPath, defaultCommandRunner, nil); err != nil {
 			os.Exit(1)
 		}
 	case "run":

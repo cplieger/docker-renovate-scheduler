@@ -34,6 +34,7 @@ func startTestServer(t *testing.T, runner scheduler.CommandRunner) (sock string,
 		newCmd:  runner,
 		runCtx:  context.WithoutCancel(ctx),
 		timeout: time.Minute,
+		fatal:   make(chan error, 1),
 	}
 	execDone := make(chan struct{})
 	go func() { defer close(execDone); d.runJobs(ctx) }()

@@ -204,11 +204,15 @@ groups:
           description: >
             The scheduler logged an error: a run that exited non-zero
             (`renovate run failed`), a run that hit SCHED_TIMEOUT
-            (`renovate run timed out`), or a base-directory error. No
-            dependency PRs are raised until the next clean run. Check the
-            container logs, RENOVATE_TOKEN, and platform reachability. A
-            graceful shutdown drains the in-flight run and logs no error,
-            so a redeploy does not trip this.
+            (`renovate run timed out`), a base-directory error, or a
+            containment halt (`halting run admission: renovate run process
+            group survived the kill sweep` -- a failed/timed-out run's
+            process tree could not be confirmed dead, so the daemon stops
+            admitting runs and exits non-zero; the container restart reaps
+            the surviving tree). No dependency PRs are raised until the
+            next clean run. Check the container logs, RENOVATE_TOKEN, and
+            platform reachability. A graceful shutdown drains the in-flight
+            run and logs no error, so a redeploy does not trip this.
       - alert: RenovateNoRecentRun
         expr: |
           absent_over_time({container="renovate"} |= `renovate run complete` [13h])

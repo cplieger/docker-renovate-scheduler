@@ -36,6 +36,13 @@ var errContainmentLost = errors.New("renovate run process group survived the kil
 // whose group survived the sweep and to every waiter still queued behind it.
 const containmentLostReason = "failed: run process group survived the kill sweep; scheduler halting"
 
+// runOnceFunc executes one Renovate pass and reports whether it exited
+// cleanly, whether shutdown cancelled it at start, and whether its process
+// group survived the post-run kill sweep. It is the shared signature of
+// daemon.runOnce and runDaemon's runOnce parameter; runRenovateOnce is the
+// production value.
+type runOnceFunc func(ctx, shutdownCtx context.Context, timeout time.Duration, trigger string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled, groupSurvived bool)
+
 // daemon carries the executor's dependencies.
 type daemon struct {
 	queue  *runQueue
@@ -43,10 +50,10 @@ type daemon struct {
 	newCmd scheduler.CommandRunner
 	// runOnce executes one Renovate pass; nil means runRenovateOnce (the
 	// production path). It exists as a seam for the containment-halt
-	// regression test only: a SIGKILL-surviving process group cannot be
+	// regression tests only: a SIGKILL-surviving process group cannot be
 	// fabricated from real test children, so the surviving-group report is
 	// injected at this boundary.
-	runOnce func(ctx, shutdownCtx context.Context, timeout time.Duration, trigger string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled, groupSurvived bool)
+	runOnce runOnceFunc
 	// fatal delivers the executor's containment-loss error to runDaemon.
 	// Buffered 1: the executor halts after its single send, so the send can
 	// never block even if runDaemon is already past its receive.
@@ -93,21 +100,16 @@ func (d *daemon) setRunHealth(ok bool) {
 	}
 }
 
-// runOnceSeam mirrors daemon.runOnce at the composition root: runDaemon
-// copies it into the daemon it builds. nil — the production value — selects
-// runRenovateOnce. It exists only for the shutdown-ordering containment
-// regression test, which must inject a surviving-group report into a daemon
-// runDaemon itself constructed (a SIGKILL-surviving process group cannot be
-// fabricated from real test children; see daemon.runOnce).
-var runOnceSeam func(ctx, shutdownCtx context.Context, timeout time.Duration, trigger string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled, groupSurvived bool)
-
 // runDaemon is the composition root for the long-running container (the
 // `daemon` subcommand and the default no-arg command). It configures logging,
 // verifies the Renovate base directory, binds the trigger socket, wires the
 // health marker, starts the executor, and — in built-in mode — drives the
 // interval ticker. newCmd builds each Renovate child (defaultCommandRunner in
-// production; injected by tests). Returning an error exits non-zero.
-func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandRunner) error {
+// production; injected by tests). runOnce is copied into the daemon it
+// builds; nil — the production value — selects runRenovateOnce, and a
+// non-nil value exists only for the shutdown-ordering containment regression
+// test (see daemon.runOnce). Returning an error exits non-zero.
+func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandRunner, runOnce runOnceFunc) error {
 	setupLogger()
 	warnIfRootlessCacheUnwritable()
 
@@ -157,7 +159,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		queue:   newRunQueue(queueCapacity),
 		marker:  marker,
 		newCmd:  newCmd,
-		runOnce: runOnceSeam,
+		runOnce: runOnce,
 		runCtx:  context.WithoutCancel(ctx),
 		timeout: timeout,
 		fatal:   make(chan error, 1),

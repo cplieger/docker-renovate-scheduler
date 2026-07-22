@@ -705,3 +705,38 @@ func TestSweepRunProcessGroup_NeverStartedChildIsNothingToSweep(t *testing.T) {
 		t.Errorf("sweepRunProcessGroup returned after %v for a never-started child; it must return immediately, not wait out the %v grace", elapsed, scheduler.DefaultGrace)
 	}
 }
+
+// TestSweepRunGroupOrWarn_UnconfirmableGroupDeathReportsSurvived drives the
+// survived branch of sweepRunGroupOrWarn through the REAL function: the
+// group leader is SIGKILLed but deliberately NOT reaped (no Wait), so the
+// zombie keeps its process group registered and the sweep's group probe
+// reports live members for the whole bounded window -- the same observable
+// state as a group whose death cannot be confirmed. sweepRunGroupOrWarn
+// must report survived=true (the executor's fatal containment signal) and
+// log the caller's message at Warn with the pid. Serial: swaps slog.Default.
+func TestSweepRunGroupOrWarn_UnconfirmableGroupDeathReportsSurvived(t *testing.T) {
+	rec := capture.Default(t)
+
+	cmd := defaultCommandRunner(context.Background(), "sleep", "30")
+	cmd.Stdout, cmd.Stderr = nil, nil
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start() = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+	})
+	// Kill the leader without reaping it: the unreaped zombie holds the
+	// process group open, so runProcessGroupGone stays false through the
+	// sweep's entire DefaultGrace window.
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+
+	survived := sweepRunGroupOrWarn(cmd, "run process group survived the kill sweep (test)", "test")
+
+	if !survived {
+		t.Error("sweepRunGroupOrWarn() = false for a group the sweep cannot confirm dead, want true (the fatal containment signal must fire)")
+	}
+	if got := rec.CountLevel(slog.LevelWarn, "run process group survived the kill sweep (test)"); got != 1 {
+		t.Errorf("Warn records matching the survival message = %d, want 1; captured: %v", got, rec.Messages())
+	}
+}

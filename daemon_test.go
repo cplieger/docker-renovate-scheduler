@@ -30,6 +30,7 @@ func newTestDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, conte
 		newCmd:  runner,
 		runCtx:  context.WithoutCancel(ctx),
 		timeout: time.Minute,
+		fatal:   make(chan error, 1),
 	}
 	done := make(chan struct{})
 	go func() {
@@ -101,6 +102,7 @@ func TestExecutor_MarkerFollowsRunOutcome(t *testing.T) {
 		newCmd:  recordingRunner("true", nil),
 		runCtx:  context.WithoutCancel(ctx),
 		timeout: time.Minute,
+		fatal:   make(chan error, 1),
 	}
 	done := make(chan struct{})
 	go func() { defer close(done); d.runJobs(ctx) }()
@@ -248,6 +250,7 @@ func TestExecutor_ShutdownDuringPreflightNeverStartsRenovate(t *testing.T) {
 		newCmd:  recordingRunner("true", &argsLog),
 		runCtx:  context.WithoutCancel(ctx),
 		timeout: time.Minute,
+		fatal:   make(chan error, 1),
 	}
 
 	j := newJob("external", nil, nil)
@@ -348,7 +351,7 @@ func TestRunDaemon_ExternalModeBootsHealthyServesAndShutsDownCleanly(t *testing.
 	var runErr error
 	go func() {
 		defer close(done)
-		runErr = runDaemon(ctx, sock, recordingRunner("true", nil))
+		runErr = runDaemon(ctx, sock, recordingRunner("true", nil), nil)
 	}()
 
 	// External mode boots healthy: poll until the marker appears.
@@ -430,14 +433,14 @@ func TestRunDaemon_BootFailuresReturnError(t *testing.T) {
 		}
 		t.Setenv("RENOVATE_BASE_DIR", file)
 		sock := filepath.Join(t.TempDir(), "trigger.sock")
-		if err := runDaemon(context.Background(), sock, recordingRunner("true", nil)); err == nil {
+		if err := runDaemon(context.Background(), sock, recordingRunner("true", nil), nil); err == nil {
 			t.Error("runDaemon() = nil, want error when the base dir is unwritable at boot")
 		}
 	})
 	t.Run("unbindable socket path fails boot", func(t *testing.T) {
 		t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 		sock := filepath.Join(t.TempDir(), "missing-parent", "trigger.sock")
-		if err := runDaemon(context.Background(), sock, recordingRunner("true", nil)); err == nil {
+		if err := runDaemon(context.Background(), sock, recordingRunner("true", nil), nil); err == nil {
 			t.Error("runDaemon() = nil, want error when the socket cannot be bound")
 		}
 	})
@@ -472,7 +475,7 @@ func TestRunDaemon_BuiltinModeStartsUnhealthyThenFlipsHealthy(t *testing.T) {
 	var runErr error
 	go func() {
 		defer close(done)
-		runErr = runDaemon(ctx, sock, runner)
+		runErr = runDaemon(ctx, sock, runner, nil)
 	}()
 
 	select {
@@ -581,13 +584,13 @@ func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
 // drained run THEN reports its process group survived the kill sweep,
 // runDaemon must still return errContainmentLost (main exits non-zero, so
 // the container restart reaps the surviving tree) instead of nil. The
-// surviving-group report is injected at the runOnceSeam boundary for the
-// same reason TestExecutor_HaltsAdmissionAfterSurvivingGroup uses the
+// surviving-group report is injected via runDaemon's runOnce parameter for
+// the same reason TestExecutor_HaltsAdmissionAfterSurvivingGroup uses the
 // daemon.runOnce seam. External mode, because the marker boots HEALTHY
 // there: beginShutdown — which runs only after the select resolved — flips
 // it unhealthy, giving a deterministic post-select signal (runDaemon's
 // setupLogger replaces the slog default, so log capture cannot provide it).
-// Not parallel: it uses the package-global healthMarkerPath and the seam.
+// Not parallel: it uses the package-global healthMarkerPath.
 func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	t.Setenv("SCHED_INTERVAL", "off")
@@ -597,12 +600,11 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 
 	entered := make(chan struct{})
 	proceed := make(chan struct{})
-	runOnceSeam = func(_, _ context.Context, _ time.Duration, _ string, _, _ []string, _ scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
+	runOnce := func(_, _ context.Context, _ time.Duration, _ string, _, _ []string, _ scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
 		close(entered)
 		<-proceed
 		return false, false, true // the sweep could not confirm group death — reported after shutdown began
 	}
-	t.Cleanup(func() { runOnceSeam = nil })
 
 	sock := testSocketPath(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -610,7 +612,7 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 	var runErr error
 	go func() {
 		defer close(done)
-		runErr = runDaemon(ctx, sock, recordingRunner("true", nil))
+		runErr = runDaemon(ctx, sock, recordingRunner("true", nil), runOnce)
 	}()
 
 	// External mode boots healthy and binds the socket; wait for both so the
