@@ -447,3 +447,147 @@ func TestStopUncommittedRun_SweepsTermIgnoringDescendant(t *testing.T) {
 		t.Errorf("stopUncommittedRun returned after %v; the group sweep must land at grace expiry, not the run timeout", elapsed)
 	}
 }
+
+// TestRunRenovateOnce_StartFailureIsARunFailureNotAPanic pins the launch
+// failure mode: when the child cannot even be started (a missing entrypoint
+// binary -- e.g. a base-image relocation that slipped past the Dockerfile's
+// build-time assert), runRenovateOnce reports (ok=false, cancelled=false)
+// and logs the failure at ERROR, so the executor flips the health marker
+// unhealthy and the RenovateRunFailed alert fires, instead of reporting a
+// clean run. Serial: swaps slog.Default.
+func TestRunRenovateOnce_StartFailureIsARunFailureNotAPanic(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	missing := t.TempDir() + "/no-such-entrypoint"
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, missing)
+	}
+
+	ok, cancelled := runRenovateOnce(context.Background(), context.Background(), time.Minute, "test", nil, nil, runner)
+
+	if ok || cancelled {
+		t.Fatalf("runRenovateOnce() = (ok=%v, cancelled=%v) for an unstartable child, want (false, false)", ok, cancelled)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "renovate run failed") {
+		t.Errorf("missing the run-failure line for a failed Start; got:\n%s", out)
+	}
+	if !strings.Contains(out, "level=ERROR") {
+		t.Errorf("start failure not logged at ERROR; got:\n%s", out)
+	}
+}
+
+// TestDefaultCommandRunner_CancelOnExitedChildReportsProcessDone pins the
+// Cancel closure's ESRCH mapping: when the child's process group is already
+// gone by the time the context fires (the run finished in the same instant
+// the timeout expired), Cancel must report os.ErrProcessDone -- which
+// os/exec treats as "nothing to cancel" -- rather than a raw ESRCH error
+// that cmd.Wait would surface, misreporting a clean run as failed.
+func TestDefaultCommandRunner_CancelOnExitedChildReportsProcessDone(t *testing.T) {
+	t.Parallel()
+	cmd := defaultCommandRunner(context.Background(), "true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start() = %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("Wait() = %v", err)
+	}
+	// The child led its own group (Setpgid) and is reaped, so the group is
+	// empty: the Cancel closure's group SIGTERM gets ESRCH.
+	if err := cmd.Cancel(); !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("Cancel() on an exited child = %v, want os.ErrProcessDone (ESRCH must map to process-done, not surface as a cancel failure)", err)
+	}
+}
+
+// TestStopUncommittedRun_ReturnsPromptlyWhenGroupDiesWithinGrace pins the
+// poll path: the leader honors SIGTERM and exits at once, a TERM-ignoring
+// descendant exits on its own well inside the DefaultGrace window -- so
+// stopUncommittedRun must return as soon as the poll observes the empty
+// group instead of sitting out the full grace and SIGKILL-sweeping
+// processes that already exited (which would stall every shutdown in this
+// window by the whole grace period).
+func TestStopUncommittedRun_ReturnsPromptlyWhenGroupDiesWithinGrace(t *testing.T) {
+	t.Parallel()
+	readyPath := t.TempDir() + "/ready"
+	// The descendant ignores TERM (only its current sleep dies with the
+	// group signal; the loop respawns it) and exits by itself after ~0.8s;
+	// the leader traps TERM and exits immediately (sleep 30 & wait fires
+	// the trap as soon as the signal lands).
+	script := `( trap '' TERM; i=0; while [ $i -lt 8 ]; do sleep 0.1; i=$((i+1)); done ) & trap 'exit 0' TERM; : > "$1"; sleep 30 & wait`
+	cmd := defaultCommandRunner(context.Background(), "sh", "-c", script, "sh", readyPath)
+	cmd.Stdout, cmd.Stderr = nil, nil
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start() = %v", err)
+	}
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Wait()
+		}
+	})
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(readyPath)
+		return err == nil
+	}, "child did not finish its setup")
+
+	start := time.Now()
+	stopUncommittedRun(cmd)
+	stopped = true
+	elapsed := time.Since(start)
+
+	if cmd.ProcessState == nil {
+		t.Fatal("leader not reaped: Wait never completed")
+	}
+	if elapsed >= scheduler.DefaultGrace {
+		t.Errorf("stopUncommittedRun returned after %v; the group died within ~0.8s, so the poll must return promptly instead of waiting out the full %v grace", elapsed, scheduler.DefaultGrace)
+	}
+}
+
+// TestStopUncommittedRun_SweepsLeaderThatIgnoresTermAtGraceExpiry pins the
+// grace-expiry path for an unreaped leader: a leader that ignores SIGTERM
+// outright is force-killed by the group sweep when DefaultGrace expires,
+// and stopUncommittedRun still waits for Wait to reap it before returning
+// -- a return without the reap leaves a zombie and races the daemon's
+// shutdown against the child's exit.
+func TestStopUncommittedRun_SweepsLeaderThatIgnoresTermAtGraceExpiry(t *testing.T) {
+	t.Parallel()
+	readyPath := t.TempDir() + "/ready"
+	// The leader ignores TERM and respawns its sleep forever; only the
+	// grace-expiry group SIGKILL removes it.
+	script := `trap '' TERM; : > "$1"; while :; do sleep 1; done`
+	cmd := defaultCommandRunner(context.Background(), "sh", "-c", script, "sh", readyPath)
+	cmd.Stdout, cmd.Stderr = nil, nil
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start() = %v", err)
+	}
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Wait()
+		}
+	})
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(readyPath)
+		return err == nil
+	}, "leader did not install its TERM ignore")
+
+	start := time.Now()
+	stopUncommittedRun(cmd)
+	stopped = true
+	elapsed := time.Since(start)
+
+	if cmd.ProcessState == nil {
+		t.Fatal("leader not reaped after the grace-expiry sweep: Wait never completed")
+	}
+	if elapsed < scheduler.DefaultGrace {
+		t.Errorf("stopUncommittedRun returned after %v, before the %v grace expired; a TERM-ignoring leader can only die via the expiry sweep", elapsed, scheduler.DefaultGrace)
+	}
+	if elapsed > scheduler.DefaultGrace+10*time.Second {
+		t.Errorf("stopUncommittedRun returned after %v; the sweep must land at grace expiry", elapsed)
+	}
+}

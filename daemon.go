@@ -208,7 +208,7 @@ func (d *daemon) tick(trigger string) {
 func (d *daemon) runJobs(shutdownCtx context.Context) {
 	for j := range d.queue.jobs {
 		if shutdownCtx.Err() != nil {
-			cancelJobForShutdown(j)
+			cancelJobForShutdown(j, "queued")
 			continue
 		}
 		d.execute(shutdownCtx, j)
@@ -223,11 +223,13 @@ const shutdownCancelReason = "cancelled: scheduler shutting down"
 
 // cancelJobForShutdown delivers the explicit shutdown-cancellation result —
 // the shared bookkeeping for both the already-shutting-down dequeue branch
-// and the post-preflight re-check in execute. The duration is always zero: a
-// shutdown-cancelled job never starts Renovate, and the cancellation reason
-// -- not elapsed queue or preflight time -- is the useful signal.
-func cancelJobForShutdown(j *job) {
-	slog.Warn("queued run cancelled by shutdown", "trigger", j.trigger, "repos", j.repos)
+// (stage "queued") and the post-preflight re-check in execute (stage
+// "preflight", where the job's waiter has already seen a started event).
+// The duration is always zero: a shutdown-cancelled job never starts
+// Renovate, and the cancellation reason -- not elapsed queue or preflight
+// time -- is the useful signal.
+func cancelJobForShutdown(j *job, stage string) {
+	slog.Warn("run cancelled by shutdown", "stage", stage, "trigger", j.trigger, "repos", j.repos)
 	j.finish(runOutcome{ok: false, reason: shutdownCancelReason})
 }
 
@@ -255,7 +257,7 @@ func (d *daemon) execute(shutdownCtx context.Context, j *job) {
 	}
 
 	if shutdownCtx.Err() != nil {
-		cancelJobForShutdown(j)
+		cancelJobForShutdown(j, "preflight")
 		return
 	}
 

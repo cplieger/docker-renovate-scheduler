@@ -25,7 +25,7 @@ import (
 func startTestServer(t *testing.T, runner scheduler.CommandRunner) (sock string, d *daemon) {
 	t.Helper()
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	sock = filepath.Join(t.TempDir(), "trigger.sock")
+	sock = testSocketPath(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	d = &daemon{
@@ -60,7 +60,7 @@ func startTestServer(t *testing.T, runner scheduler.CommandRunner) (sock string,
 // socket is owner-only (triggering scoped to the container's user).
 // Not parallel: listenTrigger temporarily changes the process-wide umask.
 func TestListenTrigger_RemovesStaleSocketAndSetsOwnerOnly(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "trigger.sock")
+	sock := testSocketPath(t)
 
 	stale, err := net.Listen("unix", sock)
 	if err != nil {
@@ -195,7 +195,7 @@ func TestServer_FailedRunReportsNotOK(t *testing.T) {
 // unboundedly or blocking the trigger.
 func TestServer_RejectsWhenQueueFull(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	sock := filepath.Join(t.TempDir(), "trigger.sock")
+	sock := testSocketPath(t)
 
 	// No executor: jobs sit in the queue. Capacity 1, pre-filled.
 	q := newRunQueue(1)
@@ -206,9 +206,9 @@ func TestServer_RejectsWhenQueueFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listenTrigger() = %v", err)
 	}
-	t.Cleanup(func() { _ = ln.Close() })
 	srv := &triggerServer{queue: q}
-	go srv.serve(ln)
+	srv.handlers.Go(func() { srv.serve(ln) })
+	t.Cleanup(func() { _ = ln.Close(); srv.handlers.Wait() })
 
 	dec, _ := rawRequest(t, sock, wireRequest{})
 	ev := nextEvent(t, dec)
@@ -249,15 +249,9 @@ func TestServer_UndecodableRequestAnswersDone(t *testing.T) {
 // outcome instead of being cancelled at start.
 func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	sock := filepath.Join(t.TempDir(), "trigger.sock")
+	sock := testSocketPath(t)
 
-	dir := t.TempDir()
-	enteredPath := filepath.Join(dir, "entered")
-	proceedPath := filepath.Join(dir, "proceed")
-	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sh", "-c",
-			`: > "$1"; until [ -e "$2" ]; do sleep 0.05; done`, "sh", enteredPath, proceedPath)
-	}
+	runner, awaitEntered, release := gatedRunner(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &daemon{
@@ -278,10 +272,7 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 
 	// Occupy the executor, then queue a second request over the wire.
 	decA, _ := rawRequest(t, sock, wireRequest{})
-	waitFor(t, 5*time.Second, func() bool {
-		_, err := os.Stat(enteredPath)
-		return err == nil
-	}, "in-flight child never started") // A is executing, post-Start
+	awaitEntered() // A is executing, post-Start
 	decB, _ := rawRequest(t, sock, wireRequest{Repos: []string{"owner/queued"}})
 	if ev := nextEvent(t, decB); ev.Event != eventQueued {
 		t.Fatalf("B's first event = %q, want queued", ev.Event)
@@ -291,9 +282,7 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	cancel()
 	_ = ln.Close()
 	d.queue.close()
-	if err := os.WriteFile(proceedPath, nil, 0o600); err != nil {
-		t.Fatalf("release the in-flight child: %v", err)
-	} // A's child completes its pass
+	release() // A's child completes its pass
 
 	// A: full drain — its run finished with its real (clean) outcome.
 	for {

@@ -188,25 +188,14 @@ func TestExecutor_PreflightValidatesForwardedBaseDir(t *testing.T) {
 func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 
-	dir := t.TempDir()
-	enteredPath := dir + "/entered"
-	proceedPath := dir + "/proceed"
-	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		// The child signals it is running, then drains only once released —
-		// exiting 0 so the drained run reports its real (clean) outcome.
-		return exec.CommandContext(ctx, "sh", "-c",
-			`: > "$1"; until [ -e "$2" ]; do sleep 0.05; done`, "sh", enteredPath, proceedPath)
-	}
+	runner, awaitEntered, release := gatedRunner(t)
 	d, cancel, _ := newTestDaemon(t, runner)
 
 	inflight := newJob("external", nil, nil)
 	if err := d.queue.submit(inflight); err != nil {
 		t.Fatalf("submit(inflight) = %v", err)
 	}
-	waitFor(t, 5*time.Second, func() bool {
-		_, err := os.Stat(enteredPath)
-		return err == nil
-	}, "in-flight child never started") // the run is now executing, post-Start
+	awaitEntered() // the run is now executing, post-Start
 
 	queued := newJob("external", []string{"owner/q"}, nil)
 	if err := d.queue.submit(queued); err != nil {
@@ -216,9 +205,7 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 	cancel()          // SIGTERM lands mid-run
 	d.beginShutdown() // runDaemon's immediate unhealthy transition
 	d.queue.close()   // daemon stops admission
-	if err := os.WriteFile(proceedPath, nil, 0o600); err != nil {
-		t.Fatalf("release the in-flight child: %v", err)
-	} // the in-flight child finishes its pass
+	release()         // the in-flight child finishes its pass
 
 	select {
 	case out := <-inflight.result:
@@ -355,7 +342,7 @@ func TestRunDaemon_ExternalModeBootsHealthyServesAndShutsDownCleanly(t *testing.
 	prev := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	sock := filepath.Join(t.TempDir(), "trigger.sock")
+	sock := testSocketPath(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	var runErr error
@@ -479,7 +466,7 @@ func TestRunDaemon_BuiltinModeStartsUnhealthyThenFlipsHealthy(t *testing.T) {
 		return exec.CommandContext(ctx, "true")
 	}
 
-	sock := filepath.Join(t.TempDir(), "trigger.sock")
+	sock := testSocketPath(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	var runErr error
