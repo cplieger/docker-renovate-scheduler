@@ -783,6 +783,13 @@ func TestStopUncommittedRun_WarnsWhenGroupSurvivesGraceExpirySweep(t *testing.T)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Start() = %v", err)
 	}
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Wait()
+		}
+	})
 	waitFor(t, 5*time.Second, func() bool {
 		_, err := os.Stat(readyPath)
 		return err == nil
@@ -801,6 +808,7 @@ func TestStopUncommittedRun_WarnsWhenGroupSurvivesGraceExpirySweep(t *testing.T)
 
 	start := time.Now()
 	stopUncommittedRun(cmd)
+	stopped = true
 	elapsed := time.Since(start)
 
 	if cmd.ProcessState == nil {
