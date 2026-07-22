@@ -429,6 +429,52 @@ func TestRunDaemon_BootFailuresReturnError(t *testing.T) {
 	})
 }
 
+// TestRunDaemon_BootFailureClearsPreviousLifesHealthyMarker pins the
+// crash-loop contract documented at runDaemon's marker setup: a docker
+// restart preserves /tmp, so a healthy marker left by a previous life must
+// be overwritten by every boot-failure path -- a crash-looping boot must
+// never probe healthy, and a failed boot leaves the unhealthy marker in
+// place (Cleanup is deferred only after boot succeeds). Both boot-failure
+// branches are exercised: an unwritable base dir and an unbindable trigger
+// socket. Not parallel: it uses the package-global healthMarkerPath.
+func TestRunDaemon_BootFailureClearsPreviousLifesHealthyMarker(t *testing.T) {
+	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	t.Run("unwritable base dir", func(t *testing.T) {
+		// A previous life probed healthy: docker restart preserves /tmp.
+		if err := os.WriteFile(healthMarkerPath, nil, 0o600); err != nil {
+			t.Fatalf("setup previous life's marker: %v", err)
+		}
+		file := filepath.Join(t.TempDir(), "not-a-dir")
+		if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		t.Setenv("RENOVATE_BASE_DIR", file)
+		sock := filepath.Join(t.TempDir(), "trigger.sock")
+		if err := runDaemon(context.Background(), sock, recordingRunner("true", nil), nil); err == nil {
+			t.Fatal("runDaemon() = nil, want error")
+		}
+		if _, err := os.Stat(healthMarkerPath); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("healthy marker survived a failed boot; stat err = %v, want not-exist (a crash-looping boot must never probe healthy)", err)
+		}
+	})
+	t.Run("unbindable socket", func(t *testing.T) {
+		if err := os.WriteFile(healthMarkerPath, nil, 0o600); err != nil {
+			t.Fatalf("setup previous life's marker: %v", err)
+		}
+		t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+		sock := filepath.Join(t.TempDir(), "missing-parent", "trigger.sock")
+		if err := runDaemon(context.Background(), sock, recordingRunner("true", nil), nil); err == nil {
+			t.Fatal("runDaemon() = nil, want error")
+		}
+		if _, err := os.Stat(healthMarkerPath); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("healthy marker survived a failed boot; stat err = %v, want not-exist", err)
+		}
+	})
+}
+
 // TestRunDaemon_BuiltinModeStartsUnhealthyThenFlipsHealthy is the built-in
 // half of the composition-root integration test (the external half is
 // TestRunDaemon_ExternalModeBootsHealthyServesAndShutsDownCleanly): built-in

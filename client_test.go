@@ -13,6 +13,8 @@ import (
 // (the same `run [repo …]` → exit 0/1 surface Ofelia and the Komodo action
 // consume): a clean run exits 0, a failing run exits 1.
 func TestRunClient_ExitCodesOverRealSocket(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
 	tests := []struct {
 		name string
 		bin  string
@@ -50,6 +52,8 @@ func TestRunClient_DaemonUnreachableExitsOne(t *testing.T) {
 // environment, so a `docker exec -e RENOVATE_X=…` override reaches the
 // daemon-spawned child. The fake child asserts the marker variable.
 func TestRunClient_ForwardsItsEnvironment(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
 	t.Setenv("RENOVATE_TEST_MARKER", "exec-override")
 	runner := shellAssertRunner(`[ "$RENOVATE_TEST_MARKER" = "exec-override" ]`)
 	sock := startTestServer(t, runner)
