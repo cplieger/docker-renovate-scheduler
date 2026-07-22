@@ -118,7 +118,13 @@ func withDumbInitInGroup(env []string) []string {
 }
 
 // runRenovateOnce executes exactly one Renovate pass and reports whether it
-// exited cleanly. The pass is bounded by timeout (SCHED_TIMEOUT); on expiry
+// exited cleanly, whether shutdown cancelled it at start, and whether the
+// run's process group SURVIVED the post-run kill sweep. groupSurvived=true
+// means the sweep could not confirm the group's death within its bounded
+// window (uninterruptible I/O), so a package-manager tree may still be
+// writing the base dir: the caller must NOT start another run against it —
+// the group-death observation is a containment state, not just a log line.
+// The pass is bounded by timeout (SCHED_TIMEOUT); on expiry
 // the command runner sends SIGTERM with a short grace before SIGKILL. env,
 // when non-nil, replaces the child's environment wholesale (a socket client's
 // forwarded environment); nil inherits the daemon's — either way with ONE
@@ -138,7 +144,7 @@ func withDumbInitInGroup(env []string) []string {
 // at Warn, never as a run failure — without ever being committed as
 // in-flight. Only a run that passes this post-Start handshake drains under
 // ctx/SCHED_TIMEOUT.
-func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, trigger string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled bool) {
+func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, trigger string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -152,12 +158,12 @@ func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, tr
 	if startErr := cmd.Start(); startErr != nil {
 		slog.Error("renovate run failed",
 			"trigger", trigger, "duration_ms", time.Since(start).Milliseconds(), "error", startErr)
-		return false, false
+		return false, false, false
 	}
 	if shutdownCtx.Err() != nil {
 		stopUncommittedRun(cmd)
 		slog.Warn("renovate run cancelled by shutdown at start", "trigger", trigger, "repos", repos)
-		return false, true
+		return false, true, false
 	}
 	runErr := cmd.Wait()
 	durationMs := time.Since(start).Milliseconds()
@@ -165,35 +171,39 @@ func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, tr
 	switch {
 	case runErr == nil:
 		slog.Info("renovate run complete", "trigger", trigger, "duration_ms", durationMs)
-		return true, false
+		return true, false, false
 	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
-		sweepRunGroupOrWarn(cmd, "renovate run process group survived the post-timeout kill sweep; the next run may overlap it", trigger)
+		survived := sweepRunGroupOrWarn(cmd, "renovate run process group survived the post-timeout kill sweep; halting run admission to prevent an overlapping run", trigger)
 		// The run exceeded SCHED_TIMEOUT. Logged distinctly from a genuine
 		// non-zero Renovate exit so operators can tell a slow run from a
 		// real failure during triage.
 		slog.Error("renovate run timed out",
 			"trigger", trigger, "duration_ms", durationMs, "timeout", timeout)
-		return false, false
+		return false, false, survived
 	default:
 		// A hard-crashed Renovate (e.g. an OOM-killed node process) exits
 		// without reaping its package-manager children. On a normal
 		// non-zero exit the group is already empty and the kill is a
 		// no-op (ESRCH).
-		sweepRunGroupOrWarn(cmd, "renovate run process group survived the post-failure kill sweep; the next run may overlap it", trigger)
+		survived := sweepRunGroupOrWarn(cmd, "renovate run process group survived the post-failure kill sweep; halting run admission to prevent an overlapping run", trigger)
 		slog.Error("renovate run failed",
 			"trigger", trigger, "duration_ms", durationMs, "error", runErr)
-		return false, false
+		return false, false, survived
 	}
 }
 
 // sweepRunGroupOrWarn force-kills the run's process group via
-// sweepRunProcessGroup and logs msg when the group survives the bounded
-// sweep -- the shared post-op bookkeeping for the timeout and failure
-// branches of runRenovateOnce.
-func sweepRunGroupOrWarn(cmd *exec.Cmd, msg, trigger string) {
+// sweepRunProcessGroup, logs msg when the group survives the bounded sweep,
+// and reports whether it survived -- the shared post-op bookkeeping for the
+// timeout and failure branches of runRenovateOnce. A true return is the
+// fatal containment signal the executor acts on: the group could not be
+// confirmed dead, so the base directory must not be handed to another run.
+func sweepRunGroupOrWarn(cmd *exec.Cmd, msg, trigger string) (survived bool) {
 	if !sweepRunProcessGroup(cmd) {
 		slog.Warn(msg, "trigger", trigger, "pid", cmd.Process.Pid)
+		return true
 	}
+	return false
 }
 
 // runGroupPollInterval is how often stopUncommittedRun and
@@ -204,13 +214,14 @@ const runGroupPollInterval = 50 * time.Millisecond
 // stopUncommittedRun reaps a child that started but lost the post-Start
 // shutdown handshake in runRenovateOnce: SIGTERM to the child's process
 // group (Setpgid makes it the leader, so package-manager grandchildren stop
-// with it), a DefaultGrace window for the WHOLE group to exit cleanly, then
-// a group SIGKILL sweep if any member lingers. The completion condition is
-// the process group's death, not just the direct child's: a leader that
-// honors SIGTERM can exit while a package-manager descendant in the same
-// group ignores it, and returning on the leader's exit alone would leave
-// that descendant writing the base dir past shutdown. Wait is always
-// called, so the direct child is reaped before shutdown proceeds.
+// with it), a DefaultGrace window for the WHOLE group to exit cleanly
+// (waitForRunProcessGroup), then a group SIGKILL sweep if any member
+// lingers. The completion condition is the process group's death, not just
+// the direct child's: a leader that honors SIGTERM can exit while a
+// package-manager descendant in the same group ignores it, and returning on
+// the leader's exit alone would leave that descendant writing the base dir
+// past shutdown. Wait is always called, so the direct child is reaped
+// before shutdown proceeds.
 func stopUncommittedRun(cmd *exec.Cmd) {
 	// ESRCH (child already gone, or a test runner without Setpgid) is fine:
 	// Wait below still reaps whatever started.
@@ -218,30 +229,41 @@ func stopUncommittedRun(cmd *exec.Cmd) {
 	done := make(chan struct{})
 	go func() { defer close(done); _ = cmd.Wait() }()
 
-	grace := time.NewTimer(scheduler.DefaultGrace)
-	defer grace.Stop()
+	if waitForRunProcessGroup(cmd, done, scheduler.DefaultGrace) {
+		return
+	}
+	if !sweepRunProcessGroup(cmd) {
+		slog.Warn("uncommitted run process group survived the grace-expiry kill sweep; shutdown may leave it running",
+			"pid", cmd.Process.Pid)
+	}
+	// A no-op when Wait already returned (done is closed); otherwise blocks
+	// until the direct child is reaped.
+	<-done
+}
+
+// waitForRunProcessGroup waits up to timeout for the child's whole process
+// group to exit cleanly: the direct child must be reaped (waitDone closed)
+// AND the group probe must report no surviving members. Reports true when
+// both held within the window, false on timeout. waitDone is nilled after
+// it closes so the always-ready channel can't spin the poll loop.
+func waitForRunProcessGroup(cmd *exec.Cmd, waitDone <-chan struct{}, timeout time.Duration) bool {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
 	poll := time.NewTicker(runGroupPollInterval)
 	defer poll.Stop()
 
 	reaped := false
-	waitCh := done // nilled after close so the always-ready channel can't spin the loop
 	for {
-		select {
-		case <-waitCh:
-			reaped, waitCh = true, nil
-		case <-poll.C:
-		case <-grace.C:
-			if !sweepRunProcessGroup(cmd) {
-				slog.Warn("uncommitted run process group survived the grace-expiry kill sweep; shutdown may leave it running",
-					"pid", cmd.Process.Pid)
-			}
-			if !reaped {
-				<-done
-			}
-			return
-		}
 		if reaped && runProcessGroupGone(cmd) {
-			return
+			return true
+		}
+		select {
+		case <-waitDone:
+			reaped = true
+			waitDone = nil
+		case <-poll.C:
+		case <-deadline.C:
+			return false
 		}
 	}
 }

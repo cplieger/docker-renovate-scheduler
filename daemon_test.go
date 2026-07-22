@@ -502,3 +502,75 @@ func TestRunDaemon_BuiltinModeStartsUnhealthyThenFlipsHealthy(t *testing.T) {
 		t.Errorf("runDaemon() = %v, want nil", runErr)
 	}
 }
+
+// TestExecutor_HaltsAdmissionAfterSurvivingGroup is the containment-loss
+// regression test: when a run reports that its process group survived the
+// post-run kill sweep, the executor must never invoke a second queued run
+// (the survivor may still be writing the base dir), must fail the surviving
+// run and every queued waiter with the explicit containment reason, must
+// leave the health marker unhealthy, and must deliver the fatal error
+// runDaemon exits non-zero on. The surviving-group report is injected at the
+// runOnce seam: a SIGKILL-surviving process group cannot be fabricated from
+// real test children.
+func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	invocations := 0
+	d := &daemon{
+		queue:   newRunQueue(queueCapacity),
+		marker:  health.NewMarker(filepath.Join(t.TempDir(), "marker")),
+		newCmd:  recordingRunner("true", nil),
+		runCtx:  context.WithoutCancel(ctx),
+		timeout: time.Minute,
+		fatal:   make(chan error, 1),
+	}
+	d.runOnce = func(_, _ context.Context, _ time.Duration, _ string, _, _ []string, _ scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
+		invocations++
+		return false, false, true // the group survived the sweep
+	}
+
+	first := newJob("external", nil, nil)
+	second := newJob("external", []string{"owner/q"}, nil)
+	if err := d.queue.submit(first); err != nil {
+		t.Fatalf("submit(first) = %v", err)
+	}
+	if err := d.queue.submit(second); err != nil {
+		t.Fatalf("submit(second) = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() { defer close(done); d.runJobs(ctx) }()
+	t.Cleanup(func() { cancel(); d.queue.close(); <-done })
+
+	for _, tc := range []struct {
+		name string
+		j    *job
+	}{{"surviving run", first}, {"queued waiter", second}} {
+		select {
+		case out := <-tc.j.result:
+			if out.ok {
+				t.Errorf("%s outcome ok=true, want false", tc.name)
+			}
+			if out.reason != containmentLostReason {
+				t.Errorf("%s outcome reason = %q, want %q", tc.name, out.reason, containmentLostReason)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s result not delivered", tc.name)
+		}
+	}
+	if invocations != 1 {
+		t.Errorf("runOnce invoked %d times, want 1: no run may start after a surviving group", invocations)
+	}
+	if d.marker.Healthy() {
+		t.Error("health marker healthy after containment loss, want unhealthy")
+	}
+	select {
+	case err := <-d.fatal:
+		if !errors.Is(err, errContainmentLost) {
+			t.Errorf("fatal error = %v, want errContainmentLost", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fatal containment error not delivered to runDaemon's channel")
+	}
+}

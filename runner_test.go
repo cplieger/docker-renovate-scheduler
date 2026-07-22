@@ -85,7 +85,7 @@ func TestRunRenovateOnce_EnvHandling(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("RENOVATE_TEST_MARKER", "inherited")
 			runner := shellAssertRunner(tt.script)
-			if ok, _ := runRenovateOnce(context.Background(), context.Background(), time.Minute, "test", nil, tt.env, runner); !ok {
+			if ok, _, _ := runRenovateOnce(context.Background(), context.Background(), time.Minute, "test", nil, tt.env, runner); !ok {
 				t.Errorf("runRenovateOnce() = false: the child did not see the expected environment (env=%v)", tt.env)
 			}
 		})
@@ -155,7 +155,7 @@ func TestRunRenovateOnce_TimeoutCancelsRun(t *testing.T) {
 	}
 
 	start := time.Now()
-	ok, _ := runRenovateOnce(context.Background(), context.Background(), 100*time.Millisecond, "test", nil, nil, slowRunner)
+	ok, _, _ := runRenovateOnce(context.Background(), context.Background(), 100*time.Millisecond, "test", nil, nil, slowRunner)
 	elapsed := time.Since(start)
 
 	if ok {
@@ -185,7 +185,7 @@ func TestRunRenovateOnce_EnvForcesDumbInitInGroup(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("DUMB_INIT_SETSID", "1") // daemon environ must be overridden too
 			runner := shellAssertRunner(`[ "$DUMB_INIT_SETSID" = "0" ]`)
-			if ok, _ := runRenovateOnce(context.Background(), context.Background(), time.Minute, "test", nil, tt.env, runner); !ok {
+			if ok, _, _ := runRenovateOnce(context.Background(), context.Background(), time.Minute, "test", nil, tt.env, runner); !ok {
 				t.Errorf("runRenovateOnce() = false: child did not see DUMB_INIT_SETSID=0 (env=%v)", tt.env)
 			}
 		})
@@ -223,7 +223,7 @@ exec setsid -w sh -c 'echo $$ > "$0"; exec sleep 30' "$1"`
 		return cmd
 	}
 
-	if ok, _ := runRenovateOnce(context.Background(), context.Background(), 500*time.Millisecond, "test", nil, nil, runner); ok {
+	if ok, _, _ := runRenovateOnce(context.Background(), context.Background(), 500*time.Millisecond, "test", nil, nil, runner); ok {
 		t.Fatal("runRenovateOnce() = true for a run that exceeded the timeout, want false")
 	}
 
@@ -269,7 +269,7 @@ func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := capture.Default(t)
-			ok, _ := runRenovateOnce(context.Background(), context.Background(), tt.timeout, "test", nil, nil, tt.runner)
+			ok, _, _ := runRenovateOnce(context.Background(), context.Background(), tt.timeout, "test", nil, nil, tt.runner)
 			if ok {
 				t.Errorf("runRenovateOnce() = true, want false")
 			}
@@ -350,7 +350,7 @@ func TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild(t *testing.T) {
 	}
 
 	start := time.Now()
-	ok, cancelled := runRenovateOnce(context.Background(), shutdownCtx, time.Minute, "test", nil, nil, runner)
+	ok, cancelled, _ := runRenovateOnce(context.Background(), shutdownCtx, time.Minute, "test", nil, nil, runner)
 	elapsed := time.Since(start)
 
 	if ok || !cancelled {
@@ -452,7 +452,7 @@ func TestRunRenovateOnce_StartFailureIsARunFailureNotAPanic(t *testing.T) {
 		return exec.CommandContext(ctx, missing)
 	}
 
-	ok, cancelled := runRenovateOnce(context.Background(), context.Background(), time.Minute, "test", nil, nil, runner)
+	ok, cancelled, _ := runRenovateOnce(context.Background(), context.Background(), time.Minute, "test", nil, nil, runner)
 
 	if ok || cancelled {
 		t.Fatalf("runRenovateOnce() = (ok=%v, cancelled=%v) for an unstartable child, want (false, false)", ok, cancelled)
@@ -596,8 +596,12 @@ func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
 		return cmd
 	}
 
-	if ok, _ := runRenovateOnce(context.Background(), context.Background(), 500*time.Millisecond, "test", nil, nil, runner); ok {
+	ok, _, groupSurvived := runRenovateOnce(context.Background(), context.Background(), 500*time.Millisecond, "test", nil, nil, runner)
+	if ok {
 		t.Fatal("runRenovateOnce() = true for a run that exceeded the timeout, want false")
+	}
+	if groupSurvived {
+		t.Error("runRenovateOnce() reported groupSurvived=true although the sweep confirmed the group's death")
 	}
 
 	raw, err := os.ReadFile(descPath)

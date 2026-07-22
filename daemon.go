@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -24,11 +25,32 @@ import (
 // queued, and every run's output lands on the container log stream because
 // the child inherits the daemon's stdout/stderr.
 
+// errContainmentLost is runDaemon's fatal exit cause when a run's process
+// group survives the post-run kill sweep: a package-manager tree may still
+// be writing the base directory, so the daemon halts instead of admitting
+// another run, and the non-zero exit lets the container restart policy reap
+// the surviving tree.
+var errContainmentLost = errors.New("renovate run process group survived the kill sweep")
+
+// containmentLostReason is the not-ok outcome reason delivered to the run
+// whose group survived the sweep and to every waiter still queued behind it.
+const containmentLostReason = "failed: run process group survived the kill sweep; scheduler halting"
+
 // daemon carries the executor's dependencies.
 type daemon struct {
 	queue  *runQueue
 	marker *health.Marker
 	newCmd scheduler.CommandRunner
+	// runOnce executes one Renovate pass; nil means runRenovateOnce (the
+	// production path). It exists as a seam for the containment-halt
+	// regression test only: a SIGKILL-surviving process group cannot be
+	// fabricated from real test children, so the surviving-group report is
+	// injected at this boundary.
+	runOnce func(ctx, shutdownCtx context.Context, timeout time.Duration, trigger string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled, groupSurvived bool)
+	// fatal delivers the executor's containment-loss error to runDaemon.
+	// Buffered 1: the executor halts after its single send, so the send can
+	// never block even if runDaemon is already past its receive.
+	fatal chan error
 	// runCtx parents every Renovate child. It is decoupled from the shutdown
 	// signal (context.WithoutCancel) so an in-flight run drains to completion
 	// — bounded by its own SCHED_TIMEOUT — instead of being cancelled
@@ -42,6 +64,11 @@ type daemon struct {
 	// no precedence, so the ordering guard lives here.
 	healthMu sync.Mutex
 	stopping bool
+	// halted records containment loss executor-side. Only the executor
+	// goroutine reads or writes it (runJobs and execute run on that one
+	// goroutine), so it needs no lock: once set, every remaining and future
+	// queued job is failed with containmentLostReason instead of run.
+	halted bool
 }
 
 // beginShutdown records that shutdown has begun and marks the daemon
@@ -98,6 +125,12 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// abort lets a fatal executor condition (containment loss) shut the
+	// daemon down through the same context the SIGTERM path uses: the
+	// ticker, the executor's queued-job cancellation, and the socket
+	// handlers all key off this one ctx.
+	ctx, abort := context.WithCancelCause(ctx)
+	defer abort(nil)
 
 	ln, err := listenTrigger(socketPath)
 	if err != nil {
@@ -118,6 +151,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		newCmd:  newCmd,
 		runCtx:  context.WithoutCancel(ctx),
 		timeout: timeout,
+		fatal:   make(chan error, 1),
 	}
 
 	executorDone := make(chan struct{})
@@ -138,7 +172,17 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	slog.Info("container started",
 		"mode", mode, "interval", interval, "timeout", timeout, "base_dir", baseDir(), "socket", socketPath)
 
-	<-ctx.Done()
+	// Block until SIGTERM or the executor's fatal containment-loss signal;
+	// the latter shuts down through the same abort context so the ticker,
+	// admission, and handlers drain identically, but runDaemon returns the
+	// error so main exits non-zero and the container restart reaps the
+	// surviving process tree.
+	var fatalErr error
+	select {
+	case <-ctx.Done():
+	case fatalErr = <-d.fatal:
+		abort(fatalErr)
+	}
 	slog.Info("shutting down", "cause", context.Cause(ctx))
 	// Mark unhealthy immediately so observers see the signal before the run
 	// drain (a Renovate run can take a while); beginShutdown also pins the
@@ -156,7 +200,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	<-tickerDone
 	srv.handlers.Wait()
 	slog.Info("shutdown complete")
-	return nil
+	return fatalErr
 }
 
 // startTicker runs the built-in interval scheduler: a startup run that fires
@@ -204,14 +248,20 @@ func (d *daemon) tick(trigger string) {
 // queue strictly in order until the queue is closed and drained. Once
 // shutdown is signalled, remaining jobs are cancelled — delivered as explicit
 // not-ok results with a reason — instead of run, so a stop request is never
-// followed by a fresh run.
+// followed by a fresh run. Once containment is lost (a run's process group
+// survived the kill sweep), remaining jobs are failed with the explicit
+// containment reason instead of run: a surviving package-manager tree may
+// still be writing the base directory, so no further run may be admitted.
 func (d *daemon) runJobs(shutdownCtx context.Context) {
 	for j := range d.queue.jobs {
-		if shutdownCtx.Err() != nil {
+		switch {
+		case d.halted:
+			cancelJobForContainment(j)
+		case shutdownCtx.Err() != nil:
 			cancelJobForShutdown(j, "queued")
-			continue
+		default:
+			d.execute(shutdownCtx, j)
 		}
-		d.execute(shutdownCtx, j)
 	}
 }
 
@@ -231,6 +281,16 @@ const shutdownCancelReason = "cancelled: scheduler shutting down"
 func cancelJobForShutdown(j *job, stage string) {
 	slog.Warn("run cancelled by shutdown", "stage", stage, "trigger", j.trigger, "repos", j.repos)
 	j.finish(runOutcome{ok: false, reason: shutdownCancelReason})
+}
+
+// cancelJobForContainment fails a queued job after containment loss: the
+// prior run's process group could not be confirmed dead, so running this job
+// could overlap it against the same base directory. The waiter gets the
+// explicit containment reason instead of a bare failure.
+func cancelJobForContainment(j *job) {
+	slog.Warn("run cancelled: a prior run's process group survived the kill sweep",
+		"trigger", j.trigger, "repos", j.repos)
+	j.finish(runOutcome{ok: false, reason: containmentLostReason})
 }
 
 // execute performs one job: signal the waiter, re-verify the base directory
@@ -261,11 +321,32 @@ func (d *daemon) execute(shutdownCtx context.Context, j *job) {
 		return
 	}
 
-	ok, cancelled := runRenovateOnce(d.runCtx, shutdownCtx, d.timeout, j.trigger, j.repos, j.env, d.newCmd)
+	runOnce := d.runOnce
+	if runOnce == nil {
+		runOnce = runRenovateOnce
+	}
+	ok, cancelled, groupSurvived := runOnce(d.runCtx, shutdownCtx, d.timeout, j.trigger, j.repos, j.env, d.newCmd)
 	if cancelled {
 		// runRenovateOnce already reaped the child and logged the Warn; the
 		// health marker is left alone (beginShutdown pinned it unhealthy).
 		j.finish(runOutcome{ok: false, reason: shutdownCancelReason})
+		return
+	}
+	if groupSurvived {
+		// The kill sweep could not confirm the group's death: a
+		// package-manager tree may still be writing the base directory.
+		// Admitting another run would break the single-executor guarantee,
+		// and a later clean run would flip the marker healthy while the
+		// survivor keeps writing — so the executor halts. This job and every
+		// remaining one fail with the explicit containment reason, and
+		// runDaemon exits non-zero so the container restart reaps the
+		// surviving tree.
+		d.halted = true
+		d.setRunHealth(false)
+		slog.Error("halting run admission: renovate run process group survived the kill sweep",
+			"trigger", j.trigger)
+		j.finish(runOutcome{ok: false, duration: time.Since(start), reason: containmentLostReason})
+		d.fatal <- errContainmentLost
 		return
 	}
 	d.setRunHealth(ok)
