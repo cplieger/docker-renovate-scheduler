@@ -512,11 +512,14 @@ func TestDefaultCommandRunner_CancelOnExitedChildReportsProcessDone(t *testing.T
 func TestStopUncommittedRun_ReturnsPromptlyWhenGroupDiesWithinGrace(t *testing.T) {
 	t.Parallel()
 	readyPath := t.TempDir() + "/ready"
-	// The descendant ignores TERM (only its current sleep dies with the
-	// group signal; the loop respawns it) and exits by itself after ~0.8s;
-	// the leader traps TERM and exits immediately (sleep 30 & wait fires
-	// the trap as soon as the signal lands).
-	script := `( trap '' TERM; i=0; while [ $i -lt 8 ]; do sleep 0.1; i=$((i+1)); done ) & trap 'exit 0' TERM; : > "$1"; sleep 30 & wait`
+	// The descendant ignores TERM (the exec'd sleep inherits the subshell's
+	// SIG_IGN disposition, so the group SIGTERM does not remove it) and
+	// exits by itself after ~0.8s; the leader traps TERM and exits
+	// immediately (sleep 30 & wait fires the trap as soon as the signal
+	// lands). A single exec'd sleep, not a respawn loop: repeated
+	// fork/exec cycles stretched past the grace window under full-suite
+	// load and flaked the promptness assertion.
+	script := `( trap '' TERM; exec sleep 0.8 ) & trap 'exit 0' TERM; : > "$1"; sleep 30 & wait`
 	cmd := defaultCommandRunner(context.Background(), "sh", "-c", script, "sh", readyPath)
 	cmd.Stdout, cmd.Stderr = nil, nil
 	if err := cmd.Start(); err != nil {
@@ -756,5 +759,57 @@ func TestSweepRunGroupOrWarn_UnconfirmableGroupDeathReportsSurvived(t *testing.T
 	}
 	if got := rec.CountLevel(slog.LevelWarn, "run process group survived the kill sweep (test)"); got != 1 {
 		t.Errorf("Warn records matching the survival message = %d, want 1; captured: %v", got, rec.Messages())
+	}
+}
+
+// TestStopUncommittedRun_WarnsWhenGroupSurvivesGraceExpirySweep pins the
+// last stopUncommittedRun contract: when even the grace-expiry SIGKILL sweep
+// cannot confirm the group's death, the helper must still RETURN (bounded by
+// the two grace windows -- shutdown must never hang on an unconfirmable
+// group) and emit the exact survival Warn operators grep for. The
+// unconfirmable state is a SIGKILLed-but-unreaped zombie joined into the
+// leader's group (the same observable state
+// TestSweepRunGroupOrWarn_UnconfirmableGroupDeathReportsSurvived uses): the
+// zombie keeps the group registered through both bounded windows. The
+// leader itself honors SIGTERM, so its Wait completes and only the group
+// probe stays unsatisfied. Serial: swaps slog.Default. Runtime ~10s (two
+// DefaultGrace windows; the constants are library-owned and not injectable).
+func TestStopUncommittedRun_WarnsWhenGroupSurvivesGraceExpirySweep(t *testing.T) {
+	rec := capture.Default(t)
+
+	readyPath := t.TempDir() + "/ready"
+	cmd := defaultCommandRunner(context.Background(), "sh", "-c", `trap 'exit 0' TERM; : > "$1"; sleep 30 & wait`, "sh", readyPath)
+	cmd.Stdout, cmd.Stderr = nil, nil
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Start() = %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(readyPath)
+		return err == nil
+	}, "leader did not install its TERM trap")
+
+	// A holder joins the leader's process group, is SIGKILLed but NOT
+	// reaped: the zombie keeps the group registered, so neither the grace
+	// wait nor the expiry sweep can confirm the group's death.
+	holder := exec.Command("sleep", "300")
+	holder.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: cmd.Process.Pid}
+	if err := holder.Start(); err != nil {
+		t.Fatalf("start group holder: %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Wait() }) // reap the zombie after the assertions
+	_ = holder.Process.Kill()               // dead but unreaped: a zombie group member
+
+	start := time.Now()
+	stopUncommittedRun(cmd)
+	elapsed := time.Since(start)
+
+	if cmd.ProcessState == nil {
+		t.Fatal("leader not reaped: Wait never completed")
+	}
+	if got := rec.Count("uncommitted run process group survived the grace-expiry kill sweep; shutdown may leave it running"); got != 1 {
+		t.Errorf("grace-expiry survival Warn count = %d, want 1; captured: %v", got, rec.Messages())
+	}
+	if elapsed > 25*time.Second {
+		t.Errorf("stopUncommittedRun returned after %v; it must stay bounded by the two grace windows, never hang on an unconfirmable group", elapsed)
 	}
 }

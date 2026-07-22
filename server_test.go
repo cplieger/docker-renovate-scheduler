@@ -142,6 +142,16 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	}
 	srv := &trigger.Server[runPayload]{Queue: d.queue}
 	srv.Serve(ln)
+	// A mid-test Fatal must not leave the executor parked in the gated
+	// runOnce and the listener open for the rest of the package run.
+	// release is idempotent; the repeated cancel/ln.Close/queue.Close on
+	// the normal path are tolerated (closed-flag close).
+	t.Cleanup(func() {
+		release()
+		cancel()
+		_ = ln.Close()
+		d.queue.Close()
+	})
 
 	// Occupy the executor, then queue a second request over the wire.
 	decA := rawRequest(t, sock, runPayload{})

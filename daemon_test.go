@@ -178,6 +178,10 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 	runOnce, awaitEntered, release := gatedRunOnce(t)
 	d, cancel, _ := newTestDaemon(t, recordingRunner("true", nil))
 	d.runOnce = runOnce
+	// Registered after newTestDaemon's cleanup so it runs first (LIFO): a
+	// mid-test Fatal must release the gated run, or the fixture's <-done
+	// wait blocks forever on the executor parked inside the runOnce seam.
+	t.Cleanup(release)
 
 	inflight := newJob("external", nil, nil)
 	if err := d.queue.Submit(inflight); err != nil {

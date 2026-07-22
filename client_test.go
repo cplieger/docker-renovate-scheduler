@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -86,5 +87,39 @@ func TestRunClient_ConnectionLostMidRunExitsOne(t *testing.T) {
 
 	if code := runClient(sock, []string{"owner/repo"}); code != 1 {
 		t.Errorf("runClient() = %d after the daemon dropped the connection mid-run, want 1", code)
+	}
+}
+
+// TestRunClient_RequestSendFailureExitsOne pins the third client failure
+// class: a request write that fails mid-send (trigger.ErrSend) must exit 1 --
+// the trigger reports a failed job -- completing the exit-code contract next
+// to the unreachable-daemon and connection-lost pins. The fake daemon
+// accepts and closes without reading; a ~4 MiB env entry makes the request
+// larger than the unix-socket buffers, so the in-flight write hits the
+// closed peer (EPIPE) instead of completing into the kernel buffer. Exit
+// code only, and the slog default is restored: runClient installs the
+// production logger (setupLogger), the same reason the sibling tests assert
+// by exit code alone.
+func TestRunClient_RequestSendFailureExitsOne(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	t.Setenv("RENOVATE_TEST_HUGE", strings.Repeat("x", 4<<20))
+	sock := testSocketPath(t)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		_ = conn.Close() // close without reading: the request write must fail
+	}()
+
+	if code := runClient(sock, nil); code != 1 {
+		t.Errorf("runClient() = %d when the request write fails, want 1", code)
 	}
 }

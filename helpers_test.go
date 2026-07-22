@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -120,5 +121,6 @@ func gatedRunOnce(t *testing.T) (runOnce runOnceFunc, awaitEntered, release func
 			t.Fatal("in-flight run never committed")
 		}
 	}
-	return runOnce, awaitEntered, func() { close(proceed) }
+	var releaseOnce sync.Once
+	return runOnce, awaitEntered, func() { releaseOnce.Do(func() { close(proceed) }) }
 }
