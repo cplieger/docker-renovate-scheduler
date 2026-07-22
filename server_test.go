@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	scheduler "github.com/cplieger/scheduler/v2"
-	"github.com/cplieger/scheduler/v2/trigger"
+	scheduler "github.com/cplieger/scheduler/v3"
+	"github.com/cplieger/scheduler/v3/trigger"
 )
 
 // The broker mechanics (queue semantics, socket hygiene, wire ordering,
 // accept-loop degradation, departed clients) are the scheduler library's and
-// are tested in scheduler/v2/trigger. These tests pin what stays THIS app's:
+// are tested in scheduler/v3/trigger. These tests pin what stays THIS app's:
 // the daemon executor's policy as observed over the real socket — scope and
 // environment forwarding into the Renovate child, and shutdown's
 // drain-versus-cancel split.

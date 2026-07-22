@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/cplieger/health"
-	scheduler "github.com/cplieger/scheduler/v2"
-	"github.com/cplieger/scheduler/v2/trigger"
+	scheduler "github.com/cplieger/scheduler/v3"
+	"github.com/cplieger/scheduler/v3/trigger"
 )
 
 // --- Daemon: the single owner of Renovate execution ---

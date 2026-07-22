@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	scheduler "github.com/cplieger/scheduler/v2"
-	"github.com/cplieger/scheduler/v2/trigger"
+	scheduler "github.com/cplieger/scheduler/v3"
+	"github.com/cplieger/scheduler/v3/trigger"
 	"github.com/cplieger/slogx/capture"
 )
 

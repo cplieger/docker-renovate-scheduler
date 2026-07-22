@@ -3,7 +3,7 @@ package main
 // --- Trigger payload ---
 //
 // The request one `run` client submits to the daemon over the scheduler
-// library's trigger broker (scheduler/v2/trigger: newline-JSON wire, one
+// library's trigger broker (scheduler/v3/trigger: newline-JSON wire, one
 // request line per connection, queued/started/done events back). Client and
 // daemon ship in the same binary inside the same image, so there is no
 // version skew to negotiate. Keep added fields optional (omitempty)
