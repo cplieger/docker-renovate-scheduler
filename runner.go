@@ -70,6 +70,18 @@ func renovateInvocation(repos []string) (name string, args []string) {
 // recreate mid-run drains the pass to completion as designed, bounded by
 // stop_grace_period. Log capture is unaffected: the child inherits the
 // daemon's stdout/stderr fds regardless of process group.
+//
+// Fleet alignment note (l-f3 audit, 2026-07): this own-process-group wrapper
+// stays deliberately app-side — the scheduler library gains a
+// WithProcessGroup() option only when a THIRD consumer of the shape appears
+// (scheduler.md, "Setpgid pairing rule"). Copies to keep line-aligned when
+// editing either: pg-autodump internal/pg newCommand (same base runner,
+// Setpgid, and group-targeted Cancel; no stdio wiring — its callers capture)
+// and this one (superset — stdio streaming here, plus the post-run group
+// sweep/probe/drain below, because Renovate's child provably spawns
+// package-manager descendants). vibekit internal/auth login_proc_unix.go
+// carries the group half only (hard SIGKILL on timeout, no scheduler dep — a
+// deliberate non-copy).
 var defaultCommandRunner scheduler.CommandRunner = func() scheduler.CommandRunner {
 	base := scheduler.NewCommandRunner(scheduler.DefaultGrace)
 	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
