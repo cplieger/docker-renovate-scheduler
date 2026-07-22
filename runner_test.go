@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	scheduler "github.com/cplieger/scheduler/v2"
+	scheduler "github.com/cplieger/scheduler/v3"
 )
 
 func TestRenovateInvocation(t *testing.T) {

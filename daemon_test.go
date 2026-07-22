@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/cplieger/health"
-	scheduler "github.com/cplieger/scheduler/v2"
+	scheduler "github.com/cplieger/scheduler/v3"
 	"github.com/cplieger/slogx/capture"
 )
 
