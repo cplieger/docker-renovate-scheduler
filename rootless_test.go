@@ -108,95 +108,121 @@ func TestCacheLikeEnvVar(t *testing.T) {
 	}
 }
 
-// TestWarnIfRootlessCacheUnwritable_EmitsAndSuppressesWarning pins the
-// wrapper's observable contract on captured slog output: an unmitigated
-// non-default UID emits exactly one loud startup warning carrying the uid and
-// the remediation hint, a proxy-only RENOVATE_CUSTOM_ENV_VARIABLES emits the
-// softer no-cache-vars warning (naming the forwarded keys but never their
-// values — they can carry proxy credentials), and a cache-naming value
-// suppresses everything. The pure decision matrix is TestRootlessCacheRisk's;
-// this test pins the wiring (real euid + real env reach the decision, and the
-// right Warn actually fires). Skipped when the test process runs as root or
-// the image UID, where the warning branches are unreachable by design.
-func TestWarnIfRootlessCacheUnwritable_EmitsAndSuppressesWarning(t *testing.T) {
+// The TestWarnIfRootlessCacheUnwritable_* tests pin the wrapper's observable
+// contract on captured slog output. The pure decision matrix is
+// TestRootlessCacheRisk's; these pin the wiring (real euid + real env reach
+// the decision, and the right Warn actually fires). Skipped when the test
+// process runs as root or the image UID, where the warning branches are
+// unreachable by design. They capture the process-global slog default, so
+// they must stay serial (no t.Parallel).
+
+// requireCustomUID skips the test when the warning branch is unreachable for
+// this process and returns the effective UID otherwise.
+func requireCustomUID(t *testing.T) int {
+	t.Helper()
 	euid := os.Geteuid()
 	if euid == 0 || euid == defaultImageUID {
 		t.Skip("running as root or the image default UID; the warning branch is unreachable for this process")
 	}
+	return euid
+}
 
+// requireSingleWarning asserts exactly one Warn record contains message and
+// returns it.
+func requireSingleWarning(t *testing.T, rec *capture.Recorder, message string) slog.Record {
+	t.Helper()
+	var match slog.Record
+	matches := 0
+	for _, record := range rec.Records() {
+		if record.Level == slog.LevelWarn && strings.Contains(record.Message, message) {
+			match = record
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("warnings containing %q = %d, want 1; records = %v", message, matches, rec.Messages())
+	}
+	return match
+}
+
+// requireRecordAttr asserts the record carries the attribute and returns its
+// value.
+func requireRecordAttr(t *testing.T, record slog.Record, key string) slog.Value {
+	t.Helper()
+	var value slog.Value
+	found := false
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key == key {
+			value = attr.Value
+			found = true
+			return false
+		}
+		return true
+	})
+	if !found {
+		t.Fatalf("warning has no %q attribute", key)
+	}
+	return value
+}
+
+// requireRecordsExclude asserts no captured message or attribute value
+// contains the forbidden substring.
+func requireRecordsExclude(t *testing.T, rec *capture.Recorder, forbidden string) {
+	t.Helper()
+	for _, record := range rec.Records() {
+		if strings.Contains(record.Message, forbidden) {
+			t.Errorf("warning message leaked %q: %q", forbidden, record.Message)
+		}
+		record.Attrs(func(attr slog.Attr) bool {
+			if strings.Contains(attr.Value.String(), forbidden) {
+				t.Errorf("warning attr %s leaked %q: %q", attr.Key, forbidden, attr.Value.String())
+			}
+			return true
+		})
+	}
+}
+
+func TestWarnIfRootlessCacheUnwritable_NoRedirectionEmitsActionableWarning(t *testing.T) {
+	euid := requireCustomUID(t)
 	t.Setenv("RENOVATE_CUSTOM_ENV_VARIABLES", "")
 	rec := capture.Default(t)
-	warnIfRootlessCacheUnwritable()
-	warns := 0
-	warningUID := int64(-1)
-	fixHint := ""
-	for _, r := range rec.Records() {
-		if r.Level != slog.LevelWarn || !strings.Contains(r.Message, "no tool-cache redirection") {
-			continue
-		}
-		warns++
-		r.Attrs(func(a slog.Attr) bool {
-			switch a.Key {
-			case "uid":
-				warningUID = a.Value.Int64()
-			case "fix":
-				fixHint = a.Value.String()
-			}
-			return true
-		})
-	}
-	if warns != 1 {
-		t.Fatalf("unmitigated custom UID emitted %d matching warnings, want exactly 1; records = %v", warns, rec.Messages())
-	}
-	if warningUID != int64(euid) {
-		t.Errorf("warning uid = %d, want process uid %d", warningUID, euid)
-	}
-	if !strings.Contains(fixHint, "RENOVATE_CUSTOM_ENV_VARIABLES") {
-		t.Errorf("warning fix hint = %q, want it to name RENOVATE_CUSTOM_ENV_VARIABLES; the remediation must be actionable from the log line", fixHint)
-	}
 
+	warnIfRootlessCacheUnwritable()
+
+	warning := requireSingleWarning(t, rec, "no tool-cache redirection")
+	if got := requireRecordAttr(t, warning, "uid").Int64(); got != int64(euid) {
+		t.Errorf("warning uid = %d, want process uid %d", got, euid)
+	}
+	fix := requireRecordAttr(t, warning, "fix").String()
+	if !strings.Contains(fix, "RENOVATE_CUSTOM_ENV_VARIABLES") {
+		t.Errorf("warning fix hint = %q, want it to name RENOVATE_CUSTOM_ENV_VARIABLES", fix)
+	}
+}
+
+func TestWarnIfRootlessCacheUnwritable_ProxyOnlyWarnsWithoutLeakingValue(t *testing.T) {
+	requireCustomUID(t)
 	const proxyValue = "http://user:secret@proxy:3128"
 	t.Setenv("RENOVATE_CUSTOM_ENV_VARIABLES", `{"HTTP_PROXY":"`+proxyValue+`"}`)
-	recSoft := capture.Default(t)
-	warnIfRootlessCacheUnwritable()
-	softWarns := 0
-	namedKeys := ""
-	for _, r := range recSoft.Records() {
-		if r.Level != slog.LevelWarn || !strings.Contains(r.Message, "redirects no tool cache") {
-			continue
-		}
-		softWarns++
-		r.Attrs(func(a slog.Attr) bool {
-			if a.Key == "custom_env_vars" {
-				namedKeys = a.Value.String()
-			}
-			return true
-		})
-	}
-	if softWarns != 1 {
-		t.Fatalf("proxy-only forwarding emitted %d soft warnings, want exactly 1; records = %v", softWarns, recSoft.Messages())
-	}
-	if !strings.Contains(namedKeys, "HTTP_PROXY") {
-		t.Errorf("soft warning custom_env_vars = %q, want it to name HTTP_PROXY", namedKeys)
-	}
-	for _, m := range recSoft.Messages() {
-		if strings.Contains(m, "secret") {
-			t.Fatalf("soft warning leaked a forwarded value: %q", m)
-		}
-	}
-	for _, r := range recSoft.Records() {
-		r.Attrs(func(a slog.Attr) bool {
-			if strings.Contains(a.Value.String(), "secret") {
-				t.Errorf("soft warning attr %s leaked a forwarded value: %q", a.Key, a.Value.String())
-			}
-			return true
-		})
-	}
+	rec := capture.Default(t)
 
-	t.Setenv("RENOVATE_CUSTOM_ENV_VARIABLES", `{"GOCACHE":"/data/.cache/go-build"}`)
-	rec2 := capture.Default(t)
 	warnIfRootlessCacheUnwritable()
-	if n := rec2.Len(); n != 0 {
-		t.Errorf("cache-naming environment emitted %d records, want 0 (RENOVATE_CUSTOM_ENV_VARIABLES naming a cache suppresses the warning)", n)
+
+	warning := requireSingleWarning(t, rec, "redirects no tool cache")
+	keys := requireRecordAttr(t, warning, "custom_env_vars").String()
+	if !strings.Contains(keys, "HTTP_PROXY") {
+		t.Errorf("soft warning custom_env_vars = %q, want it to name HTTP_PROXY", keys)
+	}
+	requireRecordsExclude(t, rec, "secret")
+}
+
+func TestWarnIfRootlessCacheUnwritable_CacheRedirectionSuppressesWarning(t *testing.T) {
+	requireCustomUID(t)
+	t.Setenv("RENOVATE_CUSTOM_ENV_VARIABLES", `{"GOCACHE":"/data/.cache/go-build"}`)
+	rec := capture.Default(t)
+
+	warnIfRootlessCacheUnwritable()
+
+	if got := rec.Len(); got != 0 {
+		t.Errorf("cache-naming environment emitted %d records, want 0", got)
 	}
 }

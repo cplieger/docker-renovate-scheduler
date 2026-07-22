@@ -134,23 +134,29 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	d, _ := newBareDaemon(t, ctx, recordingRunner("true", nil))
 	d.runOnce = runOnce
-	execDone := make(chan struct{})
-	go func() { defer close(execDone); d.runJobs(ctx) }()
 	ln, err := trigger.Listen(sock)
 	if err != nil {
 		t.Fatalf("trigger.Listen() = %v", err)
 	}
+	execDone := make(chan struct{})
+	go func() { defer close(execDone); d.runJobs(ctx) }()
 	srv := &trigger.Server[runPayload]{Queue: d.queue}
 	srv.Serve(ln)
 	// A mid-test Fatal must not leave the executor parked in the gated
-	// runOnce and the listener open for the rest of the package run.
-	// release is idempotent; the repeated cancel/ln.Close/queue.Close on
-	// the normal path are tolerated (closed-flag close).
+	// runOnce, the listener open, or executor/handler goroutines running
+	// past the test's TempDir cleanup. Shutdown is established BEFORE the
+	// gate is released so a queued request can't be dequeued in the
+	// release-to-cancel race, then both owned components are joined.
+	// release is idempotent; the repeated cancel/ln.Close/queue.Close and
+	// the re-receive/re-Wait on the normal path are tolerated
+	// (closed-flag close, closed channel, completed WaitGroup).
 	t.Cleanup(func() {
-		release()
 		cancel()
 		_ = ln.Close()
 		d.queue.Close()
+		release()
+		<-execDone
+		srv.Wait()
 	})
 
 	// Occupy the executor, then queue a second request over the wire.
