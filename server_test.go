@@ -120,18 +120,20 @@ func TestServer_ForwardsScopeAndEnvironmentToTheRun(t *testing.T) {
 // shutdown contract on the wire: a request queued behind an in-flight run
 // receives done{ok:false, reason: cancelled…} when the daemon stops — the
 // trigger reports a failed job instead of hanging or being silently dropped.
-// The in-flight child pauses AFTER process start (readiness marker, then
-// blocks until released), so the shutdown lands on a run already committed
-// past runRenovateOnce's post-Start handshake and A drains with its real
-// outcome instead of being cancelled at start.
+// The in-flight run pauses INSIDE the runOnce seam (the committed-run
+// boundary) and blocks until released, so the shutdown lands on a run that
+// has unambiguously committed and A drains with its real outcome instead of
+// being cancelled at start (a child-start readiness marker would race
+// runRenovateOnce's post-Start handshake).
 func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	sock := testSocketPath(t)
 
-	runner, awaitEntered, release := gatedRunner(t)
+	runOnce, awaitEntered, release := gatedRunOnce(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d, _ := newBareDaemon(t, ctx, runner)
+	d, _ := newBareDaemon(t, ctx, recordingRunner("true", nil))
+	d.runOnce = runOnce
 	execDone := make(chan struct{})
 	go func() { defer close(execDone); d.runJobs(ctx) }()
 	ln, err := trigger.Listen(sock)
@@ -143,7 +145,7 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 
 	// Occupy the executor, then queue a second request over the wire.
 	decA := rawRequest(t, sock, runPayload{})
-	awaitEntered() // A is executing, post-Start
+	awaitEntered() // A has committed: execution is inside runOnce
 	decB := rawRequest(t, sock, runPayload{Repos: []string{"owner/queued"}})
 	if ev := nextEvent(t, decB); ev.Kind != trigger.EventQueued {
 		t.Fatalf("B's first event = %q, want queued", ev.Kind)
@@ -153,7 +155,7 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	cancel()
 	_ = ln.Close()
 	d.queue.Close()
-	release() // A's child completes its pass
+	release() // A's run completes its pass
 
 	// A: full drain — its run finished with its real (clean) outcome.
 	for {

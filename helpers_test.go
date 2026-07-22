@@ -96,3 +96,29 @@ func gatedRunner(t *testing.T) (runner scheduler.CommandRunner, awaitEntered, re
 	}
 	return runner, awaitEntered, release
 }
+
+// gatedRunOnce returns a runOnce seam that signals entry into the run
+// callback — the committed-run boundary, past execute's shutdownCtx
+// preflight re-check — and then blocks until released, reporting a clean
+// drained outcome. gatedRunner's readiness file proves only that the child
+// process started, NOT that runRenovateOnce committed past its post-Start
+// shutdown handshake, so shutdown-drain tests gated on it raced the
+// handshake; entry into this callback is the unambiguous barrier.
+func gatedRunOnce(t *testing.T) (runOnce runOnceFunc, awaitEntered, release func()) {
+	t.Helper()
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	runOnce = func(_, _ context.Context, _ time.Duration, _ string, _, _ []string, _ scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
+		close(entered)
+		<-proceed
+		return true, false, false
+	}
+	awaitEntered = func() {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("in-flight run never committed")
+		}
+	}
+	return runOnce, awaitEntered, func() { close(proceed) }
+}

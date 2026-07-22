@@ -166,23 +166,24 @@ func TestExecutor_PreflightValidatesForwardedBaseDir(t *testing.T) {
 // TestExecutor_ShutdownCancelsQueuedButFinishesInFlight pins the drain
 // contract: SIGTERM never abandons the in-flight run (it completes with its
 // real outcome) and never starts queued work (it is cancelled with an
-// explicit reason). The in-flight child pauses AFTER process start — it
-// creates a readiness marker, then blocks until released — so the SIGTERM
-// lands on a run already committed past runRenovateOnce's post-Start
-// shutdown handshake (a pre-Start pause would model the cancelled-start
-// window instead, which TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild
-// covers).
+// explicit reason). The in-flight run pauses INSIDE the runOnce seam — the
+// committed-run boundary — and blocks until released, so the SIGTERM lands
+// on a run that has unambiguously committed (a child-start readiness marker
+// would race runRenovateOnce's post-Start shutdown handshake; the real
+// post-Start cancellation path is pinned process-level by
+// TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild).
 func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 
-	runner, awaitEntered, release := gatedRunner(t)
-	d, cancel, _ := newTestDaemon(t, runner)
+	runOnce, awaitEntered, release := gatedRunOnce(t)
+	d, cancel, _ := newTestDaemon(t, recordingRunner("true", nil))
+	d.runOnce = runOnce
 
 	inflight := newJob("external", nil, nil)
 	if err := d.queue.Submit(inflight); err != nil {
 		t.Fatalf("submit(inflight) = %v", err)
 	}
-	awaitEntered() // the run is now executing, post-Start
+	awaitEntered() // the run has committed: execution is inside runOnce
 
 	queued := newJob("external", []string{"owner/q"}, nil)
 	if err := d.queue.Submit(queued); err != nil {
@@ -192,7 +193,7 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 	cancel()          // SIGTERM lands mid-run
 	d.beginShutdown() // runDaemon's immediate unhealthy transition
 	d.queue.Close()   // daemon stops admission
-	release()         // the in-flight child finishes its pass
+	release()         // the in-flight run finishes its pass
 
 	select {
 	case out := <-inflight.Result():

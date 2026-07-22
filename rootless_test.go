@@ -59,7 +59,7 @@ func TestRootlessCacheRisk(t *testing.T) {
 			euid: customUID, getenv: custom(`{"npm_config_cache":"/data/.npm"}`), want: rootlessRiskNone,
 		},
 		{
-			name: "custom UID forwarding proxies only warns softly (the l-f13 false negative)",
+			name: "custom UID forwarding proxies only warns softly",
 			euid: customUID, getenv: custom(`{"HTTP_PROXY":"http://proxy:3128","NO_PROXY":"localhost"}`), want: rootlessRiskNoCacheVars,
 		},
 		{
