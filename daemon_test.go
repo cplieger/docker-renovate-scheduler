@@ -574,3 +574,91 @@ func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
 		t.Fatal("fatal containment error not delivered to runDaemon's channel")
 	}
 }
+
+// TestRunDaemon_LateContainmentLossAfterShutdownReturnsError is the
+// shutdown-ordering half of the containment-loss contract: when ordinary
+// shutdown wins runDaemon's select while a run is still draining, and that
+// drained run THEN reports its process group survived the kill sweep,
+// runDaemon must still return errContainmentLost (main exits non-zero, so
+// the container restart reaps the surviving tree) instead of nil. The
+// surviving-group report is injected at the runOnceSeam boundary for the
+// same reason TestExecutor_HaltsAdmissionAfterSurvivingGroup uses the
+// daemon.runOnce seam. External mode, because the marker boots HEALTHY
+// there: beginShutdown — which runs only after the select resolved — flips
+// it unhealthy, giving a deterministic post-select signal (runDaemon's
+// setupLogger replaces the slog default, so log capture cannot provide it).
+// Not parallel: it uses the package-global healthMarkerPath and the seam.
+func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	t.Setenv("SCHED_INTERVAL", "off")
+	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	runOnceSeam = func(_, _ context.Context, _ time.Duration, _ string, _, _ []string, _ scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
+		close(entered)
+		<-proceed
+		return false, false, true // the sweep could not confirm group death — reported after shutdown began
+	}
+	t.Cleanup(func() { runOnceSeam = nil })
+
+	sock := testSocketPath(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var runErr error
+	go func() {
+		defer close(done)
+		runErr = runDaemon(ctx, sock, recordingRunner("true", nil))
+	}()
+
+	// External mode boots healthy and binds the socket; wait for both so the
+	// trigger below cannot race the boot.
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(healthMarkerPath)
+		return err == nil
+	}, "daemon did not set the health marker healthy on external-mode boot")
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(sock)
+		return err == nil
+	}, "daemon did not bind the trigger socket")
+
+	clientDone := make(chan int, 1)
+	go func() { clientDone <- runClient(sock, nil) }()
+	select {
+	case <-entered: // the triggered run is executing
+	case <-done:
+		t.Fatalf("runDaemon returned before the triggered run began: %v", runErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("triggered run did not begin")
+	}
+
+	cancel() // ordinary shutdown wins the select while the run drains
+	// beginShutdown flips the marker unhealthy (file removed) and runs only
+	// after the select resolved, so marker absence proves ctx.Done won (the
+	// fatal channel was still empty) and the survival report below exercises
+	// the post-drain fold-in, not the select's own fatal branch.
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(healthMarkerPath)
+		return errors.Is(err, fs.ErrNotExist)
+	}, "runDaemon did not begin shutdown after cancellation")
+	close(proceed) // the draining run now reports the surviving group
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runDaemon did not return after the drained run reported containment loss")
+	}
+	if !errors.Is(runErr, errContainmentLost) {
+		t.Errorf("runDaemon() = %v, want errContainmentLost (a late containment loss must still exit non-zero)", runErr)
+	}
+	select {
+	case code := <-clientDone:
+		if code != 1 {
+			t.Errorf("runClient() = %d, want 1 (the surviving run's waiter gets the containment failure)", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("triggered run's client did not exit")
+	}
+}

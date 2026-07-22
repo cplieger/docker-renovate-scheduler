@@ -93,6 +93,14 @@ func (d *daemon) setRunHealth(ok bool) {
 	}
 }
 
+// runOnceSeam mirrors daemon.runOnce at the composition root: runDaemon
+// copies it into the daemon it builds. nil — the production value — selects
+// runRenovateOnce. It exists only for the shutdown-ordering containment
+// regression test, which must inject a surviving-group report into a daemon
+// runDaemon itself constructed (a SIGKILL-surviving process group cannot be
+// fabricated from real test children; see daemon.runOnce).
+var runOnceSeam func(ctx, shutdownCtx context.Context, timeout time.Duration, trigger string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled, groupSurvived bool)
+
 // runDaemon is the composition root for the long-running container (the
 // `daemon` subcommand and the default no-arg command). It configures logging,
 // verifies the Renovate base directory, binds the trigger socket, wires the
@@ -149,6 +157,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		queue:   newRunQueue(queueCapacity),
 		marker:  marker,
 		newCmd:  newCmd,
+		runOnce: runOnceSeam,
 		runCtx:  context.WithoutCancel(ctx),
 		timeout: timeout,
 		fatal:   make(chan error, 1),
@@ -197,6 +206,18 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	_ = ln.Close()
 	d.queue.close()
 	<-executorDone
+	// Fold in a late containment loss: if ordinary shutdown won the select
+	// above while a run was still draining, the executor's fatal send landed
+	// in the buffered channel after the receive was already passed. The
+	// executor sends before runJobs can close executorDone, so this
+	// non-blocking receive is ordered and cannot miss a loss from the
+	// drained run.
+	if fatalErr == nil {
+		select {
+		case fatalErr = <-d.fatal:
+		default:
+		}
+	}
 	<-tickerDone
 	srv.handlers.Wait()
 	slog.Info("shutdown complete")
