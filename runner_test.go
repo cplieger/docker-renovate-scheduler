@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	scheduler "github.com/cplieger/scheduler/v2"
+	"github.com/cplieger/slogx/capture"
 )
 
 func TestRenovateInvocation(t *testing.T) {
@@ -268,20 +268,13 @@ func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-			t.Cleanup(func() { slog.SetDefault(prev) })
+			rec := capture.Default(t)
 			ok, _ := runRenovateOnce(context.Background(), context.Background(), tt.timeout, "test", nil, nil, tt.runner)
 			if ok {
 				t.Errorf("runRenovateOnce() = true, want false")
 			}
-			out := buf.String()
-			if !strings.Contains(out, tt.wantMsg) {
-				t.Errorf("missing %q in log output; got:\n%s", tt.wantMsg, out)
-			}
-			if !strings.Contains(out, "level=ERROR") {
-				t.Errorf("classification not logged at ERROR; got:\n%s", out)
+			if got := rec.CountLevel(slog.LevelError, tt.wantMsg); got != 1 {
+				t.Errorf("ERROR records matching %q = %d, want 1; captured: %v", tt.wantMsg, got, rec.Messages())
 			}
 		})
 	}
@@ -345,10 +338,7 @@ func TestDefaultCommandRunner_CancelSendsSIGTERMNotSIGKILL(t *testing.T) {
 // level=ERROR run-failure line: a cancelled start is a Warn, not a failure
 // alert. Serial: swaps slog.Default.
 func TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild(t *testing.T) {
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	rec := capture.Default(t)
 
 	shutdownCtx, shutdown := context.WithCancel(context.Background())
 	var child *exec.Cmd
@@ -372,12 +362,11 @@ func TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild(t *testing.T) {
 	if elapsed > 15*time.Second {
 		t.Errorf("runRenovateOnce() returned after %v; the cancelled child was not reaped promptly", elapsed)
 	}
-	out := buf.String()
-	if strings.Contains(out, "level=ERROR") {
-		t.Errorf("a shutdown-cancelled start was logged at ERROR (false failure alert); got:\n%s", out)
+	if got := rec.CountLevel(slog.LevelError, ""); got != 0 {
+		t.Errorf("a shutdown-cancelled start emitted %d ERROR records (false failure alert); captured: %v", got, rec.Messages())
 	}
-	if !strings.Contains(out, "renovate run cancelled by shutdown at start") {
-		t.Errorf("missing the shutdown-cancellation Warn line; got:\n%s", out)
+	if got := rec.Count("renovate run cancelled by shutdown at start"); got != 1 {
+		t.Errorf("shutdown-cancellation Warn line count = %d, want 1; captured: %v", got, rec.Messages())
 	}
 }
 
@@ -456,10 +445,7 @@ func TestStopUncommittedRun_SweepsTermIgnoringDescendant(t *testing.T) {
 // unhealthy and the RenovateRunFailed alert fires, instead of reporting a
 // clean run. Serial: swaps slog.Default.
 func TestRunRenovateOnce_StartFailureIsARunFailureNotAPanic(t *testing.T) {
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	rec := capture.Default(t)
 
 	missing := t.TempDir() + "/no-such-entrypoint"
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
@@ -471,12 +457,8 @@ func TestRunRenovateOnce_StartFailureIsARunFailureNotAPanic(t *testing.T) {
 	if ok || cancelled {
 		t.Fatalf("runRenovateOnce() = (ok=%v, cancelled=%v) for an unstartable child, want (false, false)", ok, cancelled)
 	}
-	out := buf.String()
-	if !strings.Contains(out, "renovate run failed") {
-		t.Errorf("missing the run-failure line for a failed Start; got:\n%s", out)
-	}
-	if !strings.Contains(out, "level=ERROR") {
-		t.Errorf("start failure not logged at ERROR; got:\n%s", out)
+	if got := rec.CountLevel(slog.LevelError, "renovate run failed"); got != 1 {
+		t.Errorf("ERROR records matching the run-failure line = %d, want 1; captured: %v", got, rec.Messages())
 	}
 }
 
@@ -589,5 +571,45 @@ func TestStopUncommittedRun_SweepsLeaderThatIgnoresTermAtGraceExpiry(t *testing.
 	}
 	if elapsed > scheduler.DefaultGrace+10*time.Second {
 		t.Errorf("stopUncommittedRun returned after %v; the sweep must land at grace expiry", elapsed)
+	}
+}
+
+// TestRunRenovateOnce_TimeoutSweepObservesGroupDeath is the regression test
+// for the sweep's observation phase: kill(2) only queues SIGKILL, so a
+// forced cleanup that returns on signal submission alone can release the
+// executor to the next FIFO job while a package-manager descendant is still
+// alive against the same base directory. The leader spawns a TERM-ignoring
+// descendant (models a package manager that shrugs off the Cancel SIGTERM)
+// and then outlives the run timeout; when runRenovateOnce returns, the
+// descendant must ALREADY be gone — no post-return polling window — because
+// sweepRunProcessGroup must not return until the whole group has died.
+func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
+	t.Parallel()
+	descPath := t.TempDir() + "/desc.pid"
+	// $1 is descPath. The backgrounded subshell ignores TERM and respawns
+	// its sleep forever; only the sweep's group SIGKILL removes it. The
+	// leader records the descendant's PID, then blocks past the timeout.
+	script := `( trap '' TERM; while :; do sleep 1; done ) & echo $! > "$1"; sleep 30 & wait`
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		cmd := defaultCommandRunner(ctx, "sh", "-c", script, "sh", descPath)
+		cmd.Stdout, cmd.Stderr = nil, nil // the descendant must not hold the test's stdout pipe
+		return cmd
+	}
+
+	if ok, _ := runRenovateOnce(context.Background(), context.Background(), 500*time.Millisecond, "test", nil, nil, runner); ok {
+		t.Fatal("runRenovateOnce() = true for a run that exceeded the timeout, want false")
+	}
+
+	raw, err := os.ReadFile(descPath)
+	if err != nil {
+		t.Fatalf("descendant PID never recorded (leader did not start): %v", err)
+	}
+	descPid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("bad descendant PID file content %q: %v", raw, err)
+	}
+	if !errors.Is(syscall.Kill(descPid, 0), syscall.ESRCH) {
+		t.Error("TERM-ignoring descendant still alive after runRenovateOnce returned: " +
+			"the sweep released the executor before observing the group's death")
 	}
 }

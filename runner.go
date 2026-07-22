@@ -167,7 +167,10 @@ func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, tr
 		slog.Info("renovate run complete", "trigger", trigger, "duration_ms", durationMs)
 		return true, false
 	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
-		sweepRunProcessGroup(cmd)
+		if !sweepRunProcessGroup(cmd) {
+			slog.Warn("renovate run process group survived the post-timeout kill sweep; the next run may overlap it",
+				"trigger", trigger, "pid", cmd.Process.Pid)
+		}
 		// The run exceeded SCHED_TIMEOUT. Logged distinctly from a genuine
 		// non-zero Renovate exit so operators can tell a slow run from a
 		// real failure during triage.
@@ -179,15 +182,19 @@ func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, tr
 		// without reaping its package-manager children. On a normal
 		// non-zero exit the group is already empty and the kill is a
 		// no-op (ESRCH).
-		sweepRunProcessGroup(cmd)
+		if !sweepRunProcessGroup(cmd) {
+			slog.Warn("renovate run process group survived the post-failure kill sweep; the next run may overlap it",
+				"trigger", trigger, "pid", cmd.Process.Pid)
+		}
 		slog.Error("renovate run failed",
 			"trigger", trigger, "duration_ms", durationMs, "error", runErr)
 		return false, false
 	}
 }
 
-// runGroupPollInterval is how often stopUncommittedRun re-probes the child's
-// process group for surviving members inside the DefaultGrace window.
+// runGroupPollInterval is how often stopUncommittedRun and
+// sweepRunProcessGroup re-probe the child's process group for surviving
+// members inside their bounded DefaultGrace windows.
 const runGroupPollInterval = 50 * time.Millisecond
 
 // stopUncommittedRun reaps a child that started but lost the post-Start
@@ -218,18 +225,18 @@ func stopUncommittedRun(cmd *exec.Cmd) {
 		select {
 		case <-waitCh:
 			reaped, waitCh = true, nil
-			if runProcessGroupGone(cmd) {
-				return
-			}
 		case <-poll.C:
-			if reaped && runProcessGroupGone(cmd) {
-				return
-			}
 		case <-grace.C:
-			sweepRunProcessGroup(cmd)
+			if !sweepRunProcessGroup(cmd) {
+				slog.Warn("uncommitted run process group survived the grace-expiry kill sweep; shutdown may leave it running",
+					"pid", cmd.Process.Pid)
+			}
 			if !reaped {
 				<-done
 			}
+			return
+		}
+		if reaped && runProcessGroupGone(cmd) {
 			return
 		}
 	}
@@ -246,12 +253,36 @@ func runProcessGroupGone(cmd *exec.Cmd) bool {
 }
 
 // sweepRunProcessGroup force-kills the child's whole process group (Setpgid
-// makes the child its leader). os/exec's WaitDelay SIGKILL hits only the
-// direct child; surviving package-manager grandchildren would race the next
-// FIFO job against the same base directory, so the group is swept after any
-// run that did not exit cleanly. No-op when the child never started.
-func sweepRunProcessGroup(cmd *exec.Cmd) {
-	if cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+// makes the child its leader) and then waits — polling at
+// runGroupPollInterval, bounded by scheduler.DefaultGrace — until the group
+// has actually disappeared, reporting whether it did. os/exec's WaitDelay
+// SIGKILL hits only the direct child; surviving package-manager
+// grandchildren would race the next FIFO job against the same base
+// directory, so the group is swept after any run that did not exit cleanly.
+// kill(2) only queues the signal without waiting for the targets to stop
+// and be reaped, so signal submission alone is NOT termination: the caller
+// must not release the executor to the next job (or report the shutdown
+// drain complete) until this observation phase confirms the group is gone
+// or the bounded wait expires. Returns true when the child never started
+// (nothing to sweep).
+func sweepRunProcessGroup(cmd *exec.Cmd) bool {
+	if cmd.Process == nil {
+		return true
+	}
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+
+	deadline := time.NewTimer(scheduler.DefaultGrace)
+	defer deadline.Stop()
+	poll := time.NewTicker(runGroupPollInterval)
+	defer poll.Stop()
+	for {
+		if runProcessGroupGone(cmd) {
+			return true
+		}
+		select {
+		case <-poll.C:
+		case <-deadline.C:
+			return runProcessGroupGone(cmd)
+		}
 	}
 }
