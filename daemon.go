@@ -82,6 +82,11 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	// Cleanup is deferred only after boot succeeds: a failed boot leaves
 	// the unhealthy marker in place.
 	marker := health.NewMarker(healthMarkerPath)
+	// Clear a previous life's marker immediately: a docker restart preserves
+	// /tmp, and until the mode-appropriate initial state is set after the
+	// socket bind, a probe must not read the old life's healthy state
+	// (built-in mode boots unhealthy by contract).
+	marker.Set(false)
 
 	if err := verifyBaseDir(ctx); err != nil {
 		logBaseDirError(baseDir(), err)
@@ -214,9 +219,9 @@ func (d *daemon) runJobs(shutdownCtx context.Context) {
 
 // cancelJobForShutdown delivers the explicit shutdown-cancellation result —
 // the shared bookkeeping for both the already-shutting-down dequeue branch
-// and the post-preflight re-check in execute. The duration is always zero:
-// the wire contract (wireEvent.DurationMs) reports execution time only for a
-// request that actually ran, and a shutdown-cancelled job never does.
+// and the post-preflight re-check in execute. The duration is always zero: a
+// shutdown-cancelled job never starts Renovate, and the cancellation reason
+// -- not elapsed queue or preflight time -- is the useful signal.
 func cancelJobForShutdown(j *job) {
 	slog.Warn("queued run cancelled by shutdown", "trigger", j.trigger, "repos", j.repos)
 	j.finish(runOutcome{ok: false, reason: "cancelled: scheduler shutting down"})

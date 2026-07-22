@@ -146,12 +146,7 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string,
 		slog.Info("renovate run complete", "trigger", trigger, "duration_ms", durationMs)
 		return true
 	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
-		// Sweep the child's process group: os/exec's WaitDelay SIGKILL hits
-		// only the direct child, and surviving package-manager grandchildren
-		// would race the next run against the same base directory.
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		sweepRunProcessGroup(cmd)
 		// The run exceeded SCHED_TIMEOUT. Logged distinctly from a genuine
 		// non-zero Renovate exit so operators can tell a slow run from a
 		// real failure during triage.
@@ -159,16 +154,24 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string,
 			"trigger", trigger, "duration_ms", durationMs, "timeout", timeout)
 		return false
 	default:
-		// Sweep the group here too: a hard-crashed Renovate (e.g. an
-		// OOM-killed node process) exits without reaping its
-		// package-manager children, and survivors would race the next
-		// FIFO job against the same base directory. On a normal non-zero
-		// exit the group is already empty and the kill is a no-op (ESRCH).
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		// A hard-crashed Renovate (e.g. an OOM-killed node process) exits
+		// without reaping its package-manager children. On a normal
+		// non-zero exit the group is already empty and the kill is a
+		// no-op (ESRCH).
+		sweepRunProcessGroup(cmd)
 		slog.Error("renovate run failed",
 			"trigger", trigger, "duration_ms", durationMs, "error", runErr)
 		return false
+	}
+}
+
+// sweepRunProcessGroup force-kills the child's whole process group (Setpgid
+// makes the child its leader). os/exec's WaitDelay SIGKILL hits only the
+// direct child; surviving package-manager grandchildren would race the next
+// FIFO job against the same base directory, so the group is swept after any
+// run that did not exit cleanly. No-op when the child never started.
+func sweepRunProcessGroup(cmd *exec.Cmd) {
+	if cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 }

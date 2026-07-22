@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -14,6 +17,7 @@ import (
 
 	"github.com/cplieger/health"
 	scheduler "github.com/cplieger/scheduler/v2"
+	"github.com/cplieger/slogx/capture"
 )
 
 // startTestServer wires a queue + executor + trigger server on a temp socket
@@ -65,7 +69,6 @@ func TestListenTrigger_RemovesStaleSocketAndSetsOwnerOnly(t *testing.T) {
 	// Simulate a SIGKILL: the file stays, nobody listens. Closing the
 	// listener would remove the file, so leak it deliberately and only
 	// unlink-guard via listenTrigger.
-	_ = stale.(*net.UnixListener)
 	stale.(*net.UnixListener).SetUnlinkOnClose(false)
 	_ = stale.Close()
 	if _, err := os.Stat(sock); err != nil {
@@ -348,4 +351,150 @@ func TestServer_DepartedClientDoesNotBlockRunOrShutdown(t *testing.T) {
 	}
 	// startTestServer's cleanup does srv.handlers.Wait(); reaching the end of
 	// the test without a hang is the shutdown half of the assertion.
+}
+
+// acceptResult is one scripted Accept outcome for fakeListener.
+type acceptResult struct {
+	conn net.Conn
+	err  error
+}
+
+// fakeListener scripts Accept outcomes; a closed channel yields net.ErrClosed
+// (the shutdown signal serve exits on).
+type fakeListener struct {
+	results chan acceptResult
+}
+
+func (l *fakeListener) Accept() (net.Conn, error) {
+	r, ok := <-l.results
+	if !ok {
+		return nil, net.ErrClosed
+	}
+	return r.conn, r.err
+}
+func (l *fakeListener) Close() error   { return nil }
+func (l *fakeListener) Addr() net.Addr { return &net.UnixAddr{Name: "fake", Net: "unix"} }
+
+// TestServe_ContinuesAfterTransientAcceptError pins the accept loop's
+// degradation contract: a transient Accept error (fd exhaustion) is logged
+// and retried — the connection accepted AFTER the error is still served — and
+// net.ErrClosed still terminates the loop. A regression that treats every
+// error as fatal would strand the daemon's trigger socket after one blip.
+func TestServe_ContinuesAfterTransientAcceptError(t *testing.T) {
+	rec := capture.Default(t)
+
+	serverConn, clientConn := net.Pipe()
+	ln := &fakeListener{results: make(chan acceptResult, 2)}
+	ln.results <- acceptResult{err: errors.New("accept tcp: too many open files")}
+	ln.results <- acceptResult{conn: serverConn}
+	close(ln.results) // third Accept: net.ErrClosed -> serve returns
+
+	// No executor and a pre-filled capacity-1 queue: the request accepted
+	// after the transient error is answered immediately with done{queue full}.
+	q := newRunQueue(1)
+	if err := q.submit(newJob("external", nil, nil)); err != nil {
+		t.Fatalf("pre-fill submit: %v", err)
+	}
+	srv := &triggerServer{queue: q}
+	serveDone := make(chan struct{})
+	go func() { defer close(serveDone); srv.serve(ln) }()
+
+	_ = clientConn.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := json.NewEncoder(clientConn).Encode(wireRequest{}); err != nil {
+		t.Fatalf("send request: %v (serve stopped accepting after the transient error)", err)
+	}
+	var ev wireEvent
+	if err := json.NewDecoder(clientConn).Decode(&ev); err != nil {
+		t.Fatalf("decode event after transient accept error: %v (serve did not keep accepting)", err)
+	}
+	if ev.Event != eventDone || ev.OK {
+		t.Errorf("event = %+v, want done ok=false (queue full) from the post-error connection", ev)
+	}
+	_ = clientConn.Close()
+
+	select {
+	case <-serveDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return on net.ErrClosed")
+	}
+	warns := 0
+	for _, r := range rec.Records() {
+		if r.Level == slog.LevelWarn && strings.Contains(r.Message, "trigger socket accept failed") {
+			warns++
+		}
+	}
+	if warns != 1 {
+		t.Errorf("accept-failure warnings = %d, want 1 (the transient error must be logged)", warns)
+	}
+	srv.handlers.Wait()
+}
+
+// TestListenTrigger_UnremovableStaleSocketFailsBoot pins the stale-socket
+// hygiene's failure mode: when the stale file exists but cannot be unlinked
+// (no write permission on the parent), listenTrigger must surface that
+// permission error — failing boot loudly — rather than proceeding to a bind
+// that would fail with a misleading address-in-use error.
+func TestListenTrigger_UnremovableStaleSocketFailsBoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	parent := t.TempDir()
+	sock := filepath.Join(parent, "trigger.sock")
+	if err := os.WriteFile(sock, nil, 0o600); err != nil {
+		t.Fatalf("setup stale file: %v", err)
+	}
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+
+	ln, err := listenTrigger(sock)
+	if err == nil {
+		_ = ln.Close()
+		t.Fatal("listenTrigger() = nil error over an unremovable stale socket, want the unlink's permission error")
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("listenTrigger() error = %v, want a permission error from the stale-file unlink (not a bind failure)", err)
+	}
+}
+
+// TestRelayEvents_FastRunEmitsStartedBeforeDone pins the documented wire
+// order (queued -> started -> done) for a run so fast that the started signal
+// and the result are BOTH ready when relayEvents wakes: the done branch must
+// drain the pending started event first, never emit done alone. Iterated
+// because the select choice between two ready channels is randomized.
+func TestRelayEvents_FastRunEmitsStartedBeforeDone(t *testing.T) {
+	t.Parallel()
+	for i := range 20 {
+		j := newJob("external", nil, nil)
+		close(j.started)
+		j.finish(runOutcome{ok: true, duration: 42 * time.Millisecond})
+
+		server, client := net.Pipe()
+		relayDone := make(chan struct{})
+		go func() {
+			defer close(relayDone)
+			defer func() { _ = server.Close() }()
+			relayEvents(server, j)
+		}()
+
+		_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+		dec := json.NewDecoder(client)
+		var first, second wireEvent
+		if err := dec.Decode(&first); err != nil {
+			t.Fatalf("iteration %d: decode first event: %v", i, err)
+		}
+		if err := dec.Decode(&second); err != nil {
+			t.Fatalf("iteration %d: decode second event: %v", i, err)
+		}
+		_ = client.Close()
+		<-relayDone
+
+		if first.Event != eventStarted {
+			t.Fatalf("iteration %d: first event = %q, want %q (a run that started must report started before done, even when both signals are ready in one select round)", i, first.Event, eventStarted)
+		}
+		if second.Event != eventDone || !second.OK {
+			t.Fatalf("iteration %d: second event = %+v, want done ok=true", i, second)
+		}
+	}
 }

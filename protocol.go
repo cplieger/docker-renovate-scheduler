@@ -30,8 +30,9 @@ type wireEvent struct {
 	// Reason explains a not-OK outcome that isn't a plain Renovate failure
 	// (queue full, cancelled by shutdown, base directory unwritable).
 	Reason string `json:"reason,omitempty"`
-	// DurationMs is the run's execution time on eventDone (0 when the request
-	// never ran, e.g. cancelled or rejected).
+	// DurationMs is the elapsed execution time on eventDone: the run itself,
+	// or the failed base-dir preflight that stopped it. Zero when the request
+	// was rejected or cancelled by shutdown.
 	DurationMs int64 `json:"duration_ms,omitempty"`
 	// OK is meaningful only on eventDone: the run's outcome (never omitted,
 	// so a failed run is explicit on the wire).

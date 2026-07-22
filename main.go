@@ -17,9 +17,12 @@ import (
 // default when no argument is given — runs the long-lived daemon that owns
 // all runs. Any other subcommand is rejected loudly with exit code 2.
 func main() {
-	// CLI health probe for the Docker healthcheck. Checked before the logger
-	// is configured because RunProbe calls os.Exit.
+	// CLI health probe for the Docker healthcheck. RunProbe calls os.Exit, so
+	// this is checked before the subcommand switch; the logger is configured
+	// first so config-parse warnings from probeOptions (an unparseable
+	// SCHED_INTERVAL / SCHED_TIMEOUT) come out as logfmt like every other line.
 	if len(os.Args) > 1 && os.Args[1] == "health" {
+		setupLogger()
 		health.RunProbe(healthMarkerPath, probeOptions()...)
 	}
 

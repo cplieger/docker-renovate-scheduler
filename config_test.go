@@ -234,3 +234,28 @@ func TestSetupLogger_MapsLogLevelEnvToHandlerLevel(t *testing.T) {
 		})
 	}
 }
+
+// TestVerifyBaseDirAt_TimesOutWhileProbeSlotHeld pins the hung-filesystem
+// containment: when a previous probe goroutine is still wedged (the slot is
+// held) and the caller's budget expires, verifyBaseDirAt reports a timeout
+// instead of blocking — and once the wedged probe releases the slot, later
+// verifications succeed again.
+func TestVerifyBaseDirAt_TimesOutWhileProbeSlotHeld(t *testing.T) {
+	verifySlot <- struct{}{} // a prior probe is wedged on a hung filesystem
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the caller's verification budget is already exhausted
+
+	err := verifyBaseDirAt(ctx, t.TempDir())
+
+	<-verifySlot // the wedged probe finally finishes
+	if err == nil {
+		t.Fatal("verifyBaseDirAt() = nil with the probe slot held and the context done, want a timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("verifyBaseDirAt() error = %v, want it to mention %q", err, "timed out")
+	}
+
+	if err := verifyBaseDirAt(context.Background(), t.TempDir()); err != nil {
+		t.Errorf("verifyBaseDirAt() = %v after the slot was released, want nil (the slot must be reusable)", err)
+	}
+}

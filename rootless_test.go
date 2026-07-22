@@ -1,6 +1,13 @@
 package main
 
-import "testing"
+import (
+	"log/slog"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/cplieger/slogx/capture"
+)
 
 func TestRootlessCacheLikelyUnwritable(t *testing.T) {
 	const customUID = 568
@@ -49,5 +56,52 @@ func TestRootlessCacheLikelyUnwritable(t *testing.T) {
 				t.Errorf("rootlessCacheLikelyUnwritable(euid=%d) = %v, want %v", tc.euid, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestWarnIfRootlessCacheUnwritable_EmitsAndSuppressesWarning pins the
+// wrapper's observable contract on captured slog output: an unmitigated
+// non-default UID emits exactly one startup warning carrying the uid and the
+// remediation hint, and the documented mitigation suppresses it entirely.
+// The pure decision matrix is TestRootlessCacheLikelyUnwritable's; this test
+// pins the wiring (real euid + real env reach the decision, and the Warn
+// actually fires). Skipped when the test process runs as root or the image
+// UID, where the warning branch is unreachable by design.
+func TestWarnIfRootlessCacheUnwritable_EmitsAndSuppressesWarning(t *testing.T) {
+	euid := os.Geteuid()
+	if euid == 0 || euid == defaultImageUID {
+		t.Skip("running as root or the image default UID; the warning branch is unreachable for this process")
+	}
+
+	t.Setenv("RENOVATE_CUSTOM_ENV_VARIABLES", "")
+	rec := capture.Default(t)
+	warnIfRootlessCacheUnwritable()
+	var warn *slog.Record
+	for _, r := range rec.Records() {
+		if r.Level == slog.LevelWarn && strings.Contains(r.Message, "no tool-cache redirection") {
+			warn = &r
+			break
+		}
+	}
+	if warn == nil {
+		t.Fatalf("unmitigated custom UID emitted no matching warning; records = %v", rec.Messages())
+	}
+	fixHint := ""
+	warn.Attrs(func(a slog.Attr) bool {
+		if a.Key == "fix" {
+			fixHint = a.Value.String()
+			return false
+		}
+		return true
+	})
+	if !strings.Contains(fixHint, "RENOVATE_CUSTOM_ENV_VARIABLES") {
+		t.Errorf("warning fix hint = %q, want it to name RENOVATE_CUSTOM_ENV_VARIABLES; the remediation must be actionable from the log line", fixHint)
+	}
+
+	t.Setenv("RENOVATE_CUSTOM_ENV_VARIABLES", `{"GOCACHE":"/data/.cache/go-build"}`)
+	rec2 := capture.Default(t)
+	warnIfRootlessCacheUnwritable()
+	if n := rec2.Len(); n != 0 {
+		t.Errorf("mitigated environment emitted %d records, want 0 (RENOVATE_CUSTOM_ENV_VARIABLES suppresses the warning)", n)
 	}
 }
