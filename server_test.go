@@ -3,92 +3,56 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/cplieger/health"
 	scheduler "github.com/cplieger/scheduler/v3"
+	"github.com/cplieger/scheduler/v3/trigger"
 )
+
+// The broker mechanics (queue semantics, socket hygiene, wire ordering,
+// accept-loop degradation, departed clients) are the scheduler library's and
+// are tested in scheduler/v3/trigger. These tests pin what stays THIS app's:
+// the daemon executor's policy as observed over the real socket — scope and
+// environment forwarding into the Renovate child, and shutdown's
+// drain-versus-cancel split.
 
 // startTestServer wires a queue + executor + trigger server on a temp socket
 // and returns the socket path. Everything is torn down via t.Cleanup.
-func startTestServer(t *testing.T, runner scheduler.CommandRunner) (sock string, d *daemon) {
+func startTestServer(t *testing.T, runner scheduler.CommandRunner) string {
 	t.Helper()
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	sock = filepath.Join(t.TempDir(), "trigger.sock")
+	sock := testSocketPath(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d = &daemon{
-		queue:   newRunQueue(queueCapacity),
-		marker:  health.NewMarker(filepath.Join(t.TempDir(), "marker")),
-		newCmd:  runner,
-		runCtx:  context.WithoutCancel(ctx),
-		timeout: time.Minute,
+	d, _ := newBareDaemon(t, ctx, runner)
+	ln, err := trigger.Listen(sock)
+	if err != nil {
+		t.Fatalf("trigger.Listen() = %v", err)
 	}
 	execDone := make(chan struct{})
 	go func() { defer close(execDone); d.runJobs(ctx) }()
-
-	ln, err := listenTrigger(sock)
-	if err != nil {
-		t.Fatalf("listenTrigger() = %v", err)
-	}
-	srv := &triggerServer{queue: d.queue}
-	go srv.serve(ln)
+	srv := &trigger.Server[runPayload]{Queue: d.queue}
+	srv.Serve(ln)
 
 	t.Cleanup(func() {
 		_ = ln.Close()
 		cancel()
-		d.queue.close()
+		d.queue.Close()
 		<-execDone
-		srv.handlers.Wait()
+		srv.Wait()
 	})
-	return sock, d
-}
-
-// TestListenTrigger_RemovesStaleSocketAndSetsOwnerOnly pins the boot hygiene:
-// a stale socket file from a SIGKILLed predecessor is replaced, and the live
-// socket is owner-only (triggering scoped to the container's user).
-func TestListenTrigger_RemovesStaleSocketAndSetsOwnerOnly(t *testing.T) {
-	t.Parallel()
-	sock := filepath.Join(t.TempDir(), "trigger.sock")
-
-	stale, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatalf("setup stale socket: %v", err)
-	}
-	// Simulate a SIGKILL: the file stays, nobody listens. Closing the
-	// listener would remove the file, so leak it deliberately and only
-	// unlink-guard via listenTrigger.
-	_ = stale.(*net.UnixListener)
-	stale.(*net.UnixListener).SetUnlinkOnClose(false)
-	_ = stale.Close()
-	if _, err := os.Stat(sock); err != nil {
-		t.Fatalf("stale socket file missing after setup: %v", err)
-	}
-
-	ln, err := listenTrigger(sock)
-	if err != nil {
-		t.Fatalf("listenTrigger() over a stale socket = %v, want nil", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-
-	info, err := os.Stat(sock)
-	if err != nil {
-		t.Fatalf("stat live socket: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("socket permissions = %o, want 0600 (owner-only trigger authority)", perm)
-	}
+	return sock
 }
 
 // rawRequest dials the socket, sends a request, and returns the decoder over
-// the event stream plus the connection for cleanup.
-func rawRequest(t *testing.T, sock string, req wireRequest) (*json.Decoder, net.Conn) {
+// the event stream.
+func rawRequest(t *testing.T, sock string, req runPayload) *json.Decoder {
 	t.Helper()
 	conn, err := net.DialTimeout("unix", sock, time.Second)
 	if err != nil {
@@ -98,13 +62,13 @@ func rawRequest(t *testing.T, sock string, req wireRequest) (*json.Decoder, net.
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		t.Fatalf("send request: %v", err)
 	}
-	return json.NewDecoder(conn), conn
+	return json.NewDecoder(conn)
 }
 
 // nextEvent decodes one event with a test deadline.
-func nextEvent(t *testing.T, dec *json.Decoder) wireEvent {
+func nextEvent(t *testing.T, dec *json.Decoder) trigger.Event {
 	t.Helper()
-	var ev wireEvent
+	var ev trigger.Event
 	done := make(chan error, 1)
 	go func() { done <- dec.Decode(&ev) }()
 	select {
@@ -115,25 +79,7 @@ func nextEvent(t *testing.T, dec *json.Decoder) wireEvent {
 		return ev
 	case <-time.After(5 * time.Second):
 		t.Fatal("no event within 5s")
-		return wireEvent{}
-	}
-}
-
-// TestServer_EventSequenceForCleanRun pins the wire contract: queued →
-// started → done{ok:true, duration>0}, in that order, one done exactly.
-func TestServer_EventSequenceForCleanRun(t *testing.T) {
-	sock, _ := startTestServer(t, recordingRunner("true", nil))
-	dec, _ := rawRequest(t, sock, wireRequest{Repos: []string{"owner/repo"}})
-
-	if ev := nextEvent(t, dec); ev.Event != eventQueued {
-		t.Fatalf("first event = %q, want %q", ev.Event, eventQueued)
-	}
-	if ev := nextEvent(t, dec); ev.Event != eventStarted {
-		t.Fatalf("second event = %q, want %q", ev.Event, eventStarted)
-	}
-	ev := nextEvent(t, dec)
-	if ev.Event != eventDone || !ev.OK {
-		t.Fatalf("final event = %+v, want done ok=true", ev)
+		return trigger.Event{}
 	}
 }
 
@@ -147,16 +93,16 @@ func TestServer_ForwardsScopeAndEnvironmentToTheRun(t *testing.T) {
 		argsLog = append(argsLog, append([]string(nil), args...))
 		return exec.CommandContext(ctx, "sh", "-c", `[ "$RENOVATE_TEST_MARKER" = "from-client" ]`)
 	}
-	sock, _ := startTestServer(t, runner)
+	sock := startTestServer(t, runner)
 
-	dec, _ := rawRequest(t, sock, wireRequest{
+	dec := rawRequest(t, sock, runPayload{
 		Repos: []string{"cplieger/homelab"},
-		Env:   []string{"RENOVATE_TEST_MARKER=from-client", "PATH=" + os.Getenv("PATH")},
+		Env:   []string{"RENOVATE_TEST_MARKER=from-client", "RENOVATE_BASE_DIR=" + t.TempDir(), "PATH=" + os.Getenv("PATH")},
 	})
-	var final wireEvent
+	var final trigger.Event
 	for {
 		ev := nextEvent(t, dec)
-		if ev.Event == eventDone {
+		if ev.Kind == trigger.EventDone {
 			final = ev
 			break
 		}
@@ -169,123 +115,67 @@ func TestServer_ForwardsScopeAndEnvironmentToTheRun(t *testing.T) {
 	}
 }
 
-// TestServer_FailedRunReportsNotOK pins the exit-code half of the trigger
-// contract at the wire level.
-func TestServer_FailedRunReportsNotOK(t *testing.T) {
-	sock, _ := startTestServer(t, recordingRunner("false", nil))
-	dec, _ := rawRequest(t, sock, wireRequest{})
-	for {
-		ev := nextEvent(t, dec)
-		if ev.Event != eventDone {
-			continue
-		}
-		if ev.OK {
-			t.Error("done ok=true for a failing run, want false")
-		}
-		return
-	}
-}
-
-// TestServer_RejectsWhenQueueFull pins honest backpressure: a full queue
-// answers immediately with done{ok:false, reason} instead of queueing
-// unboundedly or blocking the trigger.
-func TestServer_RejectsWhenQueueFull(t *testing.T) {
-	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	sock := filepath.Join(t.TempDir(), "trigger.sock")
-
-	// No executor: jobs sit in the queue. Capacity 1, pre-filled.
-	q := newRunQueue(1)
-	if err := q.submit(newJob("external", nil, nil)); err != nil {
-		t.Fatalf("pre-fill submit: %v", err)
-	}
-	ln, err := listenTrigger(sock)
-	if err != nil {
-		t.Fatalf("listenTrigger() = %v", err)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-	srv := &triggerServer{queue: q}
-	go srv.serve(ln)
-
-	dec, _ := rawRequest(t, sock, wireRequest{})
-	ev := nextEvent(t, dec)
-	if ev.Event != eventDone || ev.OK {
-		t.Fatalf("event = %+v, want immediate done ok=false", ev)
-	}
-	if !strings.Contains(ev.Reason, "full") {
-		t.Errorf("reason = %q, want a queue-full explanation", ev.Reason)
-	}
-}
-
-// TestServer_UndecodableRequestAnswersDone pins the protocol's failure mode
-// for a malformed client: an explicit done with a reason, never a hang.
-func TestServer_UndecodableRequestAnswersDone(t *testing.T) {
-	sock, _ := startTestServer(t, recordingRunner("true", nil))
-	conn, err := net.DialTimeout("unix", sock, time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	if _, err := conn.Write([]byte("this is not json\n")); err != nil {
-		t.Fatalf("write garbage: %v", err)
-	}
-	dec := json.NewDecoder(conn)
-	ev := nextEvent(t, dec)
-	if ev.Event != eventDone || ev.OK {
-		t.Fatalf("event = %+v, want done ok=false for an undecodable request", ev)
-	}
-}
-
 // TestServer_ShutdownCancelsQueuedRequestWithExplicitResult pins the
 // shutdown contract on the wire: a request queued behind an in-flight run
 // receives done{ok:false, reason: cancelled…} when the daemon stops — the
 // trigger reports a failed job instead of hanging or being silently dropped.
+// The in-flight run pauses INSIDE the runOnce seam (the committed-run
+// boundary) and blocks until released, so the shutdown lands on a run that
+// has unambiguously committed and A drains with its real outcome instead of
+// being cancelled at start (a child-start readiness marker would race
+// runRenovateOnce's post-Start handshake).
 func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	sock := filepath.Join(t.TempDir(), "trigger.sock")
+	sock := testSocketPath(t)
 
-	entered := make(chan struct{})
-	proceed := make(chan struct{})
-	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		close(entered)
-		<-proceed
-		return exec.CommandContext(ctx, "true")
-	}
+	runOnce, awaitEntered, release := gatedRunOnce(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d := &daemon{
-		queue:   newRunQueue(queueCapacity),
-		marker:  health.NewMarker(filepath.Join(t.TempDir(), "marker")),
-		newCmd:  runner,
-		runCtx:  context.WithoutCancel(ctx),
-		timeout: time.Minute,
+	d, _ := newBareDaemon(t, ctx, recordingRunner("true", nil))
+	d.runOnce = runOnce
+	ln, err := trigger.Listen(sock)
+	if err != nil {
+		t.Fatalf("trigger.Listen() = %v", err)
 	}
 	execDone := make(chan struct{})
 	go func() { defer close(execDone); d.runJobs(ctx) }()
-	ln, err := listenTrigger(sock)
-	if err != nil {
-		t.Fatalf("listenTrigger() = %v", err)
-	}
-	srv := &triggerServer{queue: d.queue}
-	go srv.serve(ln)
+	srv := &trigger.Server[runPayload]{Queue: d.queue}
+	srv.Serve(ln)
+	// A mid-test Fatal must not leave the executor parked in the gated
+	// runOnce, the listener open, or executor/handler goroutines running
+	// past the test's TempDir cleanup. Shutdown is established BEFORE the
+	// gate is released so a queued request can't be dequeued in the
+	// release-to-cancel race, then both owned components are joined.
+	// release is idempotent; the repeated cancel/ln.Close/queue.Close and
+	// the re-receive/re-Wait on the normal path are tolerated
+	// (closed-flag close, closed channel, completed WaitGroup).
+	t.Cleanup(func() {
+		cancel()
+		_ = ln.Close()
+		d.queue.Close()
+		release()
+		<-execDone
+		srv.Wait()
+	})
 
 	// Occupy the executor, then queue a second request over the wire.
-	decA, _ := rawRequest(t, sock, wireRequest{})
-	<-entered
-	decB, _ := rawRequest(t, sock, wireRequest{Repos: []string{"owner/queued"}})
-	if ev := nextEvent(t, decB); ev.Event != eventQueued {
-		t.Fatalf("B's first event = %q, want queued", ev.Event)
+	decA := rawRequest(t, sock, runPayload{})
+	awaitEntered() // A has committed: execution is inside runOnce
+	decB := rawRequest(t, sock, runPayload{Repos: []string{"owner/queued"}})
+	if ev := nextEvent(t, decB); ev.Kind != trigger.EventQueued {
+		t.Fatalf("B's first event = %q, want queued", ev.Kind)
 	}
 
 	// Daemon shutdown while A runs and B waits.
 	cancel()
 	_ = ln.Close()
-	d.queue.close()
-	close(proceed) // A's child completes its pass
+	d.queue.Close()
+	release() // A's run completes its pass
 
 	// A: full drain — its run finished with its real (clean) outcome.
 	for {
 		ev := nextEvent(t, decA)
-		if ev.Event != eventDone {
+		if ev.Kind != trigger.EventDone {
 			continue
 		}
 		if !ev.OK {
@@ -296,7 +186,7 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	// B: explicit cancellation.
 	for {
 		ev := nextEvent(t, decB)
-		if ev.Event != eventDone {
+		if ev.Kind != trigger.EventDone {
 			continue
 		}
 		if ev.OK {
@@ -309,5 +199,68 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	}
 
 	<-execDone
-	srv.handlers.Wait()
+	srv.Wait()
+}
+
+// TestRunDaemon_FullQueueRejectsTriggerImmediately pins the documented
+// backpressure contract end-to-end through the composition root: with the
+// executor occupied by an in-flight run and the FIFO holding queueCapacity
+// pending requests, the next trigger is rejected immediately — its FIRST
+// wire event is a done with ok=false and a non-empty reason — instead of
+// queueing unboundedly or hanging. This is also the only test that exercises
+// runDaemon's OnRejected wiring. Not parallel: it uses the package-global
+// healthMarkerPath.
+func TestRunDaemon_FullQueueRejectsTriggerImmediately(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	t.Setenv("SCHED_INTERVAL", "off")
+	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	runner, awaitEntered, release := gatedRunner(t)
+
+	sock := testSocketPath(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = runDaemon(ctx, sock, runner, nil)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		release()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("runDaemon did not stop during test cleanup")
+		}
+	})
+
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(sock)
+		return err == nil
+	}, "daemon did not bind the trigger socket")
+
+	// Occupy the executor, then fill the queue: each fill request's queued
+	// event is awaited before the next dial, so the fill is deterministic.
+	_ = rawRequest(t, sock, runPayload{})
+	awaitEntered()
+	for i := range queueCapacity {
+		dec := rawRequest(t, sock, runPayload{})
+		if ev := nextEvent(t, dec); ev.Kind != trigger.EventQueued {
+			t.Fatalf("fill request %d first event = %q, want queued", i, ev.Kind)
+		}
+	}
+
+	dec := rawRequest(t, sock, runPayload{Repos: []string{"owner/overflow"}})
+	ev := nextEvent(t, dec)
+	if ev.Kind != trigger.EventDone {
+		t.Fatalf("overflow request first event = %q, want an immediate done (reject-fast)", ev.Kind)
+	}
+	if ev.OK {
+		t.Error("overflow request reported ok=true, want a rejection")
+	}
+	if ev.Reason == "" {
+		t.Error("overflow rejection carries no reason; the trigger would report a bare failure")
+	}
 }

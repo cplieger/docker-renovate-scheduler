@@ -51,3 +51,31 @@ func TestProbe_WedgedBuiltinLoopFailsFreshness(t *testing.T) {
 		t.Error("old marker probed unhealthy in external mode; idle containers must stay healthy")
 	}
 }
+
+// TestProbeOptions_ExtremeIntervalSaturatesDeadline pins the overflow guard
+// in probeOptions: with SCHED_INTERVAL at time.Duration's maximum, computing
+// 2*interval+timeout naively wraps to a SMALL POSITIVE max-age (~= timeout),
+// which would fail a perfectly fresh marker and restart a healthy container.
+// The guard must saturate the deadline at maxDuration instead, so an aged
+// marker still probes healthy.
+func TestProbeOptions_ExtremeIntervalSaturatesDeadline(t *testing.T) {
+	t.Setenv("SCHED_TIMEOUT", "1h")
+	t.Setenv("SCHED_INTERVAL", "9223372036854775807ns") // time.Duration max: 2*interval wraps to -2
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatalf("setup marker: %v", err)
+	}
+	aged := time.Now().Add(-2 * time.Hour) // older than the ~1h max-age an overflow would produce
+	if err := os.Chtimes(marker, aged, aged); err != nil {
+		t.Fatalf("age marker: %v", err)
+	}
+
+	opts := probeOptions()
+	if len(opts) != 1 {
+		t.Fatalf("probe options = %d, want 1 (built-in mode must keep the deadline armed, saturated, not disabled)", len(opts))
+	}
+	if code := health.ProbeCheck(marker, opts...); code != 0 {
+		t.Error("marker probed unhealthy under an extreme SCHED_INTERVAL; the saturation guard must keep the max-age effectively infinite instead of overflowing to a small positive deadline")
+	}
+}

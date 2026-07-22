@@ -86,6 +86,33 @@ func TestBaseDir(t *testing.T) {
 	})
 }
 
+// TestBaseDirForEnv pins the per-run base-dir resolution from a job's
+// forwarded environment: exec semantics (wholesale replacement, last value
+// wins for duplicates), the empty-value fallback, and the nil-env inherit.
+func TestBaseDirForEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		env  []string
+		want string
+	}{
+		{"nil env uses the daemon's own base dir", nil, "/daemon-dir"},
+		{"forwarded env with the key uses its value", []string{"RENOVATE_BASE_DIR=/from-client"}, "/from-client"},
+		{"forwarded env without the key uses the default, not the daemon's", []string{"PATH=/usr/bin"}, defaultBaseDir},
+		{"empty value falls back to the default", []string{"RENOVATE_BASE_DIR="}, defaultBaseDir},
+		{"duplicate keys: last value wins (exec semantics)", []string{"RENOVATE_BASE_DIR=/first", "RENOVATE_BASE_DIR=/second"}, "/second"},
+		{"malformed entry without '=' is skipped", []string{"RENOVATE_BASE_DIR", "PATH=/usr/bin"}, defaultBaseDir},
+		{"empty non-nil env uses the default", []string{}, defaultBaseDir},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RENOVATE_BASE_DIR", "/daemon-dir")
+			if got := baseDirForEnv(tt.env); got != tt.want {
+				t.Errorf("baseDirForEnv(%v) = %q, want %q", tt.env, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestVerifyBaseDir(t *testing.T) {
 	t.Run("creates and verifies a writable dir", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "renovate-data")
@@ -109,37 +136,49 @@ func TestVerifyBaseDir(t *testing.T) {
 	})
 }
 
-// TestVerifyBaseDir_ReportsNotWritableWhenDirExistsButUnwritable covers the
-// os.Create error branch (config.go ~line 173): the base dir already exists
-// (so MkdirAll is a no-op) but is not writable, so creating .write_test fails
-// and verifyBaseDir must report "not writable" -- distinct from the "mkdir"
-// error the existing regular-file case exercises. Skipped as root, which
-// bypasses directory write permissions and makes the branch unreachable.
-func TestVerifyBaseDir_ReportsNotWritableWhenDirExistsButUnwritable(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory write permissions; the unwritable-dir branch is unreachable as root")
-	}
-	dir := filepath.Join(t.TempDir(), "ro-base")
-	if err := os.Mkdir(dir, 0o555); err != nil { // readable + executable, not writable
-		t.Fatalf("setup: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) }) // let TempDir cleanup remove it
-	t.Setenv("RENOVATE_BASE_DIR", dir)
+// TestProbeBaseDirWrite pins the staged write probe at the helper boundary:
+// a clean probe writes, syncs, closes, and removes its file (no residue), and
+// a directory that cannot take a new file reports the actionable "not
+// writable" error.
+func TestProbeBaseDirWrite(t *testing.T) {
+	t.Run("writes, syncs, and cleans up its probe file", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := probeBaseDirWrite(dir); err != nil {
+			t.Fatalf("probeBaseDirWrite() = %v, want nil", err)
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read probe dir: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("probe left %d file(s) behind, want none", len(entries))
+		}
+	})
+	t.Run("reports not writable when the probe cannot be created", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses directory write permissions")
+		}
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-	err := verifyBaseDir(context.Background())
-	if err == nil {
-		t.Fatal("verifyBaseDir() = nil, want error when the base dir exists but is not writable")
-	}
-	if !strings.Contains(err.Error(), "not writable") {
-		t.Errorf("verifyBaseDir() error = %v, want it to mention \"not writable\"", err)
-	}
+		err := probeBaseDirWrite(dir)
+		if err == nil {
+			t.Fatal("probeBaseDirWrite() = nil, want error when the write probe cannot be created")
+		}
+		if !strings.Contains(err.Error(), "not writable") {
+			t.Errorf("probeBaseDirWrite() error = %v, want it to mention %q", err, "not writable")
+		}
+	})
 }
 
-// TestLoadRunTimeout_ZeroIsNonPositiveAndUsesDefault pins the `d <= 0`
-// boundary on config.go:140. A zero SCHED_TIMEOUT parses cleanly (err == nil)
-// but is non-positive, so it must fall back to the default rather than arm a
-// zero timeout that would cancel every run immediately. A boundary mutation
-// (`d < 0`) would let a zero duration through unchanged.
+// TestLoadRunTimeout_ZeroIsNonPositiveAndUsesDefault pins the non-positive
+// boundary of loadRunTimeout. A zero SCHED_TIMEOUT parses cleanly (err ==
+// nil) but is non-positive, so it must fall back to the default rather than
+// arm a zero timeout that would cancel every run immediately; the boundary
+// must treat zero like a negative, never let it through unchanged.
 func TestLoadRunTimeout_ZeroIsNonPositiveAndUsesDefault(t *testing.T) {
 	t.Run("bare zero", func(t *testing.T) {
 		t.Setenv("SCHED_TIMEOUT", "0")
@@ -193,5 +232,30 @@ func TestSetupLogger_MapsLogLevelEnvToHandlerLevel(t *testing.T) {
 				t.Errorf("setupLogger() with LOG_LEVEL=%q: level %v enabled, want disabled", tt.env, tt.disabled)
 			}
 		})
+	}
+}
+
+// TestVerifyBaseDirAt_TimesOutWhileProbeSlotHeld pins the hung-filesystem
+// containment: when a previous probe goroutine is still wedged (the slot is
+// held) and the caller's budget expires, verifyBaseDirAt reports a timeout
+// instead of blocking — and once the wedged probe releases the slot, later
+// verifications succeed again.
+func TestVerifyBaseDirAt_TimesOutWhileProbeSlotHeld(t *testing.T) {
+	verifySlot <- struct{}{} // a prior probe is wedged on a hung filesystem
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the caller's verification budget is already exhausted
+
+	err := verifyBaseDirAt(ctx, t.TempDir())
+
+	<-verifySlot // the wedged probe finally finishes
+	if err == nil {
+		t.Fatal("verifyBaseDirAt() = nil with the probe slot held and the context done, want a timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("verifyBaseDirAt() error = %v, want it to mention %q", err, "timed out")
+	}
+
+	if err := verifyBaseDirAt(context.Background(), t.TempDir()); err != nil {
+		t.Errorf("verifyBaseDirAt() = %v after the slot was released, want nil (the slot must be reusable)", err)
 	}
 }

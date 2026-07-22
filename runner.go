@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -69,6 +70,18 @@ func renovateInvocation(repos []string) (name string, args []string) {
 // recreate mid-run drains the pass to completion as designed, bounded by
 // stop_grace_period. Log capture is unaffected: the child inherits the
 // daemon's stdout/stderr fds regardless of process group.
+//
+// Fleet alignment note (l-f3 audit, 2026-07): this own-process-group wrapper
+// stays deliberately app-side — the scheduler library gains a
+// WithProcessGroup() option only when a THIRD consumer of the shape appears
+// (scheduler.md, "Setpgid pairing rule"). Copies to keep line-aligned when
+// editing either: pg-autodump internal/pg newCommand (same base runner,
+// Setpgid, and group-targeted Cancel; no stdio wiring — its callers capture)
+// and this one (superset — stdio streaming here, plus the post-run group
+// sweep/probe/drain below, because Renovate's child provably spawns
+// package-manager descendants). vibekit internal/auth login_proc_unix.go
+// carries the group half only (hard SIGKILL on timeout, no scheduler dep — a
+// deliberate non-copy).
 var defaultCommandRunner scheduler.CommandRunner = func() scheduler.CommandRunner {
 	base := scheduler.NewCommandRunner(scheduler.DefaultGrace)
 	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -76,47 +89,238 @@ var defaultCommandRunner scheduler.CommandRunner = func() scheduler.CommandRunne
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			// Signal the child's whole process group (Setpgid makes it the
+			// leader): the run's package-manager grandchildren must stop
+			// with it, or they keep writing to the base dir past the timeout.
+			err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
 		return cmd
 	}
 }()
 
+// withDumbInitInGroup returns the Renovate child's environment — the
+// forwarded env when non-nil, else the daemon's own — with DUMB_INIT_SETSID
+// forced to 0 (any pre-existing entry is dropped first). The entrypoint chain
+// (renovate-entrypoint.sh → containerbase docker-entrypoint.sh) execs a
+// nested per-run `dumb-init --`, and default-mode dumb-init forks Renovate
+// into a NEW session/process group below the Setpgid group the scheduler
+// created. Both escalation stages (the Cancel group SIGTERM and the
+// post-timeout group SIGKILL in runRenovateOnce) address only
+// -cmd.Process.Pid, so a session-escaped Renovate tree would survive them,
+// keep writing the base dir, and overlap the next FIFO job. DUMB_INIT_SETSID=0
+// keeps dumb-init in signal-proxy mode without the setsid, so the
+// scheduler-created group stays the one containment boundary.
+func withDumbInitInGroup(env []string) []string {
+	if env == nil {
+		env = os.Environ()
+	}
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "DUMB_INIT_SETSID=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, "DUMB_INIT_SETSID=0")
+}
+
 // runRenovateOnce executes exactly one Renovate pass and reports whether it
-// exited cleanly. The pass is bounded by timeout (SCHED_TIMEOUT); on expiry
+// exited cleanly, whether shutdown cancelled it at start, and whether the
+// run's process group SURVIVED the post-run kill sweep. groupSurvived=true
+// means the sweep could not confirm the group's death within its bounded
+// window (uninterruptible I/O), so a package-manager tree may still be
+// writing the base dir: the caller must NOT start another run against it —
+// the group-death observation is a containment state, not just a log line.
+// The pass is bounded by timeout (SCHED_TIMEOUT); on expiry
 // the command runner sends SIGTERM with a short grace before SIGKILL. env,
 // when non-nil, replaces the child's environment wholesale (a socket client's
-// forwarded environment); nil inherits the daemon's. The context is never
-// cancelled by shutdown — the daemon does not abandon an in-flight run — so
-// the only cancellation cause is the timeout.
-func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string, repos, env []string, newCmd scheduler.CommandRunner) (ok bool) {
+// forwarded environment); nil inherits the daemon's — either way with ONE
+// scheduler-internal override, DUMB_INIT_SETSID=0, so the nested per-run
+// dumb-init cannot detach the Renovate tree from the scheduler's process
+// group (see withDumbInitInGroup). ctx (the daemon's uncancellable runCtx)
+// never carries shutdown cancellation — the daemon does not abandon a
+// committed in-flight run — so the only cancellation cause is the timeout.
+//
+// shutdownCtx closes the check-then-act window between execute's pre-start
+// shutdown check and process creation: a SIGTERM landing in that gap would
+// otherwise launch a fresh pass bounded only by SCHED_TIMEOUT, which can
+// outlive the container's stop_grace_period and recreate the exit-137 path
+// the drain contract exists to prevent. Immediately after Start, shutdownCtx
+// is re-checked: if shutdown already won the race, the just-started child is
+// reaped (see stopUncommittedRun) and the run reports cancelled=true — logged
+// at Warn, never as a run failure — without ever being committed as
+// in-flight. Only a run that passes this post-Start handshake drains under
+// ctx/SCHED_TIMEOUT.
+func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, trig string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	name, args := renovateInvocation(repos)
 
 	start := time.Now()
-	slog.Info("renovate run starting", "trigger", trigger, "repos", repos, "timeout", timeout)
+	slog.Info("renovate run starting", "trigger", trig, "repos", repos, "timeout", timeout)
 
 	cmd := newCmd(runCtx, name, args...)
-	if env != nil {
-		cmd.Env = env
+	cmd.Env = withDumbInitInGroup(env)
+	if startErr := cmd.Start(); startErr != nil {
+		slog.Error("renovate run failed",
+			"trigger", trig, "duration_ms", time.Since(start).Milliseconds(), "error", startErr)
+		return false, false, false
 	}
-	runErr := cmd.Run()
+	if shutdownCtx.Err() != nil {
+		stopUncommittedRun(cmd)
+		slog.Warn("renovate run cancelled by shutdown at start", "trigger", trig, "repos", repos)
+		return false, true, false
+	}
+	runErr := cmd.Wait()
 	durationMs := time.Since(start).Milliseconds()
 
 	switch {
 	case runErr == nil:
-		slog.Info("renovate run complete", "trigger", trigger, "duration_ms", durationMs)
-		return true
+		slog.Info("renovate run complete", "trigger", trig, "duration_ms", durationMs)
+		return true, false, false
 	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
+		survived := sweepRunGroupOrWarn(cmd, "renovate run process group survived the post-timeout kill sweep; halting run admission to prevent an overlapping run", trig)
 		// The run exceeded SCHED_TIMEOUT. Logged distinctly from a genuine
 		// non-zero Renovate exit so operators can tell a slow run from a
 		// real failure during triage.
 		slog.Error("renovate run timed out",
-			"trigger", trigger, "duration_ms", durationMs, "timeout", timeout)
-		return false
+			"trigger", trig, "duration_ms", durationMs, "timeout", timeout)
+		return false, false, survived
 	default:
+		// A hard-crashed Renovate (e.g. an OOM-killed node process) exits
+		// without reaping its package-manager children. On a normal
+		// non-zero exit the group is already empty and the kill is a
+		// no-op (ESRCH).
+		survived := sweepRunGroupOrWarn(cmd, "renovate run process group survived the post-failure kill sweep; halting run admission to prevent an overlapping run", trig)
 		slog.Error("renovate run failed",
-			"trigger", trigger, "duration_ms", durationMs, "error", runErr)
-		return false
+			"trigger", trig, "duration_ms", durationMs, "error", runErr)
+		return false, false, survived
+	}
+}
+
+// sweepRunGroupOrWarn force-kills the run's process group via
+// sweepRunProcessGroup, logs msg when the group survives the bounded sweep,
+// and reports whether it survived -- the shared post-op bookkeeping for the
+// timeout and failure branches of runRenovateOnce. A true return is the
+// fatal containment signal the executor acts on: the group could not be
+// confirmed dead, so the base directory must not be handed to another run.
+func sweepRunGroupOrWarn(cmd *exec.Cmd, msg, trig string) (survived bool) {
+	if !sweepRunProcessGroup(cmd) {
+		slog.Warn(msg, "trigger", trig, "pid", cmd.Process.Pid)
+		return true
+	}
+	return false
+}
+
+// runGroupPollInterval is how often stopUncommittedRun and
+// sweepRunProcessGroup re-probe the child's process group for surviving
+// members inside their bounded DefaultGrace windows.
+const runGroupPollInterval = 50 * time.Millisecond
+
+// stopUncommittedRun reaps a child that started but lost the post-Start
+// shutdown handshake in runRenovateOnce: SIGTERM to the child's process
+// group (Setpgid makes it the leader, so package-manager grandchildren stop
+// with it), a DefaultGrace window for the WHOLE group to exit cleanly
+// (waitForRunProcessGroup), then a group SIGKILL sweep if any member
+// lingers. The completion condition is the process group's death, not just
+// the direct child's: a leader that honors SIGTERM can exit while a
+// package-manager descendant in the same group ignores it, and returning on
+// the leader's exit alone would leave that descendant writing the base dir
+// past shutdown. Wait is always called, so the direct child is reaped
+// before shutdown proceeds.
+func stopUncommittedRun(cmd *exec.Cmd) {
+	// ESRCH (child already gone, or a test runner without Setpgid) is fine:
+	// Wait below still reaps whatever started.
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() { defer close(done); _ = cmd.Wait() }()
+
+	if waitForRunProcessGroup(cmd, done, scheduler.DefaultGrace) {
+		return
+	}
+	if !sweepRunProcessGroup(cmd) {
+		slog.Warn("uncommitted run process group survived the grace-expiry kill sweep; shutdown may leave it running",
+			"pid", cmd.Process.Pid)
+	}
+	// A no-op when Wait already returned (done is closed); otherwise blocks
+	// until the direct child is reaped.
+	<-done
+}
+
+// waitForRunProcessGroup waits up to timeout for the child's whole process
+// group to exit cleanly: the direct child must be reaped (waitDone closed)
+// AND the group probe must report no surviving members. Reports true when
+// both held within the window, false on timeout. waitDone is nilled after
+// it closes so the always-ready channel can't spin the poll loop.
+func waitForRunProcessGroup(cmd *exec.Cmd, waitDone <-chan struct{}, timeout time.Duration) bool {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	poll := time.NewTicker(runGroupPollInterval)
+	defer poll.Stop()
+
+	reaped := false
+	for {
+		if reaped && runProcessGroupGone(cmd) {
+			return true
+		}
+		select {
+		case <-waitDone:
+			reaped = true
+			waitDone = nil
+		case <-poll.C:
+		case <-deadline.C:
+			return false
+		}
+	}
+}
+
+// runProcessGroupGone reports whether the child's process group has no live
+// members left. Signal 0 probes membership without delivering anything;
+// ESRCH means the group is empty (or, for a non-Setpgid test runner, that no
+// group led by the child's PID exists — production children always lead
+// their own group via defaultCommandRunner's Setpgid, and Wait has already
+// reaped such a child by the time the probe's answer is acted on).
+func runProcessGroupGone(cmd *exec.Cmd) bool {
+	return errors.Is(syscall.Kill(-cmd.Process.Pid, 0), syscall.ESRCH)
+}
+
+// sweepRunProcessGroup force-kills the child's whole process group (Setpgid
+// makes the child its leader) and then waits — polling at
+// runGroupPollInterval, bounded by scheduler.DefaultGrace — until the group
+// has actually disappeared, reporting whether it did. os/exec's WaitDelay
+// SIGKILL hits only the direct child; surviving package-manager
+// grandchildren would race the next FIFO job against the same base
+// directory, so the group is swept after any run that did not exit cleanly.
+// kill(2) only queues the signal without waiting for the targets to stop
+// and be reaped, so signal submission alone is NOT termination: the caller
+// must not release the executor to the next job (or report the shutdown
+// drain complete) until this observation phase confirms the group is gone
+// or the bounded wait expires. Returns true when the child never started
+// (nothing to sweep).
+func sweepRunProcessGroup(cmd *exec.Cmd) bool {
+	if cmd.Process == nil {
+		return true
+	}
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+
+	deadline := time.NewTimer(scheduler.DefaultGrace)
+	defer deadline.Stop()
+	poll := time.NewTicker(runGroupPollInterval)
+	defer poll.Stop()
+	for {
+		if runProcessGroupGone(cmd) {
+			return true
+		}
+		select {
+		case <-poll.C:
+		case <-deadline.C:
+			return runProcessGroupGone(cmd)
+		}
 	}
 }

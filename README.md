@@ -36,11 +36,11 @@ One deliberate trim: the bundled `docker` CLI is removed from the image. Renovat
 
 Renovate reads **its entire configuration from its own** `RENOVATE_*` environment variables, a `config.js`, or a config file (see [`config.js.example`](config.js.example)) — this scheduler does not wrap or re-expose any of it. The scheduler itself is configured by the variables below, all kept **outside** the `RENOVATE_*` namespace so Renovate cannot mistake them for config options:
 
-| Variable         | Description                                                                                                                                                                                                                                                                                                                       | Default |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `SCHED_INTERVAL` | Built-in scheduler cadence as a Go duration (`6h`, `1h`, `30m`). First run at startup, then every interval. Set to `off` (aliases `disabled`, `0`) to disable the built-in scheduler and trigger runs externally — see [Scheduling modes](#scheduling-modes). Falls back to `6h` on an unset or unparseable (non-sentinel) value. | `6h`    |
-| `SCHED_TIMEOUT`  | Whole-run timeout for a single `renovate` invocation, as a Go duration. This is the outer bound on the process; Renovate's own `RENOVATE_EXECUTION_TIMEOUT` is a separate per-child limit.                                                                                                                                        | `1h`    |
-| `LOG_LEVEL`      | `debug`, `info`, `warn`, or `error` (honoured by both the scheduler and Renovate).                                                                                                                                                                                                                                                | `info`  |
+| Variable         | Description                                                                                                                                                                                                                                                                                                                                  | Default |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `SCHED_INTERVAL` | Built-in scheduler cadence as a Go duration (`6h`, `1h`, `30m`). First run at startup, then every interval. Set to `off` (aliases `disabled`, `0`) to disable the built-in scheduler and trigger runs externally — see [Scheduling modes](#scheduling-modes). Falls back to `6h` on an unset, negative, or unparseable (non-sentinel) value. | `6h`    |
+| `SCHED_TIMEOUT`  | Whole-run timeout for a single `renovate` invocation, as a Go duration. This is the outer bound on the process; Renovate's own `RENOVATE_EXECUTION_TIMEOUT` is a separate per-child limit.                                                                                                                                                   | `1h`    |
+| `LOG_LEVEL`      | `debug`, `info`, `warn`, or `error` (honoured by both the scheduler and Renovate).                                                                                                                                                                                                                                                           | `info`  |
 
 Everything else is Renovate's own configuration. The essentials for a self-hosted bot:
 
@@ -59,7 +59,7 @@ If you override the user (Compose `user:`) to match host volume ownership (e.g. 
 - containerbase's on-demand tool installs fail (`binarySource=install` can't write `/opt/containerbase`); and
 - lockfile/artifact regeneration fails: `go mod tidy` can't refresh `go.sum`, `npm install` can't refresh `package-lock.json`. The dependency PR is still raised, but manifest-only (`go.mod` / `package.json`), and then fails the consuming repo's CI (`missing go.sum entry`, or `npm ci` reporting the lock out of sync).
 
-The scheduler **logs a startup warning** when it detects this state (a non-default UID with an unwritable home and no cache redirection), so the misconfiguration surfaces immediately instead of as a broken PR days later.
+The scheduler **logs a startup warning** when it detects this state (a non-default UID whose `RENOVATE_CUSTOM_ENV_VARIABLES` names no cache or toolchain-path variable), so the misconfiguration surfaces immediately instead of as a broken PR days later. A `RENOVATE_CUSTOM_ENV_VARIABLES` that names no cache or toolchain-path variable (for example, one that only forwards `HTTP_PROXY`) still gets a softer warning — the caches are still unredirected. The check is name-based: the scheduler verifies you engaged the mitigation (a cache variable is named), not that its value is correct — an empty or mistyped path is your configuration to verify.
 
 If you must run as a custom UID, use the tools baked into the image and route every cache to a writable, mounted volume:
 
@@ -101,7 +101,7 @@ services:
       RENOVATE_PERSIST_REPO_DATA: "true"
       RENOVATE_REPOSITORY_CACHE: "enabled"
     volumes:
-      - ./data:/data            # RENOVATE_BASE_DIR — persist clones + caches
+      - ./data:/data            # persist clones + caches; create ./data owned by UID 12021 first (see "Volumes")
 ```
 
 ### External scheduler
@@ -176,10 +176,10 @@ The drain is internally capped at `SCHED_TIMEOUT` (a run can't outlast its own t
 
 ## Volumes
 
-| Mount                    | Description                                                                                                                                             |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/data`                  | `RENOVATE_BASE_DIR` — repository clones, caches, and dynamically installed tools. Persist it (the image creates it owned by the image's non-root user). |
-| `/usr/src/app/config.js` | Optional — a Renovate `config.js` if you prefer it over `RENOVATE_*` env vars.                                                                          |
+| Mount                    | Description                                                                                                                                                                                                                                                                                                         |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/data`                  | `RENOVATE_BASE_DIR` — repository clones, caches, and dynamically installed tools. Persist it. For an `./data` bind mount, create the directory first and run `chown 12021:0 ./data`; the mount hides the image path's ownership (a fresh auto-created root-owned dir fails the non-root daemon's boot write check). |
+| `/usr/src/app/config.js` | Optional — a Renovate `config.js` if you prefer it over `RENOVATE_*` env vars.                                                                                                                                                                                                                                      |
 
 ## Alerting
 
@@ -204,10 +204,15 @@ groups:
           description: >
             The scheduler logged an error: a run that exited non-zero
             (`renovate run failed`), a run that hit SCHED_TIMEOUT
-            (`renovate run timed out`), or a base-directory error. No
-            dependency PRs are raised until the next clean run. Check the
-            container logs, RENOVATE_TOKEN, and platform reachability. A
-            graceful shutdown logs at WARN, so a redeploy does not trip this.
+            (`renovate run timed out`), a base-directory error, or a
+            containment halt (`halting run admission: renovate run process
+            group survived the kill sweep` -- a failed/timed-out run's
+            process tree could not be confirmed dead, so the daemon stops
+            admitting runs and exits non-zero; the container restart reaps
+            the surviving tree). No dependency PRs are raised until the
+            next clean run. Check the container logs, RENOVATE_TOKEN, and
+            platform reachability. A graceful shutdown drains the in-flight
+            run and logs no error, so a redeploy does not trip this.
       - alert: RenovateNoRecentRun
         expr: |
           absent_over_time({container="renovate"} |= `renovate run complete` [13h])
@@ -231,7 +236,7 @@ Thresholds and the `severity` label are starting points; adjust the deadman wind
 
 ## Healthcheck
 
-`docker-renovate-scheduler health` checks a marker file the daemon sets after each run (the daemon executes every run, so it is the marker's single writer). In **built-in** mode the container starts unhealthy and flips to healthy after the first successful run (size `healthcheck.start_period` for the time a first run may take); a failed run flips it unhealthy, and it recovers on the next clean run. In **external** mode it starts healthy (idle, nothing has failed) and each triggered run updates it.
+`docker-renovate-scheduler health` checks a marker file the daemon sets after each run (the daemon executes every run, so it is the marker's single writer). In **built-in** mode the container starts unhealthy and flips to healthy after the first successful run (size `healthcheck.start_period` for the time a first run may take); a failed run flips it unhealthy, and it recovers on the next clean run. Built-in mode additionally treats a stale marker as unhealthy: if no run has refreshed it within `2*SCHED_INTERVAL + SCHED_TIMEOUT`, the probe fails, so a wedged interval loop surfaces as an unhealthy container instead of a silently idle one. External mode applies no such deadline (an idle container between sparse triggers stays healthy). In **external** mode it starts healthy (idle, nothing has failed) and each triggered run updates it.
 
 ```dockerfile
 HEALTHCHECK --interval=60s --timeout=5s --retries=3 --start-period=30s \
@@ -248,13 +253,14 @@ No network listener, no HTTP server, no exposed ports — triggering happens ove
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
 
-| Dependency                                                               | Source                                                                      |
-| ------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
-| renovate/renovate                                                        | [Docker Hub](https://hub.docker.com/r/renovate/renovate) (the runtime base) |
-| golang                                                                   | [Go](https://hub.docker.com/_/golang) (builder stage only)                  |
-| [`github.com/cplieger/health`](https://github.com/cplieger/health)       | file-marker healthcheck                                                     |
-| [`github.com/cplieger/scheduler`](https://github.com/cplieger/scheduler) | interval parsing, run loop, graceful command runner                         |
-| [`github.com/cplieger/slogx`](https://github.com/cplieger/slogx)         | slog setup (UTC logfmt)                                                     |
+| Dependency                                                               | Source                                                                          |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| renovate/renovate                                                        | [Docker Hub](https://hub.docker.com/r/renovate/renovate) (the runtime base)     |
+| golang                                                                   | [Go](https://hub.docker.com/_/golang) (builder stage only)                      |
+| [`github.com/cplieger/envx`](https://github.com/cplieger/envx)           | environment variable parsing                                                    |
+| [`github.com/cplieger/health`](https://github.com/cplieger/health)       | file-marker healthcheck                                                         |
+| [`github.com/cplieger/scheduler`](https://github.com/cplieger/scheduler) | interval parsing, run loop, graceful command runner, unix-socket trigger broker |
+| [`github.com/cplieger/slogx`](https://github.com/cplieger/slogx)         | slog setup (UTC logfmt)                                                         |
 
 ## Credits
 

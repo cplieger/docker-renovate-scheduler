@@ -43,7 +43,7 @@ USER root
 #
 # The final assertion pins the base image's own entrypoint script: the
 # scheduler routes every Renovate invocation through it (renovateEntrypoint in
-# renovate.go), so a base bump that relocates that private path must fail THIS
+# runner.go), so a base bump that relocates that private path must fail THIS
 # build, not every run at runtime.
 RUN find /opt/containerbase -name docker -prune -exec rm -rf {} + \
     && rm -f /usr/local/bin/docker \
@@ -61,8 +61,6 @@ RUN find /opt/containerbase -name docker -prune -exec rm -rf {} + \
 # packages, so native MySQL-driver builds during lockfile maintenance keep
 # working.
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
-
-COPY --chmod=755 --from=go-builder /docker-renovate-scheduler /usr/local/bin/docker-renovate-scheduler
 
 # Renovate stores repo clones and caches under RENOVATE_BASE_DIR. Persisting
 # it on a volume lets runs git-fetch instead of git-clone and reuse the
@@ -86,6 +84,8 @@ ENV RENOVATE_BASE_DIR=/data
 ARG GOLANG_VERSION=1.26.5
 RUN install-tool golang "${GOLANG_VERSION}"
 ENV GOTOOLCHAIN=auto
+
+COPY --chmod=755 --from=go-builder /docker-renovate-scheduler /usr/local/bin/docker-renovate-scheduler
 
 USER 12021
 
