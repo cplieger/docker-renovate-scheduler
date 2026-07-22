@@ -8,8 +8,29 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/health"
 	scheduler "github.com/cplieger/scheduler/v2"
+	"github.com/cplieger/scheduler/v2/trigger"
 )
+
+// newBareDaemon builds the standard test daemon fixture — temp health
+// marker, WithoutCancel run context, one-minute timeout, buffered fatal
+// channel — WITHOUT starting the executor: each caller owns its runJobs
+// goroutine and shutdown ordering. Returns the marker path for tests that
+// assert on the marker file directly.
+func newBareDaemon(t *testing.T, ctx context.Context, runner scheduler.CommandRunner) (*daemon, string) {
+	t.Helper()
+	markerPath := filepath.Join(t.TempDir(), "marker")
+	d := &daemon{
+		queue:   trigger.NewQueue[runPayload](queueCapacity),
+		marker:  health.NewMarker(markerPath),
+		newCmd:  runner,
+		runCtx:  context.WithoutCancel(ctx),
+		timeout: time.Minute,
+		fatal:   make(chan error, 1),
+	}
+	return d, markerPath
+}
 
 // maxSunPath is the longest usable unix-socket path: Linux sun_path is
 // 108 bytes including the trailing NUL.

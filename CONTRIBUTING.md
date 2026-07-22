@@ -44,17 +44,16 @@ child; triggers only submit requests.
   Shutdown is `signal.NotifyContext` + queue close: the in-flight run drains
   uncancelled (bounded by `SCHED_TIMEOUT`), queued requests are cancelled
   with explicit results.
-- `queue.go` — the bounded FIFO between triggers and the executor. Every
-  accepted job is guaranteed exactly one result; a full or closed queue
-  rejects immediately.
-- `server.go` — the unix-socket trigger server: owner-only socket in `/tmp`,
-  one connection per request, `queued` / `started` / `done` event stream.
 - `client.go` — the `run` subcommand: a thin synchronous client that forwards
   its repo args and its **complete environment** (that is what makes
   `docker exec -e RENOVATE_X=… … run` overrides reach Renovate) and exits
   with the run's own result.
-- `protocol.go` — the newline-delimited-JSON wire types shared by both sides
-  (same binary ships both, so there is no version negotiation).
+- `payload.go` — the `runPayload` wire type (repos + forwarded environment)
+  submitted over the scheduler library's trigger broker
+  (`scheduler/v2/trigger`: bounded FIFO queue, owner-only unix-socket server,
+  newline-JSON queued/started/done protocol, synchronous client). The broker
+  mechanics live and are tested in that library; this app supplies only the
+  payload type, the executor policy, and the log wording.
 - `runner.go` — `renovateInvocation` builds the command that routes through
   `/usr/local/sbin/renovate-entrypoint.sh` (re-establishing containerbase per
   run, whatever environment the request carried; the Dockerfile asserts the
@@ -130,8 +129,9 @@ never parses or rewrites Renovate config.
   and Grafana alerting). New logic in `config.go` / `runner.go`
   is expected to come with tests.
 - Tests are table-driven and live beside the code (`*_test.go`). They cover
-  the queue contract (FIFO, backpressure, close semantics), the wire protocol
-  and event sequence over a real unix socket, scope + environment forwarding
+  the daemon executor's policy as observed over a real unix socket (the
+  broker mechanics — queue semantics, socket hygiene, wire ordering — are the
+  scheduler library's and are tested there), scope + environment forwarding
   end-to-end (the client's env reaches the Renovate child), the executor's
   shutdown drain (in-flight finishes, queued cancelled explicitly), the
   entrypoint-routed invocation builder, and timeout-vs-failure log

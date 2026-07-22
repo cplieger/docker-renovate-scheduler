@@ -280,6 +280,24 @@ func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	}
 }
 
+// TestRunRenovateOnce_SuccessLogsCompleteAtInfo pins the success lifecycle
+// line's exact message and level. The README's RenovateNoRecentRun deadman
+// alert keys on absent_over_time of this exact string, so a silent rewording
+// would make that alert fire permanently at the next quiet window; the
+// boolean result alone (asserted elsewhere) cannot catch it. Serial: swaps
+// slog.Default.
+func TestRunRenovateOnce_SuccessLogsCompleteAtInfo(t *testing.T) {
+	rec := capture.Default(t)
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd { return exec.CommandContext(ctx, "true") }
+	ok, cancelled, survived := runRenovateOnce(context.Background(), context.Background(), time.Minute, "test", nil, nil, runner)
+	if !ok || cancelled || survived {
+		t.Fatalf("runRenovateOnce() = (%v, %v, %v), want (true, false, false)", ok, cancelled, survived)
+	}
+	if got := rec.CountLevel(slog.LevelInfo, "renovate run complete"); got != 1 {
+		t.Errorf("INFO records matching %q = %d, want 1; captured: %v", "renovate run complete", got, rec.Messages())
+	}
+}
+
 // TestDefaultCommandRunner_CancelSendsSIGTERMNotSIGKILL pins the graceful-
 // shutdown guardrail in defaultCommandRunner: on context cancellation the
 // Cancel closure sends SIGTERM (not os/exec's default SIGKILL), giving

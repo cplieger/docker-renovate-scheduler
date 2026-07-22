@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"log/slog"
+	"net"
 	"path/filepath"
 	"testing"
 )
@@ -52,5 +54,37 @@ func TestRunClient_ForwardsItsEnvironment(t *testing.T) {
 	sock, _ := startTestServer(t, runner)
 	if code := runClient(sock, nil); code != 0 {
 		t.Error("runClient() != 0: the client's environment did not reach the child")
+	}
+}
+
+// TestRunClient_ConnectionLostMidRunExitsOne pins the daemon-died-mid-run
+// failure mode: when the event stream ends before the final done event (the
+// daemon crashed or was stopped while the triggered run waited), the client
+// must exit 1 — the trigger reports a failed job — never hang or report
+// success. The fake daemon accepts the request, streams the queued event,
+// then drops the connection.
+func TestRunClient_ConnectionLostMidRunExitsOne(t *testing.T) {
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	sock := testSocketPath(t)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		var req runPayload
+		_ = json.NewDecoder(conn).Decode(&req)
+		_, _ = conn.Write([]byte(`{"event":"queued"}` + "\n"))
+		_ = conn.Close() // the daemon dies before the run completes
+	}()
+
+	if code := runClient(sock, []string{"owner/repo"}); code != 1 {
+		t.Errorf("runClient() = %d after the daemon dropped the connection mid-run, want 1", code)
 	}
 }

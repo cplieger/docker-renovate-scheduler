@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/health"
 	scheduler "github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/scheduler/v2/trigger"
 	"github.com/cplieger/slogx/capture"
@@ -25,14 +24,7 @@ import (
 func newTestDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, context.CancelFunc, <-chan struct{}) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	d := &daemon{
-		queue:   trigger.NewQueue[runPayload](queueCapacity),
-		marker:  health.NewMarker(filepath.Join(t.TempDir(), "marker")),
-		newCmd:  runner,
-		runCtx:  context.WithoutCancel(ctx),
-		timeout: time.Minute,
-		fatal:   make(chan error, 1),
-	}
+	d, _ := newBareDaemon(t, ctx, runner)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -93,18 +85,10 @@ func TestExecutor_RunsJobsInOrderWithTheirScopes(t *testing.T) {
 // is the marker's single writer.
 func TestExecutor_MarkerFollowsRunOutcome(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	markerPath := filepath.Join(t.TempDir(), "marker")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	d := &daemon{
-		queue:   trigger.NewQueue[runPayload](queueCapacity),
-		marker:  health.NewMarker(markerPath),
-		newCmd:  recordingRunner("true", nil),
-		runCtx:  context.WithoutCancel(ctx),
-		timeout: time.Minute,
-		fatal:   make(chan error, 1),
-	}
+	d, markerPath := newBareDaemon(t, ctx, recordingRunner("true", nil))
 	done := make(chan struct{})
 	go func() { defer close(done); d.runJobs(ctx) }()
 	t.Cleanup(func() { cancel(); d.queue.Close(); <-done })
@@ -245,14 +229,7 @@ func TestExecutor_ShutdownDuringPreflightNeverStartsRenovate(t *testing.T) {
 	cancel() // shutdown is already signalled when execute reaches the launch boundary
 
 	var argsLog [][]string
-	d := &daemon{
-		queue:   trigger.NewQueue[runPayload](queueCapacity),
-		marker:  health.NewMarker(filepath.Join(t.TempDir(), "marker")),
-		newCmd:  recordingRunner("true", &argsLog),
-		runCtx:  context.WithoutCancel(ctx),
-		timeout: time.Minute,
-		fatal:   make(chan error, 1),
-	}
+	d, _ := newBareDaemon(t, ctx, recordingRunner("true", &argsLog))
 
 	j := newJob("external", nil, nil)
 	d.execute(ctx, j)
@@ -521,14 +498,7 @@ func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	invocations := 0
-	d := &daemon{
-		queue:   trigger.NewQueue[runPayload](queueCapacity),
-		marker:  health.NewMarker(filepath.Join(t.TempDir(), "marker")),
-		newCmd:  recordingRunner("true", nil),
-		runCtx:  context.WithoutCancel(ctx),
-		timeout: time.Minute,
-		fatal:   make(chan error, 1),
-	}
+	d, _ := newBareDaemon(t, ctx, recordingRunner("true", nil))
 	d.runOnce = func(_, _ context.Context, _ time.Duration, _ string, _, _ []string, _ scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
 		invocations++
 		return false, false, true // the group survived the sweep
@@ -676,5 +646,102 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("triggered run's client did not exit")
+	}
+}
+
+// TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError pins the
+// primary containment-halt path at the composition root: a run whose process
+// group survives the kill sweep during NORMAL operation (no SIGTERM anywhere)
+// must shut the daemon down on its own — the fatal branch of runDaemon's
+// select — and return errContainmentLost so main exits non-zero and the
+// container restart reaps the surviving tree. The executor half is pinned by
+// TestExecutor_HaltsAdmissionAfterSurvivingGroup and the post-shutdown
+// fold-in by TestRunDaemon_LateContainmentLossAfterShutdownReturnsError; this
+// covers the remaining self-initiated shutdown path. The surviving-group
+// report is injected via runDaemon's runOnce parameter for the same reason
+// those tests use the seam: a SIGKILL-surviving process group cannot be
+// fabricated from real test children. Not parallel: it uses the
+// package-global healthMarkerPath.
+func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	t.Setenv("SCHED_INTERVAL", "off")
+	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	runOnce := func(_, _ context.Context, _ time.Duration, _ string, _, _ []string, _ scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
+		return false, false, true // the group survived the sweep mid-operation
+	}
+
+	sock := testSocketPath(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var runErr error
+	go func() {
+		defer close(done)
+		runErr = runDaemon(ctx, sock, recordingRunner("true", nil), runOnce)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("runDaemon did not stop during test cleanup")
+		}
+	})
+
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(sock)
+		return err == nil
+	}, "daemon did not bind the trigger socket")
+
+	if code := runClient(sock, nil); code != 1 {
+		t.Errorf("runClient() = %d, want 1 (the containment-lost run's trigger must report failure)", code)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runDaemon did not shut itself down after the containment loss")
+	}
+	if !errors.Is(runErr, errContainmentLost) {
+		t.Errorf("runDaemon() = %v, want errContainmentLost (a mid-operation containment loss must exit non-zero without an external stop)", runErr)
+	}
+}
+
+// TestExecutor_CancelledRunDeliversShutdownReasonAndLeavesMarker pins
+// execute's cancelled branch: when runRenovateOnce reports the post-Start
+// shutdown handshake reaped the child (cancelled=true), the waiter must get
+// the explicit shutdown reason — not a bare failure — and the health marker
+// must be left alone (beginShutdown owns the shutdown health state; a
+// cancelled start is not a run failure). The cancelled report is injected at
+// the runOnce seam; the real handshake behavior is pinned process-level by
+// TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild.
+func TestExecutor_CancelledRunDeliversShutdownReasonAndLeavesMarker(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+
+	ctx := t.Context()
+	d, _ := newBareDaemon(t, ctx, recordingRunner("true", nil))
+	d.marker.Set(true) // the pre-shutdown health state must survive the cancellation
+	d.runOnce = func(_, _ context.Context, _ time.Duration, _ string, _, _ []string, _ scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
+		return false, true, false // the post-Start handshake reaped the child
+	}
+
+	j := newJob("external", nil, nil)
+	d.execute(ctx, j)
+
+	select {
+	case out := <-j.Result():
+		if out.OK {
+			t.Error("outcome ok=true for a shutdown-cancelled run, want false")
+		}
+		if out.Reason != shutdownCancelReason {
+			t.Errorf("outcome reason = %q, want %q", out.Reason, shutdownCancelReason)
+		}
+	default:
+		t.Fatal("no result delivered for the cancelled run")
+	}
+	if !d.marker.Healthy() {
+		t.Error("health marker flipped unhealthy by a cancelled run; the cancelled branch must leave the marker alone (beginShutdown owns the shutdown state)")
 	}
 }

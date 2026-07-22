@@ -3,15 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/cplieger/health"
 	scheduler "github.com/cplieger/scheduler/v2"
 	"github.com/cplieger/scheduler/v2/trigger"
 )
@@ -31,14 +30,7 @@ func startTestServer(t *testing.T, runner scheduler.CommandRunner) (sock string,
 	sock = testSocketPath(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d = &daemon{
-		queue:   trigger.NewQueue[runPayload](queueCapacity),
-		marker:  health.NewMarker(filepath.Join(t.TempDir(), "marker")),
-		newCmd:  runner,
-		runCtx:  context.WithoutCancel(ctx),
-		timeout: time.Minute,
-		fatal:   make(chan error, 1),
-	}
+	d, _ = newBareDaemon(t, ctx, runner)
 	execDone := make(chan struct{})
 	go func() { defer close(execDone); d.runJobs(ctx) }()
 
@@ -139,14 +131,7 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	runner, awaitEntered, release := gatedRunner(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d := &daemon{
-		queue:   trigger.NewQueue[runPayload](queueCapacity),
-		marker:  health.NewMarker(filepath.Join(t.TempDir(), "marker")),
-		newCmd:  runner,
-		runCtx:  context.WithoutCancel(ctx),
-		timeout: time.Minute,
-		fatal:   make(chan error, 1),
-	}
+	d, _ := newBareDaemon(t, ctx, runner)
 	execDone := make(chan struct{})
 	go func() { defer close(execDone); d.runJobs(ctx) }()
 	ln, err := trigger.Listen(sock)
@@ -198,4 +183,67 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 
 	<-execDone
 	srv.Wait()
+}
+
+// TestRunDaemon_FullQueueRejectsTriggerImmediately pins the documented
+// backpressure contract end-to-end through the composition root: with the
+// executor occupied by an in-flight run and the FIFO holding queueCapacity
+// pending requests, the next trigger is rejected immediately — its FIRST
+// wire event is a done with ok=false and a non-empty reason — instead of
+// queueing unboundedly or hanging. This is also the only test that exercises
+// runDaemon's OnRejected wiring. Not parallel: it uses the package-global
+// healthMarkerPath.
+func TestRunDaemon_FullQueueRejectsTriggerImmediately(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	t.Setenv("SCHED_INTERVAL", "off")
+	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	runner, awaitEntered, release := gatedRunner(t)
+
+	sock := testSocketPath(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = runDaemon(ctx, sock, runner, nil)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		release()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("runDaemon did not stop during test cleanup")
+		}
+	})
+
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(sock)
+		return err == nil
+	}, "daemon did not bind the trigger socket")
+
+	// Occupy the executor, then fill the queue: each fill request's queued
+	// event is awaited before the next dial, so the fill is deterministic.
+	_ = rawRequest(t, sock, runPayload{})
+	awaitEntered()
+	for i := range queueCapacity {
+		dec := rawRequest(t, sock, runPayload{})
+		if ev := nextEvent(t, dec); ev.Kind != trigger.EventQueued {
+			t.Fatalf("fill request %d first event = %q, want queued", i, ev.Kind)
+		}
+	}
+
+	dec := rawRequest(t, sock, runPayload{Repos: []string{"owner/overflow"}})
+	ev := nextEvent(t, dec)
+	if ev.Kind != trigger.EventDone {
+		t.Fatalf("overflow request first event = %q, want an immediate done (reject-fast)", ev.Kind)
+	}
+	if ev.OK {
+		t.Error("overflow request reported ok=true, want a rejection")
+	}
+	if ev.Reason == "" {
+		t.Error("overflow rejection carries no reason; the trigger would report a bare failure")
+	}
 }

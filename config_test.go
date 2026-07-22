@@ -174,11 +174,11 @@ func TestProbeBaseDirWrite(t *testing.T) {
 	})
 }
 
-// TestLoadRunTimeout_ZeroIsNonPositiveAndUsesDefault pins the `d <= 0`
-// boundary on config.go:140. A zero SCHED_TIMEOUT parses cleanly (err == nil)
-// but is non-positive, so it must fall back to the default rather than arm a
-// zero timeout that would cancel every run immediately. A boundary mutation
-// (`d < 0`) would let a zero duration through unchanged.
+// TestLoadRunTimeout_ZeroIsNonPositiveAndUsesDefault pins the non-positive
+// boundary of loadRunTimeout. A zero SCHED_TIMEOUT parses cleanly (err ==
+// nil) but is non-positive, so it must fall back to the default rather than
+// arm a zero timeout that would cancel every run immediately; the boundary
+// must treat zero like a negative, never let it through unchanged.
 func TestLoadRunTimeout_ZeroIsNonPositiveAndUsesDefault(t *testing.T) {
 	t.Run("bare zero", func(t *testing.T) {
 		t.Setenv("SCHED_TIMEOUT", "0")

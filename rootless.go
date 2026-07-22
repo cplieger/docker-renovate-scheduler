@@ -14,6 +14,12 @@ import (
 // toolchains and regenerates lockfiles with no extra configuration.
 const defaultImageUID = 12021
 
+// rootlessCacheConsequence is the shared consequence clause of both rootless
+// warnings: what actually breaks when the tool caches stay unredirected.
+const rootlessCacheConsequence = "a custom UID has no writable containerbase home, " +
+	"so artifact/lockfile regeneration (go.sum, package-lock.json) will likely fail " +
+	"and dependency PRs will be raised with stale lockfiles that break the consuming repo's CI"
+
 // warnIfRootlessCacheUnwritable emits a loud startup warning when the container
 // is run as a non-default UID without redirecting its tool caches. A custom UID
 // has no writable containerbase home, so Renovate's language-tool caches
@@ -31,10 +37,8 @@ func warnIfRootlessCacheUnwritable() {
 	switch rootlessCacheRisk(os.Geteuid(), os.Getenv) {
 	case rootlessRiskNone:
 	case rootlessRiskNoRedirection:
-		slog.Warn("running as a non-default UID with no tool-cache redirection; a "+
-			"custom UID has no writable containerbase home, so artifact/lockfile "+
-			"regeneration (go.sum, package-lock.json) will likely fail and dependency "+
-			"PRs will be raised with stale lockfiles that break the consuming repo's CI",
+		slog.Warn("running as a non-default UID with no tool-cache redirection; "+
+			rootlessCacheConsequence,
 			"uid", os.Geteuid(),
 			"home", os.Getenv("HOME"),
 			"fix", "run as the image's default UID 12021, or set RENOVATE_BINARY_SOURCE=global "+
@@ -45,10 +49,7 @@ func warnIfRootlessCacheUnwritable() {
 		// Key names only: the forwarded values can carry credentials (an
 		// HTTP_PROXY with basic auth), so they must never reach the log.
 		slog.Warn("running as a non-default UID and RENOVATE_CUSTOM_ENV_VARIABLES "+
-			"redirects no tool cache; a custom UID has no writable containerbase home, "+
-			"so artifact/lockfile regeneration (go.sum, package-lock.json) will likely "+
-			"fail and dependency PRs will be raised with stale lockfiles that break the "+
-			"consuming repo's CI",
+			"redirects no tool cache; "+rootlessCacheConsequence,
 			"uid", os.Geteuid(),
 			"home", os.Getenv("HOME"),
 			"custom_env_vars", strings.Join(customEnvVarNames(os.Getenv("RENOVATE_CUSTOM_ENV_VARIABLES")), ","),
@@ -122,6 +123,7 @@ func customEnvVarNames(raw string) []string {
 	for name := range vars {
 		names = append(names, name)
 	}
+	slices.Sort(names)
 	return names
 }
 
@@ -129,9 +131,9 @@ func customEnvVarNames(raw string) []string {
 // redirects a tool cache or toolchain home. The set is unbounded across
 // language managers, so this is a heuristic: any name containing "cache"
 // (GOCACHE, npm_config_cache, PIP_CACHE_DIR, YARN_CACHE_FOLDER, …) plus the
-// well-known path/home variables that don't. A false negative here only
-// softens nothing — the warning stays advisory — and a false positive only
-// suppresses an advisory line.
+// well-known path/home variables that don't. Both error directions are
+// cheap: a false negative costs only a spurious soft warning (the warning
+// stays advisory), and a false positive only suppresses an advisory line.
 func cacheLikeEnvVar(name string) bool {
 	if strings.Contains(strings.ToUpper(name), "CACHE") {
 		return true

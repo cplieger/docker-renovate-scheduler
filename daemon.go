@@ -56,7 +56,7 @@ func newJob(trig string, repos, env []string) *trigger.Job[runPayload] {
 // group survived the post-run kill sweep. It is the shared signature of
 // daemon.runOnce and runDaemon's runOnce parameter; runRenovateOnce is the
 // production value.
-type runOnceFunc func(ctx, shutdownCtx context.Context, timeout time.Duration, trigger string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled, groupSurvived bool)
+type runOnceFunc func(ctx, shutdownCtx context.Context, timeout time.Duration, trig string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled, groupSurvived bool)
 
 // daemon carries the executor's dependencies.
 type daemon struct {

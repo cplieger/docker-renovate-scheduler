@@ -156,25 +156,25 @@ func withDumbInitInGroup(env []string) []string {
 // at Warn, never as a run failure — without ever being committed as
 // in-flight. Only a run that passes this post-Start handshake drains under
 // ctx/SCHED_TIMEOUT.
-func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, trigger string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
+func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, trig string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	name, args := renovateInvocation(repos)
 
 	start := time.Now()
-	slog.Info("renovate run starting", "trigger", trigger, "repos", repos, "timeout", timeout)
+	slog.Info("renovate run starting", "trigger", trig, "repos", repos, "timeout", timeout)
 
 	cmd := newCmd(runCtx, name, args...)
 	cmd.Env = withDumbInitInGroup(env)
 	if startErr := cmd.Start(); startErr != nil {
 		slog.Error("renovate run failed",
-			"trigger", trigger, "duration_ms", time.Since(start).Milliseconds(), "error", startErr)
+			"trigger", trig, "duration_ms", time.Since(start).Milliseconds(), "error", startErr)
 		return false, false, false
 	}
 	if shutdownCtx.Err() != nil {
 		stopUncommittedRun(cmd)
-		slog.Warn("renovate run cancelled by shutdown at start", "trigger", trigger, "repos", repos)
+		slog.Warn("renovate run cancelled by shutdown at start", "trigger", trig, "repos", repos)
 		return false, true, false
 	}
 	runErr := cmd.Wait()
@@ -182,24 +182,24 @@ func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, tr
 
 	switch {
 	case runErr == nil:
-		slog.Info("renovate run complete", "trigger", trigger, "duration_ms", durationMs)
+		slog.Info("renovate run complete", "trigger", trig, "duration_ms", durationMs)
 		return true, false, false
 	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
-		survived := sweepRunGroupOrWarn(cmd, "renovate run process group survived the post-timeout kill sweep; halting run admission to prevent an overlapping run", trigger)
+		survived := sweepRunGroupOrWarn(cmd, "renovate run process group survived the post-timeout kill sweep; halting run admission to prevent an overlapping run", trig)
 		// The run exceeded SCHED_TIMEOUT. Logged distinctly from a genuine
 		// non-zero Renovate exit so operators can tell a slow run from a
 		// real failure during triage.
 		slog.Error("renovate run timed out",
-			"trigger", trigger, "duration_ms", durationMs, "timeout", timeout)
+			"trigger", trig, "duration_ms", durationMs, "timeout", timeout)
 		return false, false, survived
 	default:
 		// A hard-crashed Renovate (e.g. an OOM-killed node process) exits
 		// without reaping its package-manager children. On a normal
 		// non-zero exit the group is already empty and the kill is a
 		// no-op (ESRCH).
-		survived := sweepRunGroupOrWarn(cmd, "renovate run process group survived the post-failure kill sweep; halting run admission to prevent an overlapping run", trigger)
+		survived := sweepRunGroupOrWarn(cmd, "renovate run process group survived the post-failure kill sweep; halting run admission to prevent an overlapping run", trig)
 		slog.Error("renovate run failed",
-			"trigger", trigger, "duration_ms", durationMs, "error", runErr)
+			"trigger", trig, "duration_ms", durationMs, "error", runErr)
 		return false, false, survived
 	}
 }
@@ -210,9 +210,9 @@ func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, tr
 // timeout and failure branches of runRenovateOnce. A true return is the
 // fatal containment signal the executor acts on: the group could not be
 // confirmed dead, so the base directory must not be handed to another run.
-func sweepRunGroupOrWarn(cmd *exec.Cmd, msg, trigger string) (survived bool) {
+func sweepRunGroupOrWarn(cmd *exec.Cmd, msg, trig string) (survived bool) {
 	if !sweepRunProcessGroup(cmd) {
-		slog.Warn(msg, "trigger", trigger, "pid", cmd.Process.Pid)
+		slog.Warn(msg, "trigger", trig, "pid", cmd.Process.Pid)
 		return true
 	}
 	return false

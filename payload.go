@@ -6,8 +6,9 @@ package main
 // library's trigger broker (scheduler/v2/trigger: newline-JSON wire, one
 // request line per connection, queued/started/done events back). Client and
 // daemon ship in the same binary inside the same image, so there is no
-// version skew to negotiate; fields added here must stay optional so an
-// older client's frame keeps decoding.
+// version skew to negotiate. Keep added fields optional (omitempty)
+// regardless: an unset field is simply absent from the frame, and the
+// argless sibling schedulers share this wire shape with an empty payload.
 
 // runPayload is the request line a `run` client sends after connecting.
 type runPayload struct {

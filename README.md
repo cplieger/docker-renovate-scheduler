@@ -253,13 +253,14 @@ No network listener, no HTTP server, no exposed ports — triggering happens ove
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
 
-| Dependency                                                               | Source                                                                      |
-| ------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
-| renovate/renovate                                                        | [Docker Hub](https://hub.docker.com/r/renovate/renovate) (the runtime base) |
-| golang                                                                   | [Go](https://hub.docker.com/_/golang) (builder stage only)                  |
-| [`github.com/cplieger/health`](https://github.com/cplieger/health)       | file-marker healthcheck                                                     |
-| [`github.com/cplieger/scheduler`](https://github.com/cplieger/scheduler) | interval parsing, run loop, graceful command runner                         |
-| [`github.com/cplieger/slogx`](https://github.com/cplieger/slogx)         | slog setup (UTC logfmt)                                                     |
+| Dependency                                                               | Source                                                                          |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| renovate/renovate                                                        | [Docker Hub](https://hub.docker.com/r/renovate/renovate) (the runtime base)     |
+| golang                                                                   | [Go](https://hub.docker.com/_/golang) (builder stage only)                      |
+| [`github.com/cplieger/envx`](https://github.com/cplieger/envx)           | environment variable parsing                                                    |
+| [`github.com/cplieger/health`](https://github.com/cplieger/health)       | file-marker healthcheck                                                         |
+| [`github.com/cplieger/scheduler`](https://github.com/cplieger/scheduler) | interval parsing, run loop, graceful command runner, unix-socket trigger broker |
+| [`github.com/cplieger/slogx`](https://github.com/cplieger/slogx)         | slog setup (UTC logfmt)                                                         |
 
 ## Credits
 
