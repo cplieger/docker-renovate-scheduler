@@ -62,10 +62,17 @@ const (
 // Renovate logs separately to stdout/stderr (set LOG_FORMAT=json); this
 // logger covers only the scheduler's own lifecycle lines.
 func setupLogger() {
-	// An unrecognized value keeps the Info default (silent, matching the prior
-	// switch's fall-through); Renovate itself also honours LOG_LEVEL.
-	level, _ := slogx.ParseLevel(envx.String("LOG_LEVEL", "info"), slog.LevelInfo)
+	// An unrecognized value keeps the Info default, but is warned about —
+	// after the fallback logger is installed, so the line reaches the real
+	// handler — matching the interval/timeout parsers' fall-back diagnostics
+	// (a typo like LOG_LEVEL=debig must not silently suppress the requested
+	// visibility). Renovate itself also honours LOG_LEVEL.
+	raw := strings.TrimSpace(envx.String("LOG_LEVEL", "info"))
+	level, recognized := slogx.ParseLevel(raw, slog.LevelInfo)
 	slogx.Setup(slogx.Options{Level: level})
+	if !recognized {
+		slog.Warn("unrecognized LOG_LEVEL, using default", "value", raw, "default", "info")
+	}
 }
 
 // baseDir returns Renovate's base directory (RENOVATE_BASE_DIR), defaulting

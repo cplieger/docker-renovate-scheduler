@@ -243,16 +243,20 @@ func TestServer_UndecodableRequestAnswersDone(t *testing.T) {
 // shutdown contract on the wire: a request queued behind an in-flight run
 // receives done{ok:false, reason: cancelled…} when the daemon stops — the
 // trigger reports a failed job instead of hanging or being silently dropped.
+// The in-flight child pauses AFTER process start (readiness marker, then
+// blocks until released), so the shutdown lands on a run already committed
+// past runRenovateOnce's post-Start handshake and A drains with its real
+// outcome instead of being cancelled at start.
 func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	sock := filepath.Join(t.TempDir(), "trigger.sock")
 
-	entered := make(chan struct{})
-	proceed := make(chan struct{})
+	dir := t.TempDir()
+	enteredPath := filepath.Join(dir, "entered")
+	proceedPath := filepath.Join(dir, "proceed")
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		close(entered)
-		<-proceed
-		return exec.CommandContext(ctx, "true")
+		return exec.CommandContext(ctx, "sh", "-c",
+			`: > "$1"; until [ -e "$2" ]; do sleep 0.05; done`, "sh", enteredPath, proceedPath)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -274,7 +278,10 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 
 	// Occupy the executor, then queue a second request over the wire.
 	decA, _ := rawRequest(t, sock, wireRequest{})
-	<-entered
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(enteredPath)
+		return err == nil
+	}, "in-flight child never started") // A is executing, post-Start
 	decB, _ := rawRequest(t, sock, wireRequest{Repos: []string{"owner/queued"}})
 	if ev := nextEvent(t, decB); ev.Event != eventQueued {
 		t.Fatalf("B's first event = %q, want queued", ev.Event)
@@ -284,7 +291,9 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	cancel()
 	_ = ln.Close()
 	d.queue.close()
-	close(proceed) // A's child completes its pass
+	if err := os.WriteFile(proceedPath, nil, 0o600); err != nil {
+		t.Fatalf("release the in-flight child: %v", err)
+	} // A's child completes its pass
 
 	// A: full drain — its run finished with its real (clean) outcome.
 	for {

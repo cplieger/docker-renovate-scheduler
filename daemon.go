@@ -90,7 +90,6 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 
 	if err := verifyBaseDir(ctx); err != nil {
 		logBaseDirError(baseDir(), err)
-		marker.Set(false)
 		return err
 	}
 
@@ -103,7 +102,6 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	ln, err := listenTrigger(socketPath)
 	if err != nil {
 		slog.Error("cannot bind trigger socket", "path", socketPath, "error", err)
-		marker.Set(false)
 		return err
 	}
 	defer func() { _ = os.Remove(socketPath) }()
@@ -217,6 +215,12 @@ func (d *daemon) runJobs(shutdownCtx context.Context) {
 	}
 }
 
+// shutdownCancelReason is the not-ok outcome reason a waiting trigger
+// receives whenever shutdown cancels its job — still queued, caught by the
+// post-preflight re-check, or reaped by runRenovateOnce's post-Start
+// handshake.
+const shutdownCancelReason = "cancelled: scheduler shutting down"
+
 // cancelJobForShutdown delivers the explicit shutdown-cancellation result —
 // the shared bookkeeping for both the already-shutting-down dequeue branch
 // and the post-preflight re-check in execute. The duration is always zero: a
@@ -224,7 +228,7 @@ func (d *daemon) runJobs(shutdownCtx context.Context) {
 // -- not elapsed queue or preflight time -- is the useful signal.
 func cancelJobForShutdown(j *job) {
 	slog.Warn("queued run cancelled by shutdown", "trigger", j.trigger, "repos", j.repos)
-	j.finish(runOutcome{ok: false, reason: "cancelled: scheduler shutting down"})
+	j.finish(runOutcome{ok: false, reason: shutdownCancelReason})
 }
 
 // execute performs one job: signal the waiter, re-verify the base directory
@@ -233,7 +237,11 @@ func cancelJobForShutdown(j *job) {
 // the result. The base-dir preflight runs on the uncancelled runCtx (it can
 // take up to 10s), so shutdownCtx is re-checked after it succeeds: a SIGTERM
 // that lands during the preflight must cancel the job, never start a fresh
-// Renovate pass after shutdown was requested.
+// Renovate pass after shutdown was requested. That re-check alone is a
+// check-then-act race — a SIGTERM can still land between it and process
+// creation — so shutdownCtx is also passed into runRenovateOnce, whose
+// post-Start handshake reaps a child that started after shutdown won and
+// reports it cancelled instead of committing it as in-flight.
 func (d *daemon) execute(shutdownCtx context.Context, j *job) {
 	close(j.started)
 	start := time.Now()
@@ -251,7 +259,13 @@ func (d *daemon) execute(shutdownCtx context.Context, j *job) {
 		return
 	}
 
-	ok := runRenovateOnce(d.runCtx, d.timeout, j.trigger, j.repos, j.env, d.newCmd)
+	ok, cancelled := runRenovateOnce(d.runCtx, shutdownCtx, d.timeout, j.trigger, j.repos, j.env, d.newCmd)
+	if cancelled {
+		// runRenovateOnce already reaped the child and logged the Warn; the
+		// health marker is left alone (beginShutdown pinned it unhealthy).
+		j.finish(runOutcome{ok: false, reason: shutdownCancelReason})
+		return
+	}
 	d.setRunHealth(ok)
 	j.finish(runOutcome{ok: ok, duration: time.Since(start)})
 }

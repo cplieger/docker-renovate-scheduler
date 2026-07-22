@@ -179,17 +179,23 @@ func TestExecutor_PreflightValidatesForwardedBaseDir(t *testing.T) {
 // TestExecutor_ShutdownCancelsQueuedButFinishesInFlight pins the drain
 // contract: SIGTERM never abandons the in-flight run (it completes with its
 // real outcome) and never starts queued work (it is cancelled with an
-// explicit reason).
+// explicit reason). The in-flight child pauses AFTER process start — it
+// creates a readiness marker, then blocks until released — so the SIGTERM
+// lands on a run already committed past runRenovateOnce's post-Start
+// shutdown handshake (a pre-Start pause would model the cancelled-start
+// window instead, which TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild
+// covers).
 func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 
-	entered := make(chan struct{})
-	proceed := make(chan struct{})
-	var once sync.Once
+	dir := t.TempDir()
+	enteredPath := dir + "/entered"
+	proceedPath := dir + "/proceed"
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		once.Do(func() { close(entered) })
-		<-proceed
-		return exec.CommandContext(ctx, "true")
+		// The child signals it is running, then drains only once released —
+		// exiting 0 so the drained run reports its real (clean) outcome.
+		return exec.CommandContext(ctx, "sh", "-c",
+			`: > "$1"; until [ -e "$2" ]; do sleep 0.05; done`, "sh", enteredPath, proceedPath)
 	}
 	d, cancel, _ := newTestDaemon(t, runner)
 
@@ -197,7 +203,10 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 	if err := d.queue.submit(inflight); err != nil {
 		t.Fatalf("submit(inflight) = %v", err)
 	}
-	<-entered // the run is now executing
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(enteredPath)
+		return err == nil
+	}, "in-flight child never started") // the run is now executing, post-Start
 
 	queued := newJob("external", []string{"owner/q"}, nil)
 	if err := d.queue.submit(queued); err != nil {
@@ -207,7 +216,9 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 	cancel()          // SIGTERM lands mid-run
 	d.beginShutdown() // runDaemon's immediate unhealthy transition
 	d.queue.close()   // daemon stops admission
-	close(proceed)    // the in-flight child finishes its pass
+	if err := os.WriteFile(proceedPath, nil, 0o600); err != nil {
+		t.Fatalf("release the in-flight child: %v", err)
+	} // the in-flight child finishes its pass
 
 	select {
 	case out := <-inflight.result:

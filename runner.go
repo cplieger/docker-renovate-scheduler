@@ -124,10 +124,21 @@ func withDumbInitInGroup(env []string) []string {
 // forwarded environment); nil inherits the daemon's — either way with ONE
 // scheduler-internal override, DUMB_INIT_SETSID=0, so the nested per-run
 // dumb-init cannot detach the Renovate tree from the scheduler's process
-// group (see withDumbInitInGroup). The context is never cancelled by
-// shutdown — the daemon does not abandon an in-flight run — so the only
-// cancellation cause is the timeout.
-func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string, repos, env []string, newCmd scheduler.CommandRunner) (ok bool) {
+// group (see withDumbInitInGroup). ctx (the daemon's uncancellable runCtx)
+// never carries shutdown cancellation — the daemon does not abandon a
+// committed in-flight run — so the only cancellation cause is the timeout.
+//
+// shutdownCtx closes the check-then-act window between execute's pre-start
+// shutdown check and process creation: a SIGTERM landing in that gap would
+// otherwise launch a fresh pass bounded only by SCHED_TIMEOUT, which can
+// outlive the container's stop_grace_period and recreate the exit-137 path
+// the drain contract exists to prevent. Immediately after Start, shutdownCtx
+// is re-checked: if shutdown already won the race, the just-started child is
+// reaped (see stopUncommittedRun) and the run reports cancelled=true — logged
+// at Warn, never as a run failure — without ever being committed as
+// in-flight. Only a run that passes this post-Start handshake drains under
+// ctx/SCHED_TIMEOUT.
+func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, trigger string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled bool) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -138,13 +149,23 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string,
 
 	cmd := newCmd(runCtx, name, args...)
 	cmd.Env = withDumbInitInGroup(env)
-	runErr := cmd.Run()
+	if startErr := cmd.Start(); startErr != nil {
+		slog.Error("renovate run failed",
+			"trigger", trigger, "duration_ms", time.Since(start).Milliseconds(), "error", startErr)
+		return false, false
+	}
+	if shutdownCtx.Err() != nil {
+		stopUncommittedRun(cmd)
+		slog.Warn("renovate run cancelled by shutdown at start", "trigger", trigger, "repos", repos)
+		return false, true
+	}
+	runErr := cmd.Wait()
 	durationMs := time.Since(start).Milliseconds()
 
 	switch {
 	case runErr == nil:
 		slog.Info("renovate run complete", "trigger", trigger, "duration_ms", durationMs)
-		return true
+		return true, false
 	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
 		sweepRunProcessGroup(cmd)
 		// The run exceeded SCHED_TIMEOUT. Logged distinctly from a genuine
@@ -152,7 +173,7 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string,
 		// real failure during triage.
 		slog.Error("renovate run timed out",
 			"trigger", trigger, "duration_ms", durationMs, "timeout", timeout)
-		return false
+		return false, false
 	default:
 		// A hard-crashed Renovate (e.g. an OOM-killed node process) exits
 		// without reaping its package-manager children. On a normal
@@ -161,7 +182,27 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trigger string,
 		sweepRunProcessGroup(cmd)
 		slog.Error("renovate run failed",
 			"trigger", trigger, "duration_ms", durationMs, "error", runErr)
-		return false
+		return false, false
+	}
+}
+
+// stopUncommittedRun reaps a child that started but lost the post-Start
+// shutdown handshake in runRenovateOnce: SIGTERM to the child's process
+// group (Setpgid makes it the leader, so package-manager grandchildren stop
+// with it), a DefaultGrace window to exit cleanly, then a group SIGKILL
+// sweep if it lingers. Wait is always called, so the process is reaped
+// before shutdown proceeds.
+func stopUncommittedRun(cmd *exec.Cmd) {
+	// ESRCH (child already gone, or a test runner without Setpgid) is fine:
+	// Wait below still reaps whatever started.
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() { defer close(done); _ = cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(scheduler.DefaultGrace):
+		sweepRunProcessGroup(cmd)
+		<-done
 	}
 }
 

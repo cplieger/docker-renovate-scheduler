@@ -85,7 +85,7 @@ func TestRunRenovateOnce_EnvHandling(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("RENOVATE_TEST_MARKER", "inherited")
 			runner := shellAssertRunner(tt.script)
-			if ok := runRenovateOnce(context.Background(), time.Minute, "test", nil, tt.env, runner); !ok {
+			if ok, _ := runRenovateOnce(context.Background(), context.Background(), time.Minute, "test", nil, tt.env, runner); !ok {
 				t.Errorf("runRenovateOnce() = false: the child did not see the expected environment (env=%v)", tt.env)
 			}
 		})
@@ -155,7 +155,7 @@ func TestRunRenovateOnce_TimeoutCancelsRun(t *testing.T) {
 	}
 
 	start := time.Now()
-	ok := runRenovateOnce(context.Background(), 100*time.Millisecond, "test", nil, nil, slowRunner)
+	ok, _ := runRenovateOnce(context.Background(), context.Background(), 100*time.Millisecond, "test", nil, nil, slowRunner)
 	elapsed := time.Since(start)
 
 	if ok {
@@ -185,7 +185,7 @@ func TestRunRenovateOnce_EnvForcesDumbInitInGroup(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("DUMB_INIT_SETSID", "1") // daemon environ must be overridden too
 			runner := shellAssertRunner(`[ "$DUMB_INIT_SETSID" = "0" ]`)
-			if ok := runRenovateOnce(context.Background(), time.Minute, "test", nil, tt.env, runner); !ok {
+			if ok, _ := runRenovateOnce(context.Background(), context.Background(), time.Minute, "test", nil, tt.env, runner); !ok {
 				t.Errorf("runRenovateOnce() = false: child did not see DUMB_INIT_SETSID=0 (env=%v)", tt.env)
 			}
 		})
@@ -223,7 +223,7 @@ exec setsid -w sh -c 'echo $$ > "$0"; exec sleep 30' "$1"`
 		return cmd
 	}
 
-	if ok := runRenovateOnce(context.Background(), 500*time.Millisecond, "test", nil, nil, runner); ok {
+	if ok, _ := runRenovateOnce(context.Background(), context.Background(), 500*time.Millisecond, "test", nil, nil, runner); ok {
 		t.Fatal("runRenovateOnce() = true for a run that exceeded the timeout, want false")
 	}
 
@@ -272,7 +272,7 @@ func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 			prev := slog.Default()
 			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 			t.Cleanup(func() { slog.SetDefault(prev) })
-			ok := runRenovateOnce(context.Background(), tt.timeout, "test", nil, nil, tt.runner)
+			ok, _ := runRenovateOnce(context.Background(), context.Background(), tt.timeout, "test", nil, nil, tt.runner)
 			if ok {
 				t.Errorf("runRenovateOnce() = true, want false")
 			}
@@ -330,5 +330,53 @@ func TestDefaultCommandRunner_CancelSendsSIGTERMNotSIGKILL(t *testing.T) {
 	}
 	if exitErr.ExitCode() != 42 {
 		t.Errorf("exit code = %d, want 42: the run must receive SIGTERM (graceful) and run its trap, not SIGKILL", exitErr.ExitCode())
+	}
+}
+
+// TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild is the regression
+// test for the post-Start shutdown handshake: a SIGTERM landing in the
+// check-then-act window between execute's pre-start shutdown check and
+// process creation must not commit a fresh pass under the uncancellable run
+// context (bounded only by SCHED_TIMEOUT, which can outlive
+// stop_grace_period). The injected runner cancels shutdown at process
+// creation — after the pre-start check, before Start — so the child starts
+// with shutdown already won. runRenovateOnce must report cancelled, reap the
+// child promptly (not after its 30s payload or the run timeout), and emit no
+// level=ERROR run-failure line: a cancelled start is a Warn, not a failure
+// alert. Serial: swaps slog.Default.
+func TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	shutdownCtx, shutdown := context.WithCancel(context.Background())
+	var child *exec.Cmd
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		shutdown() // SIGTERM lands after the pre-start check, before Start
+		child = defaultCommandRunner(ctx, "sleep", "30")
+		child.Stdout, child.Stderr = nil, nil
+		return child
+	}
+
+	start := time.Now()
+	ok, cancelled := runRenovateOnce(context.Background(), shutdownCtx, time.Minute, "test", nil, nil, runner)
+	elapsed := time.Since(start)
+
+	if ok || !cancelled {
+		t.Fatalf("runRenovateOnce() = (ok=%v, cancelled=%v), want (false, true)", ok, cancelled)
+	}
+	if child.ProcessState == nil {
+		t.Fatal("child not reaped: Wait never completed on the shutdown-cancelled start")
+	}
+	if elapsed > 15*time.Second {
+		t.Errorf("runRenovateOnce() returned after %v; the cancelled child was not reaped promptly", elapsed)
+	}
+	out := buf.String()
+	if strings.Contains(out, "level=ERROR") {
+		t.Errorf("a shutdown-cancelled start was logged at ERROR (false failure alert); got:\n%s", out)
+	}
+	if !strings.Contains(out, "renovate run cancelled by shutdown at start") {
+		t.Errorf("missing the shutdown-cancellation Warn line; got:\n%s", out)
 	}
 }
