@@ -23,7 +23,7 @@ func TestRunClient_ExitCodesOverRealSocket(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sock, _ := startTestServer(t, recordingRunner(tt.bin, nil))
+			sock := startTestServer(t, recordingRunner(tt.bin, nil))
 			if code := runClient(sock, []string{"owner/repo"}); code != tt.want {
 				t.Errorf("runClient() = %d, want %d", code, tt.want)
 			}
@@ -52,7 +52,7 @@ func TestRunClient_DaemonUnreachableExitsOne(t *testing.T) {
 func TestRunClient_ForwardsItsEnvironment(t *testing.T) {
 	t.Setenv("RENOVATE_TEST_MARKER", "exec-override")
 	runner := shellAssertRunner(`[ "$RENOVATE_TEST_MARKER" = "exec-override" ]`)
-	sock, _ := startTestServer(t, runner)
+	sock := startTestServer(t, runner)
 	if code := runClient(sock, nil); code != 0 {
 		t.Error("runClient() != 0: the client's environment did not reach the child")
 	}

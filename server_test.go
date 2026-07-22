@@ -24,20 +24,19 @@ import (
 
 // startTestServer wires a queue + executor + trigger server on a temp socket
 // and returns the socket path. Everything is torn down via t.Cleanup.
-func startTestServer(t *testing.T, runner scheduler.CommandRunner) (sock string, d *daemon) {
+func startTestServer(t *testing.T, runner scheduler.CommandRunner) string {
 	t.Helper()
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	sock = testSocketPath(t)
+	sock := testSocketPath(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d, _ = newBareDaemon(t, ctx, runner)
-	execDone := make(chan struct{})
-	go func() { defer close(execDone); d.runJobs(ctx) }()
-
+	d, _ := newBareDaemon(t, ctx, runner)
 	ln, err := trigger.Listen(sock)
 	if err != nil {
 		t.Fatalf("trigger.Listen() = %v", err)
 	}
+	execDone := make(chan struct{})
+	go func() { defer close(execDone); d.runJobs(ctx) }()
 	srv := &trigger.Server[runPayload]{Queue: d.queue}
 	srv.Serve(ln)
 
@@ -48,7 +47,7 @@ func startTestServer(t *testing.T, runner scheduler.CommandRunner) (sock string,
 		<-execDone
 		srv.Wait()
 	})
-	return sock, d
+	return sock
 }
 
 // rawRequest dials the socket, sends a request, and returns the decoder over
@@ -94,7 +93,7 @@ func TestServer_ForwardsScopeAndEnvironmentToTheRun(t *testing.T) {
 		argsLog = append(argsLog, append([]string(nil), args...))
 		return exec.CommandContext(ctx, "sh", "-c", `[ "$RENOVATE_TEST_MARKER" = "from-client" ]`)
 	}
-	sock, _ := startTestServer(t, runner)
+	sock := startTestServer(t, runner)
 
 	dec := rawRequest(t, sock, runPayload{
 		Repos: []string{"cplieger/homelab"},
