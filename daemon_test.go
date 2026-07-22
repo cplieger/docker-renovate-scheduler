@@ -600,6 +600,7 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 
 	entered := make(chan struct{})
 	proceed := make(chan struct{})
+	var release sync.Once
 	runOnce := func(_, _ context.Context, _ time.Duration, _ string, _, _ []string, _ scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
 		close(entered)
 		<-proceed
@@ -614,6 +615,18 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 		defer close(done)
 		runErr = runDaemon(ctx, sock, recordingRunner("true", nil), runOnce)
 	}()
+	// A mid-test Fatal must not leak the daemon fixture: cancel, release the
+	// gated run, and wait for runDaemon before later cleanups remove the
+	// shared marker and restore the global logger.
+	t.Cleanup(func() {
+		cancel()
+		release.Do(func() { close(proceed) })
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("runDaemon did not stop during test cleanup")
+		}
+	})
 
 	// External mode boots healthy and binds the socket; wait for both so the
 	// trigger below cannot race the boot.
@@ -645,7 +658,7 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 		_, err := os.Stat(healthMarkerPath)
 		return errors.Is(err, fs.ErrNotExist)
 	}, "runDaemon did not begin shutdown after cancellation")
-	close(proceed) // the draining run now reports the surviving group
+	release.Do(func() { close(proceed) }) // the draining run now reports the surviving group
 
 	select {
 	case <-done:

@@ -261,6 +261,7 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 		newCmd:  runner,
 		runCtx:  context.WithoutCancel(ctx),
 		timeout: time.Minute,
+		fatal:   make(chan error, 1),
 	}
 	execDone := make(chan struct{})
 	go func() { defer close(execDone); d.runJobs(ctx) }()
