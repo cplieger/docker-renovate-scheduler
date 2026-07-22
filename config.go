@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/cplieger/envx"
-	scheduler "github.com/cplieger/scheduler/v2"
+	scheduler "github.com/cplieger/scheduler/v3"
 	"github.com/cplieger/slogx"
 )
 

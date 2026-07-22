@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	scheduler "github.com/cplieger/scheduler/v2"
+	scheduler "github.com/cplieger/scheduler/v3"
 )
 
 // shellAssertRunner returns a CommandRunner whose child is a shell running

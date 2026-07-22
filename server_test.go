@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/cplieger/health"
-	scheduler "github.com/cplieger/scheduler/v2"
+	scheduler "github.com/cplieger/scheduler/v3"
 )
 
 // startTestServer wires a queue + executor + trigger server on a temp socket
