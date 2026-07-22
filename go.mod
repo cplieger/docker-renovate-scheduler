@@ -10,3 +10,5 @@ require (
 	github.com/cplieger/envx v1.2.1
 	github.com/cplieger/scheduler/v2 v2.0.0
 )
+
+replace github.com/cplieger/scheduler/v2 => ../scheduler

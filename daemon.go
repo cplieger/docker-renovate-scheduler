@@ -12,6 +12,7 @@ import (
 
 	"github.com/cplieger/health"
 	scheduler "github.com/cplieger/scheduler/v2"
+	"github.com/cplieger/scheduler/v2/trigger"
 )
 
 // --- Daemon: the single owner of Renovate execution ---
@@ -36,6 +37,20 @@ var errContainmentLost = errors.New("renovate run process group survived the kil
 // whose group survived the sweep and to every waiter still queued behind it.
 const containmentLostReason = "failed: run process group survived the kill sweep; scheduler halting"
 
+// queueCapacity bounds pending requests in the trigger broker's FIFO. The
+// realistic trigger set is one periodic job plus a release-webhook burst, so
+// 16 is generous headroom; a client hitting a full queue is rejected
+// immediately with a clear reason (honest backpressure).
+const queueCapacity = 16
+
+// newJob builds one queued run request: the trigger label for logs, the
+// positional repository slugs (empty means Renovate's own configuration
+// decides), and the complete child environment (nil means inherit the
+// daemon's own — ticker-submitted runs).
+func newJob(trig string, repos, env []string) *trigger.Job[runPayload] {
+	return trigger.NewJob(trig, runPayload{Repos: repos, Env: env})
+}
+
 // runOnceFunc executes one Renovate pass and reports whether it exited
 // cleanly, whether shutdown cancelled it at start, and whether its process
 // group survived the post-run kill sweep. It is the shared signature of
@@ -45,7 +60,7 @@ type runOnceFunc func(ctx, shutdownCtx context.Context, timeout time.Duration, t
 
 // daemon carries the executor's dependencies.
 type daemon struct {
-	queue  *runQueue
+	queue  *trigger.Queue[runPayload]
 	marker *health.Marker
 	newCmd scheduler.CommandRunner
 	// runOnce executes one Renovate pass; nil means runRenovateOnce (the
@@ -142,7 +157,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	ctx, abort := context.WithCancelCause(ctx)
 	defer abort(nil)
 
-	ln, err := listenTrigger(socketPath)
+	ln, err := trigger.Listen(socketPath)
 	if err != nil {
 		slog.Error("cannot bind trigger socket", "path", socketPath, "error", err)
 		return err
@@ -156,7 +171,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	marker.Set(!scheduleEnabled)
 
 	d := &daemon{
-		queue:   newRunQueue(queueCapacity),
+		queue:   trigger.NewQueue[runPayload](queueCapacity),
 		marker:  marker,
 		newCmd:  newCmd,
 		runOnce: runOnce,
@@ -171,8 +186,19 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		d.runJobs(ctx)
 	}()
 
-	srv := &triggerServer{queue: d.queue}
-	srv.handlers.Go(func() { srv.serve(ln) })
+	// The broker owns the wire (decode, event relay, handler draining); the
+	// hooks only supply this app's log vocabulary — the payload's repo scope,
+	// never its environment (it can carry credentials).
+	srv := &trigger.Server[runPayload]{
+		Queue: d.queue,
+		OnAccepted: func(p runPayload) {
+			slog.Info("triggered run queued", "repos", p.Repos)
+		},
+		OnRejected: func(p runPayload, err error) {
+			slog.Warn("trigger request rejected", "repos", p.Repos, "reason", err)
+		},
+	}
+	srv.Serve(ln)
 
 	tickerDone := startTicker(ctx, d, interval, scheduleEnabled)
 
@@ -206,7 +232,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	// is resolved; the handlers return once every accepted request has its
 	// final event on the wire.
 	_ = ln.Close()
-	d.queue.close()
+	d.queue.Close()
 	<-executorDone
 	// Fold in a late containment loss: if ordinary shutdown won the select
 	// above while a run was still draining, the executor's fatal send landed
@@ -221,7 +247,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		}
 	}
 	<-tickerDone
-	srv.handlers.Wait()
+	srv.Wait()
 	slog.Info("shutdown complete")
 	return fatalErr
 }
@@ -242,11 +268,11 @@ func startTicker(ctx context.Context, d *daemon, interval time.Duration, enabled
 		defer close(done)
 		startupDone := false
 		scheduler.RunLoop(ctx, func(context.Context) {
-			trigger := "interval"
+			trig := "interval"
 			if !startupDone {
-				trigger, startupDone = "startup", true
+				trig, startupDone = "startup", true
 			}
-			d.tick(trigger)
+			d.tick(trig)
 		}, scheduler.LoopOptions{Interval: interval, FireOnStart: true})
 	}()
 	return done
@@ -258,13 +284,13 @@ func startTicker(ctx context.Context, d *daemon, interval time.Duration, enabled
 // resolves). A rejected submission — the queue full of external requests, or
 // shutdown racing the tick — is logged and skipped: the next interval
 // provides freshness.
-func (d *daemon) tick(trigger string) {
-	j := newJob(trigger, nil, nil)
-	if err := d.queue.submit(j); err != nil {
-		slog.Warn("scheduled run skipped", "trigger", trigger, "reason", err)
+func (d *daemon) tick(trig string) {
+	j := newJob(trig, nil, nil)
+	if err := d.queue.Submit(j); err != nil {
+		slog.Warn("scheduled run skipped", "trigger", trig, "reason", err)
 		return
 	}
-	<-j.result
+	<-j.Result()
 }
 
 // runJobs is the executor: the only code that starts Renovate. It serves the
@@ -276,7 +302,7 @@ func (d *daemon) tick(trigger string) {
 // containment reason instead of run: a surviving package-manager tree may
 // still be writing the base directory, so no further run may be admitted.
 func (d *daemon) runJobs(shutdownCtx context.Context) {
-	for j := range d.queue.jobs {
+	for j := range d.queue.Jobs() {
 		switch {
 		case d.halted:
 			cancelJobForContainment(j)
@@ -301,19 +327,19 @@ const shutdownCancelReason = "cancelled: scheduler shutting down"
 // The duration is always zero: a shutdown-cancelled job never starts
 // Renovate, and the cancellation reason -- not elapsed queue or preflight
 // time -- is the useful signal.
-func cancelJobForShutdown(j *job, stage string) {
-	slog.Warn("run cancelled by shutdown", "stage", stage, "trigger", j.trigger, "repos", j.repos)
-	j.finish(runOutcome{ok: false, reason: shutdownCancelReason})
+func cancelJobForShutdown(j *trigger.Job[runPayload], stage string) {
+	slog.Warn("run cancelled by shutdown", "stage", stage, "trigger", j.Trigger, "repos", j.Payload.Repos)
+	j.Finish(trigger.Outcome{OK: false, Reason: shutdownCancelReason})
 }
 
 // cancelJobForContainment fails a queued job after containment loss: the
 // prior run's process group could not be confirmed dead, so running this job
 // could overlap it against the same base directory. The waiter gets the
 // explicit containment reason instead of a bare failure.
-func cancelJobForContainment(j *job) {
+func cancelJobForContainment(j *trigger.Job[runPayload]) {
 	slog.Warn("run cancelled: a prior run's process group survived the kill sweep",
-		"trigger", j.trigger, "repos", j.repos)
-	j.finish(runOutcome{ok: false, reason: containmentLostReason})
+		"trigger", j.Trigger, "repos", j.Payload.Repos)
+	j.Finish(trigger.Outcome{OK: false, Reason: containmentLostReason})
 }
 
 // execute performs one job: signal the waiter, re-verify the base directory
@@ -327,15 +353,15 @@ func cancelJobForContainment(j *job) {
 // creation — so shutdownCtx is also passed into runRenovateOnce, whose
 // post-Start handshake reaps a child that started after shutdown won and
 // reports it cancelled instead of committing it as in-flight.
-func (d *daemon) execute(shutdownCtx context.Context, j *job) {
-	close(j.started)
+func (d *daemon) execute(shutdownCtx context.Context, j *trigger.Job[runPayload]) {
+	j.Start()
 	start := time.Now()
 
-	dir := baseDirForEnv(j.env)
+	dir := baseDirForEnv(j.Payload.Env)
 	if err := verifyBaseDirAt(d.runCtx, dir); err != nil {
 		logBaseDirError(dir, err)
 		d.setRunHealth(false)
-		j.finish(runOutcome{ok: false, duration: time.Since(start), reason: "base directory not writable"})
+		j.Finish(trigger.Outcome{OK: false, Duration: time.Since(start), Reason: "base directory not writable"})
 		return
 	}
 
@@ -348,11 +374,11 @@ func (d *daemon) execute(shutdownCtx context.Context, j *job) {
 	if runOnce == nil {
 		runOnce = runRenovateOnce
 	}
-	ok, cancelled, groupSurvived := runOnce(d.runCtx, shutdownCtx, d.timeout, j.trigger, j.repos, j.env, d.newCmd)
+	ok, cancelled, groupSurvived := runOnce(d.runCtx, shutdownCtx, d.timeout, j.Trigger, j.Payload.Repos, j.Payload.Env, d.newCmd)
 	if cancelled {
 		// runRenovateOnce already reaped the child and logged the Warn; the
 		// health marker is left alone (beginShutdown pinned it unhealthy).
-		j.finish(runOutcome{ok: false, reason: shutdownCancelReason})
+		j.Finish(trigger.Outcome{OK: false, Reason: shutdownCancelReason})
 		return
 	}
 	if groupSurvived {
@@ -367,11 +393,11 @@ func (d *daemon) execute(shutdownCtx context.Context, j *job) {
 		d.halted = true
 		d.setRunHealth(false)
 		slog.Error("halting run admission: renovate run process group survived the kill sweep",
-			"trigger", j.trigger)
-		j.finish(runOutcome{ok: false, duration: time.Since(start), reason: containmentLostReason})
+			"trigger", j.Trigger)
+		j.Finish(trigger.Outcome{OK: false, Duration: time.Since(start), Reason: containmentLostReason})
 		d.fatal <- errContainmentLost
 		return
 	}
 	d.setRunHealth(ok)
-	j.finish(runOutcome{ok: ok, duration: time.Since(start)})
+	j.Finish(trigger.Outcome{OK: ok, Duration: time.Since(start)})
 }

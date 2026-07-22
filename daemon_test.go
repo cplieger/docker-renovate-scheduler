@@ -15,6 +15,7 @@ import (
 
 	"github.com/cplieger/health"
 	scheduler "github.com/cplieger/scheduler/v2"
+	"github.com/cplieger/scheduler/v2/trigger"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -25,7 +26,7 @@ func newTestDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, conte
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &daemon{
-		queue:   newRunQueue(queueCapacity),
+		queue:   trigger.NewQueue[runPayload](queueCapacity),
 		marker:  health.NewMarker(filepath.Join(t.TempDir(), "marker")),
 		newCmd:  runner,
 		runCtx:  context.WithoutCancel(ctx),
@@ -39,24 +40,24 @@ func newTestDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, conte
 	}()
 	t.Cleanup(func() {
 		cancel()
-		d.queue.close()
+		d.queue.Close()
 		<-done
 	})
 	return d, cancel, done
 }
 
 // submitWait submits a job and returns its outcome.
-func submitWait(t *testing.T, d *daemon, j *job) runOutcome {
+func submitWait(t *testing.T, d *daemon, j *trigger.Job[runPayload]) trigger.Outcome {
 	t.Helper()
-	if err := d.queue.submit(j); err != nil {
+	if err := d.queue.Submit(j); err != nil {
 		t.Fatalf("submit() = %v, want nil", err)
 	}
 	select {
-	case out := <-j.result:
+	case out := <-j.Result():
 		return out
 	case <-time.After(5 * time.Second):
 		t.Fatal("job result not delivered within 5s")
-		return runOutcome{}
+		return trigger.Outcome{}
 	}
 }
 
@@ -70,10 +71,10 @@ func TestExecutor_RunsJobsInOrderWithTheirScopes(t *testing.T) {
 
 	a := newJob("external", []string{"owner/a"}, nil)
 	b := newJob("external", nil, nil)
-	if out := submitWait(t, d, a); !out.ok {
+	if out := submitWait(t, d, a); !out.OK {
 		t.Errorf("job a outcome ok=false, want true")
 	}
-	if out := submitWait(t, d, b); !out.ok {
+	if out := submitWait(t, d, b); !out.OK {
 		t.Errorf("job b outcome ok=false, want true")
 	}
 	if len(argsLog) != 2 {
@@ -97,7 +98,7 @@ func TestExecutor_MarkerFollowsRunOutcome(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d := &daemon{
-		queue:   newRunQueue(queueCapacity),
+		queue:   trigger.NewQueue[runPayload](queueCapacity),
 		marker:  health.NewMarker(markerPath),
 		newCmd:  recordingRunner("true", nil),
 		runCtx:  context.WithoutCancel(ctx),
@@ -106,9 +107,9 @@ func TestExecutor_MarkerFollowsRunOutcome(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() { defer close(done); d.runJobs(ctx) }()
-	t.Cleanup(func() { cancel(); d.queue.close(); <-done })
+	t.Cleanup(func() { cancel(); d.queue.Close(); <-done })
 
-	if out := submitWait(t, d, newJob("external", nil, nil)); !out.ok {
+	if out := submitWait(t, d, newJob("external", nil, nil)); !out.OK {
 		t.Fatal("clean run reported ok=false")
 	}
 	if _, err := os.Stat(markerPath); err != nil {
@@ -116,7 +117,7 @@ func TestExecutor_MarkerFollowsRunOutcome(t *testing.T) {
 	}
 
 	d.newCmd = recordingRunner("false", nil)
-	if out := submitWait(t, d, newJob("external", nil, nil)); out.ok {
+	if out := submitWait(t, d, newJob("external", nil, nil)); out.OK {
 		t.Fatal("failed run reported ok=true")
 	}
 	if _, err := os.Stat(markerPath); !errors.Is(err, fs.ErrNotExist) {
@@ -140,10 +141,10 @@ func TestExecutor_BaseDirFailureFailsRunAndMarker(t *testing.T) {
 	d, _, _ := newTestDaemon(t, recordingRunner("true", &argsLog))
 
 	out := submitWait(t, d, newJob("external", nil, nil))
-	if out.ok {
+	if out.OK {
 		t.Error("outcome ok=true with an unwritable base dir, want false")
 	}
-	if out.reason == "" {
+	if out.Reason == "" {
 		t.Error("outcome carries no reason; the client would report a bare failure")
 	}
 	if len(argsLog) != 0 {
@@ -167,10 +168,10 @@ func TestExecutor_PreflightValidatesForwardedBaseDir(t *testing.T) {
 
 	j := newJob("external", nil, []string{"RENOVATE_BASE_DIR=" + file, "PATH=" + os.Getenv("PATH")})
 	out := submitWait(t, d, j)
-	if out.ok {
+	if out.OK {
 		t.Error("outcome ok=true with an unwritable forwarded base dir, want false")
 	}
-	if out.reason == "" {
+	if out.Reason == "" {
 		t.Error("outcome carries no reason; the client would report a bare failure")
 	}
 	if len(argsLog) != 0 {
@@ -194,24 +195,24 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 	d, cancel, _ := newTestDaemon(t, runner)
 
 	inflight := newJob("external", nil, nil)
-	if err := d.queue.submit(inflight); err != nil {
+	if err := d.queue.Submit(inflight); err != nil {
 		t.Fatalf("submit(inflight) = %v", err)
 	}
 	awaitEntered() // the run is now executing, post-Start
 
 	queued := newJob("external", []string{"owner/q"}, nil)
-	if err := d.queue.submit(queued); err != nil {
+	if err := d.queue.Submit(queued); err != nil {
 		t.Fatalf("submit(queued) = %v", err)
 	}
 
 	cancel()          // SIGTERM lands mid-run
 	d.beginShutdown() // runDaemon's immediate unhealthy transition
-	d.queue.close()   // daemon stops admission
+	d.queue.Close()   // daemon stops admission
 	release()         // the in-flight child finishes its pass
 
 	select {
-	case out := <-inflight.result:
-		if !out.ok {
+	case out := <-inflight.Result():
+		if !out.OK {
 			t.Errorf("in-flight run outcome ok=false, want true (it must drain, not be abandoned)")
 		}
 	case <-time.After(5 * time.Second):
@@ -221,11 +222,11 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 		t.Error("health marker became healthy after shutdown began (the draining run's completion must not overwrite the shutdown state)")
 	}
 	select {
-	case out := <-queued.result:
-		if out.ok {
+	case out := <-queued.Result():
+		if out.OK {
 			t.Error("queued job outcome ok=true after shutdown, want cancelled")
 		}
-		if out.reason == "" {
+		if out.Reason == "" {
 			t.Error("cancelled job carries no reason")
 		}
 	case <-time.After(5 * time.Second):
@@ -245,7 +246,7 @@ func TestExecutor_ShutdownDuringPreflightNeverStartsRenovate(t *testing.T) {
 
 	var argsLog [][]string
 	d := &daemon{
-		queue:   newRunQueue(queueCapacity),
+		queue:   trigger.NewQueue[runPayload](queueCapacity),
 		marker:  health.NewMarker(filepath.Join(t.TempDir(), "marker")),
 		newCmd:  recordingRunner("true", &argsLog),
 		runCtx:  context.WithoutCancel(ctx),
@@ -260,12 +261,12 @@ func TestExecutor_ShutdownDuringPreflightNeverStartsRenovate(t *testing.T) {
 		t.Error("Renovate was invoked despite shutdown being signalled before launch")
 	}
 	select {
-	case out := <-j.result:
-		if out.ok {
+	case out := <-j.Result():
+		if out.OK {
 			t.Error("outcome ok=true, want a cancelled result")
 		}
-		if want := "cancelled: scheduler shutting down"; out.reason != want {
-			t.Errorf("outcome reason = %q, want %q", out.reason, want)
+		if want := "cancelled: scheduler shutting down"; out.Reason != want {
+			t.Errorf("outcome reason = %q, want %q", out.Reason, want)
 		}
 	default:
 		t.Fatal("no result delivered for the job cancelled at the launch boundary")
@@ -276,7 +277,7 @@ func TestExecutor_ShutdownDuringPreflightNeverStartsRenovate(t *testing.T) {
 // submission (queue full) is logged and skipped — the tick must not panic or
 // block; the next interval provides freshness.
 func TestTick_SkipsWhenQueueRejects(t *testing.T) {
-	d := &daemon{queue: newRunQueue(0)} // zero capacity: every submit is rejected
+	d := &daemon{queue: trigger.NewQueue[runPayload](0)} // zero capacity: every submit is rejected
 	done := make(chan struct{})
 	go func() { defer close(done); d.tick("interval") }()
 	select {
@@ -305,7 +306,7 @@ func TestStartTicker_FiresStartupThenInterval(t *testing.T) {
 	stop()
 	<-tickerDone
 	cancel()
-	d.queue.close()
+	d.queue.Close()
 	<-execDone
 
 	triggers := startTriggers(rec)
@@ -321,14 +322,14 @@ func TestStartTicker_FiresStartupThenInterval(t *testing.T) {
 // ticker: the returned channel is already closed and nothing is submitted.
 func TestStartTicker_DisabledInExternalMode(t *testing.T) {
 	t.Parallel()
-	d := &daemon{queue: newRunQueue(4)}
+	d := &daemon{queue: trigger.NewQueue[runPayload](4)}
 	done := startTicker(context.Background(), d, time.Millisecond, false)
 	select {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("startTicker(enabled=false) did not return a closed channel")
 	}
-	if n := len(d.queue.jobs); n != 0 {
+	if n := len(d.queue.Jobs()); n != 0 {
 		t.Errorf("%d jobs submitted in external mode, want 0", n)
 	}
 }
@@ -521,7 +522,7 @@ func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	invocations := 0
 	d := &daemon{
-		queue:   newRunQueue(queueCapacity),
+		queue:   trigger.NewQueue[runPayload](queueCapacity),
 		marker:  health.NewMarker(filepath.Join(t.TempDir(), "marker")),
 		newCmd:  recordingRunner("true", nil),
 		runCtx:  context.WithoutCancel(ctx),
@@ -535,28 +536,28 @@ func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
 
 	first := newJob("external", nil, nil)
 	second := newJob("external", []string{"owner/q"}, nil)
-	if err := d.queue.submit(first); err != nil {
+	if err := d.queue.Submit(first); err != nil {
 		t.Fatalf("submit(first) = %v", err)
 	}
-	if err := d.queue.submit(second); err != nil {
+	if err := d.queue.Submit(second); err != nil {
 		t.Fatalf("submit(second) = %v", err)
 	}
 
 	done := make(chan struct{})
 	go func() { defer close(done); d.runJobs(ctx) }()
-	t.Cleanup(func() { cancel(); d.queue.close(); <-done })
+	t.Cleanup(func() { cancel(); d.queue.Close(); <-done })
 
 	for _, tc := range []struct {
 		name string
-		j    *job
+		j    *trigger.Job[runPayload]
 	}{{"surviving run", first}, {"queued waiter", second}} {
 		select {
-		case out := <-tc.j.result:
-			if out.ok {
+		case out := <-tc.j.Result():
+			if out.OK {
 				t.Errorf("%s outcome ok=true, want false", tc.name)
 			}
-			if out.reason != containmentLostReason {
-				t.Errorf("%s outcome reason = %q, want %q", tc.name, out.reason, containmentLostReason)
+			if out.Reason != containmentLostReason {
+				t.Errorf("%s outcome reason = %q, want %q", tc.name, out.Reason, containmentLostReason)
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatalf("%s result not delivered", tc.name)

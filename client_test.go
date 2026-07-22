@@ -3,7 +3,6 @@ package main
 import (
 	"log/slog"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -40,42 +39,6 @@ func TestRunClient_DaemonUnreachableExitsOne(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "absent.sock")
 	if code := runClient(sock, nil); code != 1 {
 		t.Errorf("runClient() = %d with no daemon, want 1", code)
-	}
-}
-
-// TestAwaitResult_StreamHandling pins the client's event-stream tolerance
-// half of the trigger contract: an unrecognized event is ignored (forward
-// compatibility, never fatal), while a stream that ends before the done event
-// — the daemon died or was stopped mid-run — exits 1 so the trigger reports a
-// failed job instead of a false success.
-func TestAwaitResult_StreamHandling(t *testing.T) {
-	tests := []struct {
-		name   string
-		stream string
-		want   int
-	}{
-		{
-			name:   "unknown events are ignored, not fatal",
-			stream: `{"event":"queued"}` + "\n" + `{"event":"future-extension"}` + "\n" + `{"event":"done","ok":true}` + "\n",
-			want:   0,
-		},
-		{
-			name:   "stream truncated before done exits one",
-			stream: `{"event":"queued"}` + "\n" + `{"event":"started"}` + "\n",
-			want:   1,
-		},
-		{
-			name:   "immediate EOF exits one",
-			stream: "",
-			want:   1,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := awaitResult(strings.NewReader(tt.stream), nil); got != tt.want {
-				t.Errorf("awaitResult(%q) = %d, want %d", tt.stream, got, tt.want)
-			}
-		})
 	}
 }
 
