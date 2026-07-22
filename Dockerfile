@@ -62,8 +62,6 @@ RUN find /opt/containerbase -name docker -prune -exec rm -rf {} + \
 # working.
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 
-COPY --chmod=755 --from=go-builder /docker-renovate-scheduler /usr/local/bin/docker-renovate-scheduler
-
 # Renovate stores repo clones and caches under RENOVATE_BASE_DIR. Persisting
 # it on a volume lets runs git-fetch instead of git-clone and reuse the
 # datasource/tool caches. Create it owned by the image's non-root user
@@ -86,6 +84,8 @@ ENV RENOVATE_BASE_DIR=/data
 ARG GOLANG_VERSION=1.26.5
 RUN install-tool golang "${GOLANG_VERSION}"
 ENV GOTOOLCHAIN=auto
+
+COPY --chmod=755 --from=go-builder /docker-renovate-scheduler /usr/local/bin/docker-renovate-scheduler
 
 USER 12021
 

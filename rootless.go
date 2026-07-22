@@ -22,7 +22,9 @@ const defaultImageUID = 12021
 // days later. One advisory startup warning turns that delayed, cross-repo
 // failure into an immediate, local signal. Advisory only; never blocks boot.
 //
-// Strategy (one parse, one decision, values never read):
+// Strategy (one decision, values never read; customEnvVarNames is the only
+// parser -- the soft-warning branch invokes it a second time for its log
+// attribute's name list):
 //
 //	parse    RENOVATE_CUSTOM_ENV_VARIABLES -> sorted JSON-object key names
 //	         (undecodable or non-object input yields no names)

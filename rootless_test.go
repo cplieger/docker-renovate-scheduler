@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -151,6 +152,34 @@ func TestCacheLikeEnvVar(t *testing.T) {
 		if got := cacheLikeEnvVar(tc.name); got != tc.want {
 			t.Errorf("cacheLikeEnvVar(%q) = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestCustomEnvVarNames pins the single-parse contract directly: the JSON
+// object's key names come back SORTED (the soft warning joins them into one
+// log attribute, and Go map iteration order is randomized, so the sort is
+// what keeps that operator-facing line deterministic), and undecodable or
+// non-object input yields no names.
+func TestCustomEnvVarNames(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"multiple keys come back sorted", `{"npm_config_cache":"/n","GOCACHE":"/g","HTTP_PROXY":"p"}`, []string{"GOCACHE", "HTTP_PROXY", "npm_config_cache"}},
+		{"single key", `{"GOPATH":"/go"}`, []string{"GOPATH"}},
+		{"empty object yields no names", `{}`, nil},
+		{"undecodable input yields no names", `not json`, nil},
+		{"non-object JSON yields no names", `["GOCACHE"]`, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := customEnvVarNames(tc.raw); !slices.Equal(got, tc.want) {
+				t.Errorf("customEnvVarNames(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
 	}
 }
 
