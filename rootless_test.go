@@ -9,6 +9,15 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
+// TestRootlessCacheRisk pins the classification strategy tier by tier (see
+// rootless.go's section comment): UID gates, mechanism-not-engaged (loud),
+// engaged-without-a-cache-name (soft), and engaged (silent). The "engaged"
+// rows deliberately sweep every value shape — real path, empty string, null,
+// number, HOME:"/", a cache-control-style name — because value-blindness IS
+// the contract (h-f1, 2026-07-22): engagement is judged by NAMES only, and
+// value correctness stays the operator's responsibility. If one of those
+// rows ever fails, the line in the sand moved; that must be a deliberate,
+// user-approved decision, not a drive-by.
 func TestRootlessCacheRisk(t *testing.T) {
 	const customUID = 568
 
@@ -26,6 +35,7 @@ func TestRootlessCacheRisk(t *testing.T) {
 		euid   int
 		want   rootlessRisk
 	}{
+		// UID gates: the writable-home UIDs are silent whatever the env says.
 		{
 			name: "default image UID never warns",
 			euid: defaultImageUID, getenv: noEnv, want: rootlessRiskNone,
@@ -34,6 +44,9 @@ func TestRootlessCacheRisk(t *testing.T) {
 			name: "root never warns",
 			euid: 0, getenv: noEnv, want: rootlessRiskNone,
 		},
+		// Mechanism not engaged: no RENOVATE_CUSTOM_ENV_VARIABLES at all.
+		// Plain scheduler-side cache env vars do not count: Renovate forwards
+		// only an allowlist to artifact subprocesses, so they prove nothing.
 		{
 			name: "custom UID with no cache redirection warns loudly",
 			euid: customUID, getenv: noEnv, want: rootlessRiskNoRedirection,
@@ -46,6 +59,24 @@ func TestRootlessCacheRisk(t *testing.T) {
 			name: "custom UID with npm_config_cache but no forwarding still warns loudly",
 			euid: customUID, getenv: env(map[string]string{"npm_config_cache": "/data/.npm"}), want: rootlessRiskNoRedirection,
 		},
+		// Mechanism engaged, no cache/path variable named: soft warning.
+		// Undecodable and empty-object input land here too — they name
+		// nothing, and Renovate itself fails loudly on JSON it cannot parse.
+		{
+			name: "custom UID forwarding proxies only warns softly",
+			euid: customUID, getenv: custom(`{"HTTP_PROXY":"http://proxy:3128","NO_PROXY":"localhost"}`), want: rootlessRiskNoCacheVars,
+		},
+		{
+			name: "custom UID with undecodable JSON warns softly (redirects no cache)",
+			euid: customUID, getenv: custom(`not json`), want: rootlessRiskNoCacheVars,
+		},
+		{
+			name: "custom UID with empty JSON object warns softly",
+			euid: customUID, getenv: custom(`{}`), want: rootlessRiskNoCacheVars,
+		},
+		// Mechanism engaged: a cache/path variable is NAMED, so the warning is
+		// suppressed regardless of value — the value-blind rows pin the line
+		// in the sand, not an oversight.
 		{
 			name: "custom UID forwarding a cache variable does not warn",
 			euid: customUID, getenv: custom(`{"GOCACHE":"/data/.cache/go-build"}`), want: rootlessRiskNone,
@@ -59,16 +90,24 @@ func TestRootlessCacheRisk(t *testing.T) {
 			euid: customUID, getenv: custom(`{"npm_config_cache":"/data/.npm"}`), want: rootlessRiskNone,
 		},
 		{
-			name: "custom UID forwarding proxies only warns softly",
-			euid: customUID, getenv: custom(`{"HTTP_PROXY":"http://proxy:3128","NO_PROXY":"localhost"}`), want: rootlessRiskNoCacheVars,
+			name: "value-blind by contract: empty-string cache value still suppresses",
+			euid: customUID, getenv: custom(`{"GOCACHE":""}`), want: rootlessRiskNone,
 		},
 		{
-			name: "custom UID with undecodable JSON warns softly (redirects no cache)",
-			euid: customUID, getenv: custom(`not json`), want: rootlessRiskNoCacheVars,
+			name: "value-blind by contract: null cache value still suppresses",
+			euid: customUID, getenv: custom(`{"GOCACHE":null}`), want: rootlessRiskNone,
 		},
 		{
-			name: "custom UID with empty JSON object warns softly",
-			euid: customUID, getenv: custom(`{}`), want: rootlessRiskNoCacheVars,
+			name: "value-blind by contract: non-string cache value still suppresses",
+			euid: customUID, getenv: custom(`{"GOCACHE":123}`), want: rootlessRiskNone,
+		},
+		{
+			name: "value-blind by contract: HOME=/ still suppresses",
+			euid: customUID, getenv: custom(`{"HOME":"/"}`), want: rootlessRiskNone,
+		},
+		{
+			name: "open-ended heuristic: any CACHE-containing name suppresses (CACHE_BUST)",
+			euid: customUID, getenv: custom(`{"CACHE_BUST":"1"}`), want: rootlessRiskNone,
 		},
 	}
 
@@ -82,6 +121,10 @@ func TestRootlessCacheRisk(t *testing.T) {
 	}
 }
 
+// TestCacheLikeEnvVar pins the name heuristic exactly as documented: an
+// open-ended CACHE substring (which deliberately also matches cache-control
+// style names — the accepted false-positive direction) plus the well-known
+// path/home variables.
 func TestCacheLikeEnvVar(t *testing.T) {
 	tests := []struct {
 		name string
@@ -96,9 +139,12 @@ func TestCacheLikeEnvVar(t *testing.T) {
 		{"CARGO_HOME", true},
 		{"GRADLE_USER_HOME", true},
 		{"COMPOSER_HOME", true},
+		{"CACHE_BUST", true},
+		{"NO_CACHE", true},
 		{"HTTP_PROXY", false},
 		{"NO_PROXY", false},
 		{"RENOVATE_TOKEN", false},
+		{"RUSTUP_HOME", false},
 		{"", false},
 	}
 	for _, tc := range tests {

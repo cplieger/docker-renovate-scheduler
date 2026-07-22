@@ -59,7 +59,7 @@ If you override the user (Compose `user:`) to match host volume ownership (e.g. 
 - containerbase's on-demand tool installs fail (`binarySource=install` can't write `/opt/containerbase`); and
 - lockfile/artifact regeneration fails: `go mod tidy` can't refresh `go.sum`, `npm install` can't refresh `package-lock.json`. The dependency PR is still raised, but manifest-only (`go.mod` / `package.json`), and then fails the consuming repo's CI (`missing go.sum entry`, or `npm ci` reporting the lock out of sync).
 
-The scheduler **logs a startup warning** when it detects this state (a non-default UID with an unwritable home and no cache redirection), so the misconfiguration surfaces immediately instead of as a broken PR days later. A `RENOVATE_CUSTOM_ENV_VARIABLES` that names no cache or toolchain-path variable (for example, one that only forwards `HTTP_PROXY`) still gets a softer warning — the caches are still unredirected.
+The scheduler **logs a startup warning** when it detects this state (a non-default UID whose `RENOVATE_CUSTOM_ENV_VARIABLES` names no cache or toolchain-path variable), so the misconfiguration surfaces immediately instead of as a broken PR days later. A `RENOVATE_CUSTOM_ENV_VARIABLES` that names no cache or toolchain-path variable (for example, one that only forwards `HTTP_PROXY`) still gets a softer warning — the caches are still unredirected. The check is name-based: the scheduler verifies you engaged the mitigation (a cache variable is named), not that its value is correct — an empty or mistyped path is your configuration to verify.
 
 If you must run as a custom UID, use the tools baked into the image and route every cache to a writable, mounted volume:
 
