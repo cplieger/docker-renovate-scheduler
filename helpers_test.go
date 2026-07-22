@@ -11,18 +11,33 @@ import (
 	scheduler "github.com/cplieger/scheduler/v2"
 )
 
-// testSocketPath returns a unix-socket path short enough for sun_path
-// (108 bytes) regardless of TMPDIR: t.TempDir() embeds the full test name,
-// which overflows the limit under a long TMPDIR and fails bind with EINVAL.
-// /tmp matches where the production socket lives.
+// maxSunPath is the longest usable unix-socket path: Linux sun_path is
+// 108 bytes including the trailing NUL.
+const maxSunPath = 107
+
+// testSocketPath returns a unix-socket path short enough for sun_path:
+// t.TempDir() embeds the full test name, which overflows the limit under a
+// long TMPDIR and fails bind with EINVAL. The helper honors a configured
+// TMPDIR when the short random directory it yields still fits sun_path
+// (keeping test scratch inside a workspace-scoped root), and falls back to
+// /tmp — where the production socket lives — only when TMPDIR is too deep.
 func testSocketPath(t *testing.T) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("/tmp", "drs-sock-")
+	dir, err := os.MkdirTemp("", "drs-sock-")
 	if err != nil {
 		t.Fatalf("mktemp for socket dir: %v", err)
 	}
+	path := filepath.Join(dir, "s.sock")
+	if len(path) > maxSunPath {
+		// TMPDIR is too deep for sun_path; fall back to /tmp.
+		_ = os.RemoveAll(dir)
+		if dir, err = os.MkdirTemp("/tmp", "drs-sock-"); err != nil {
+			t.Fatalf("mktemp for socket dir: %v", err)
+		}
+		path = filepath.Join(dir, "s.sock")
+	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return filepath.Join(dir, "s.sock")
+	return path
 }
 
 // shellAssertRunner returns a CommandRunner whose child is a shell running
