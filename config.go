@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/cplieger/atomicfile/v2"
 	"github.com/cplieger/envx"
 	scheduler "github.com/cplieger/scheduler/v3"
 	"github.com/cplieger/slogx"
@@ -178,7 +180,7 @@ func verifyBaseDirAt(ctx context.Context, dir string) error {
 	done := make(chan error, 1)
 	go func() {
 		defer func() { <-verifySlot }()
-		done <- probeBaseDirWrite(dir)
+		done <- probeBaseDirWrite(ctx, dir)
 	}()
 
 	select {
@@ -195,28 +197,67 @@ func verifyBaseDirAt(ctx context.Context, dir string) error {
 // directory entry yet reject the first data write, surface a delayed failure
 // only at Sync/Close, or deny cleanup; each of those breaks the preflight
 // promise ("Renovate can write here"), so each fails the probe.
-func probeBaseDirWrite(dir string) (err error) {
-	if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
-		return fmt.Errorf("mkdir base dir %q: %w", dir, mkErr)
-	}
-	f, err := os.CreateTemp(dir, ".write_test-*")
+//
+// The ladder itself is atomicfile.ProbeWritable, whose ProbeStage set covers
+// every stage this probe distinguishes (mkdir, create, write, sync, close,
+// remove) with the same first-failure-wins precedence the hand-rolled probe
+// had; baseDirProbeStageError keeps each stage's error worded as before. The
+// probe file also carries atomicfile's own temp-name shape instead of an
+// app-invented ".write_test-*", so a leftover is recognisable as a package
+// temp rather than as a name nothing in the fleet knows (nothing in this repo
+// sweeps RENOVATE_BASE_DIR — see the note on baseDirProbeStageError's remove
+// stage).
+//
+// ctx bounds only whether the probe is ATTEMPTED: atomicfile checks it once,
+// before creating anything, and the stages themselves are uninterruptible
+// filesystem calls — which is why verifyBaseDirAt still needs its own slot and
+// timeout around this call.
+func probeBaseDirWrite(ctx context.Context, dir string) error {
+	res, err := atomicfile.ProbeWritable(ctx, dir, atomicfile.WithMkdirMode(0o700))
 	if err != nil {
-		return fmt.Errorf("base dir %q not writable: %w", dir, err)
+		// A non-nil error means the probe was never attempted (an empty dir, a
+		// context already done). It carries NO verdict on writability, so it
+		// must not be reported with any of the stage diagnoses below — a
+		// cancelled preflight is not a read-only volume.
+		return fmt.Errorf("base dir %q write probe not attempted: %w", dir, err)
 	}
-	testFile := f.Name()
-	defer func() {
-		if closeErr := f.Close(); err == nil && closeErr != nil {
-			err = fmt.Errorf("close base-dir probe %q: %w", testFile, closeErr)
-		}
-		if removeErr := os.Remove(testFile); err == nil && removeErr != nil {
-			err = fmt.Errorf("remove base-dir probe %q: %w", testFile, removeErr)
-		}
-	}()
-	if _, writeErr := f.Write([]byte{0}); writeErr != nil {
-		return fmt.Errorf("write base-dir probe %q: %w", testFile, writeErr)
+	return baseDirProbeStageError(dir, res)
+}
+
+// baseDirProbeStageError renders one probe outcome as this app's error for the
+// stage that failed, so every stage stays distinguishable in the log exactly as
+// it was when the probe was hand-rolled: the create failure keeps the
+// actionable "not writable" wording logBaseDirError's hint is written against,
+// and each later stage names itself and the probe file.
+//
+// Every stage is fatal, unchanged: the preflight promise is that Renovate can
+// write in this directory AND clean up after itself, and a directory that
+// denies the unlink accumulates Renovate's own scratch until the volume fills.
+// That also makes the leak reclaimability question moot in practice here — the
+// only way this probe leaves a file behind is a denied unlink, which a sweep
+// could not remove either.
+func baseDirProbeStageError(dir string, res atomicfile.ProbeResult) error {
+	if res.OK() {
+		return nil
 	}
-	if syncErr := f.Sync(); syncErr != nil {
-		return fmt.Errorf("sync base-dir probe %q: %w", testFile, syncErr)
+	probe := filepath.Join(res.Dir, res.Name)
+	switch res.Stage {
+	case atomicfile.ProbeStageMkdir:
+		return fmt.Errorf("mkdir base dir %q: %w", dir, res.Err)
+	case atomicfile.ProbeStageCreate:
+		return fmt.Errorf("base dir %q not writable: %w", dir, res.Err)
+	case atomicfile.ProbeStageWrite:
+		return fmt.Errorf("write base-dir probe %q: %w", probe, res.Err)
+	case atomicfile.ProbeStageSync:
+		return fmt.Errorf("sync base-dir probe %q: %w", probe, res.Err)
+	case atomicfile.ProbeStageClose:
+		return fmt.Errorf("close base-dir probe %q: %w", probe, res.Err)
+	case atomicfile.ProbeStageRemove:
+		return fmt.Errorf("remove base-dir probe %q: %w", probe, res.Err)
+	default:
+		// Unreachable today (ProbeStageNone is handled by res.OK() above), and
+		// deliberately not a silent nil: a stage the library adds later must
+		// surface as a failure rather than as a passing preflight.
+		return fmt.Errorf("base dir %q write probe failed at %s: %w", dir, res.Stage, res.Err)
 	}
-	return nil
 }
