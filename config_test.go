@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cplieger/atomicfile/v2"
 )
 
 func TestLoadInterval(t *testing.T) {
@@ -139,11 +142,15 @@ func TestVerifyBaseDir(t *testing.T) {
 // TestProbeBaseDirWrite pins the staged write probe at the helper boundary:
 // a clean probe writes, syncs, closes, and removes its file (no residue), and
 // a directory that cannot take a new file reports the actionable "not
-// writable" error.
+// writable" error. The residue assertion is deliberately name-agnostic now
+// that the ladder is atomicfile.ProbeWritable — the probe file is the
+// library's temp shape, not this app's ".write_test-*", and asserting on an
+// empty directory pins the property that matters (nothing is left in
+// Renovate's data dir) without pinning a name this app no longer owns.
 func TestProbeBaseDirWrite(t *testing.T) {
 	t.Run("writes, syncs, and cleans up its probe file", func(t *testing.T) {
 		dir := t.TempDir()
-		if err := probeBaseDirWrite(dir); err != nil {
+		if err := probeBaseDirWrite(context.Background(), dir); err != nil {
 			t.Fatalf("probeBaseDirWrite() = %v, want nil", err)
 		}
 		entries, err := os.ReadDir(dir)
@@ -164,7 +171,7 @@ func TestProbeBaseDirWrite(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-		err := probeBaseDirWrite(dir)
+		err := probeBaseDirWrite(context.Background(), dir)
 		if err == nil {
 			t.Fatal("probeBaseDirWrite() = nil, want error when the write probe cannot be created")
 		}
@@ -172,6 +179,83 @@ func TestProbeBaseDirWrite(t *testing.T) {
 			t.Errorf("probeBaseDirWrite() error = %v, want it to mention %q", err, "not writable")
 		}
 	})
+	// A probe that was never ATTEMPTED is not a permission diagnosis: the
+	// library returns its error return (as opposed to a stage outcome) only
+	// when it created nothing at all, so wording that as "not writable" would
+	// blame a perfectly good volume for a cancelled preflight — the exact
+	// misreport the hint in logBaseDirError would send an operator chasing.
+	t.Run("a cancelled context reports the probe was not attempted, not a verdict", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		dir := t.TempDir()
+
+		err := probeBaseDirWrite(ctx, dir)
+		if err == nil {
+			t.Fatal("probeBaseDirWrite() = nil with a cancelled context, want an error")
+		}
+		if !strings.Contains(err.Error(), "not attempted") {
+			t.Errorf("probeBaseDirWrite() error = %v, want it to mention %q", err, "not attempted")
+		}
+		if strings.Contains(err.Error(), "not writable") {
+			t.Errorf("probeBaseDirWrite() error = %v, must not report a writability verdict", err)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("probeBaseDirWrite() error = %v, want it to wrap context.Canceled", err)
+		}
+	})
+}
+
+// TestBaseDirProbeStageError pins that every stage of the probe ladder stays
+// DISTINGUISHABLE after delegating the ladder to atomicfile: the six stages
+// this app's hand-rolled probe reported separately must still produce six
+// distinct, stage-naming errors wrapping the filesystem cause, and a passing
+// probe must still produce no error. This is the regression guard for the
+// adoption itself — a mapping that collapsed two stages onto one message, or
+// swallowed a teardown failure the way the pre-adoption probes in the fleet
+// did, would leave the preflight silently weaker while every other test passed.
+func TestBaseDirProbeStageError(t *testing.T) {
+	cause := errors.New("boom")
+	stages := []struct {
+		stage    atomicfile.ProbeStage
+		wantText string
+	}{
+		{atomicfile.ProbeStageMkdir, "mkdir base dir"},
+		{atomicfile.ProbeStageCreate, "not writable"},
+		{atomicfile.ProbeStageWrite, "write base-dir probe"},
+		{atomicfile.ProbeStageSync, "sync base-dir probe"},
+		{atomicfile.ProbeStageClose, "close base-dir probe"},
+		{atomicfile.ProbeStageRemove, "remove base-dir probe"},
+	}
+
+	if err := baseDirProbeStageError("/data", atomicfile.ProbeResult{}); err != nil {
+		t.Errorf("baseDirProbeStageError(passing probe) = %v, want nil", err)
+	}
+
+	seen := make(map[string]atomicfile.ProbeStage, len(stages))
+	for _, s := range stages {
+		res := atomicfile.ProbeResult{
+			Dir:   "/data",
+			Name:  atomicfile.TempName(),
+			Stage: s.stage,
+			Err:   cause,
+		}
+		err := baseDirProbeStageError("/data", res)
+		if err == nil {
+			t.Errorf("baseDirProbeStageError(%s) = nil, want an error", s.stage)
+			continue
+		}
+		if !strings.Contains(err.Error(), s.wantText) {
+			t.Errorf("baseDirProbeStageError(%s) = %v, want it to mention %q", s.stage, err, s.wantText)
+		}
+		if !errors.Is(err, cause) {
+			t.Errorf("baseDirProbeStageError(%s) = %v, want it to wrap the filesystem cause", s.stage, err)
+		}
+		if prev, dup := seen[err.Error()]; dup {
+			t.Errorf("stages %s and %s produce the same error %q; each stage must stay distinguishable",
+				prev, s.stage, err)
+		}
+		seen[err.Error()] = s.stage
+	}
 }
 
 // TestLoadRunTimeout_ZeroIsNonPositiveAndUsesDefault pins the non-positive
