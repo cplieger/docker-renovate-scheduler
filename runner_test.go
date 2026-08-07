@@ -388,68 +388,140 @@ func TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild(t *testing.T) {
 	}
 }
 
-// TestStopUncommittedRun_SweepsTermIgnoringDescendant is the regression test
-// for the partial-group shutdown case: the group leader honors SIGTERM and
-// exits promptly while a same-group descendant (a package manager, here a
-// TERM-ignoring subshell) survives it. stopUncommittedRun must not return on
-// the leader's exit alone — it must keep the DefaultGrace window open for
-// the WHOLE group and SIGKILL-sweep the survivors on expiry, or the
-// descendant keeps writing the base dir past shutdown. The helper is driven
-// directly rather than through runRenovateOnce: the post-Start handshake
-// sends SIGTERM microseconds after Start, racing the leader's trap install,
-// so the trap-and-survive setup needs a readiness handshake BEFORE the
-// signal — the runRenovateOnce routing itself is already pinned by
-// TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild. The child records
-// the descendant's PID before signalling ready; after stopUncommittedRun
-// returns, the leader must be reaped and the descendant gone.
-func TestStopUncommittedRun_SweepsTermIgnoringDescendant(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	descPath := dir + "/desc.pid"
-	readyPath := dir + "/ready"
-	// $1 = descendant PID file, $2 = readiness marker. The subshell ignores
-	// TERM and respawns its sleep, so only a group SIGKILL removes it; the
-	// leader traps TERM and exits promptly (sleep 30 & wait fires the trap
-	// as soon as the signal lands).
-	script := `( trap '' TERM; while :; do sleep 1; done ) & echo $! > "$1"; trap 'exit 0' TERM; : > "$2"; sleep 30 & wait`
-	cmd := defaultCommandRunner(context.Background(), "sh", "-c", script, "sh", descPath, readyPath)
+// groupMember is a SIGTERM-ignoring process that has JOINED the runner child's
+// process group while remaining a direct child of the TEST binary, so the test
+// itself reaps it. A reaper goroutine collects it the instant it dies and
+// records when, which is the instant the process group actually became empty.
+type groupMember struct {
+	pid    int
+	cmd    *exec.Cmd
+	reaped chan time.Time
+}
+
+// startTermIgnoringGroupMember adds a SIGTERM-ignoring process to pgid's
+// process group, modelling the package-manager grandchild that shrugs off the
+// runner's group SIGTERM and has to be SIGKILL-swept.
+//
+// It joins the group as a direct child of the TEST binary rather than being
+// forked as a descendant of the runner's own child, and that is what makes
+// every group-death assertion here deterministic. A descendant is orphaned the
+// moment the group leader exits and reparents to PID 1 — and a zombie is STILL
+// a process-group member as far as kill(2) is concerned, so
+// runProcessGroupGone cannot see the group empty until the ambient reaper
+// collects it. That probe IS the runner's group-death observation, so a fixture
+// built on an orphaned descendant measures the ambient reaper instead of the
+// code under test: it fails outright wherever PID 1 does not reap (any
+// app-as-PID-1 container) and flakes on a loaded CI runner, where the reap can
+// miss the bounded window. A direct child is reaped here, at a known instant.
+func startTermIgnoringGroupMember(t *testing.T, pgid int) *groupMember {
+	t.Helper()
+	readyPath := t.TempDir() + "/member-ready"
+	// exec replaces the shell, so the surviving process has no children of
+	// its own to orphan, and an ignored disposition survives exec, so the
+	// sleep inherits the TERM ignore.
+	cmd := exec.Command("sh", "-c", `trap '' TERM; : > "$1"; exec sleep 30`, "sh", readyPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start group member: %v", err)
+	}
+	m := &groupMember{pid: cmd.Process.Pid, cmd: cmd, reaped: make(chan time.Time, 1)}
+	go func() {
+		_ = cmd.Wait()
+		m.reaped <- time.Now()
+	}()
+	t.Cleanup(func() { _ = syscall.Kill(m.pid, syscall.SIGKILL) })
+
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(readyPath)
+		return err == nil
+	}, "group member never installed its SIGTERM ignore")
+	// Guard against a vacuous fixture: a member that failed to join the group
+	// leaves the group empty as soon as the runner's child is reaped, and
+	// every assertion downstream then passes for the wrong reason.
+	if got, err := syscall.Getpgid(m.pid); err != nil || got != pgid {
+		t.Fatalf("group member pgid = (%d, %v), want (%d, nil)", got, err, pgid)
+	}
+	return m
+}
+
+// awaitReap waits for the reaper goroutine to collect the member and returns
+// the instant it did. The member outlives the runner's own child in every
+// fixture here, so that instant is when the process group emptied.
+func (m *groupMember) awaitReap(t *testing.T) time.Time {
+	t.Helper()
+	select {
+	case at := <-m.reaped:
+		return at
+	case <-time.After(30 * time.Second):
+		t.Fatal("group member was never reaped")
+		return time.Time{}
+	}
+}
+
+// exitSignal reports the signal that killed the member, or 0 if it exited on
+// its own. Valid only after awaitReap (the channel receive orders the
+// ProcessState write from the reaper goroutine before this read).
+func (m *groupMember) exitSignal() syscall.Signal {
+	ws, ok := m.cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() {
+		return 0
+	}
+	return ws.Signal()
+}
+
+// startTermHonoringChild starts the stand-in for the runner's own Renovate
+// child: a bare sleep, which takes the default SIGTERM disposition (so the
+// group TERM removes it at once) and forks no children of its own to orphan.
+// Returns the command and a func the test calls once stopUncommittedRun has
+// reaped it, so an early t.Fatal cannot leak the group.
+func startTermHonoringChild(t *testing.T) (*exec.Cmd, func()) {
+	t.Helper()
+	cmd := defaultCommandRunner(context.Background(), "sleep", "30")
 	cmd.Stdout, cmd.Stderr = nil, nil
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Start() = %v", err)
 	}
-	stopped := false
+	reaped := false
 	t.Cleanup(func() {
-		if !stopped {
+		if !reaped {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			_ = cmd.Wait()
 		}
 	})
-	waitFor(t, 5*time.Second, func() bool {
-		_, err := os.Stat(readyPath)
-		return err == nil
-	}, "child did not finish its trap/descendant setup")
-	pidBytes, err := os.ReadFile(descPath)
-	if err != nil {
-		t.Fatalf("descendant pid not recorded: %v", err)
-	}
-	descPid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
-	if err != nil {
-		t.Fatalf("descendant pid %q not a PID: %v", pidBytes, err)
-	}
+	return cmd, func() { reaped = true }
+}
+
+// TestStopUncommittedRun_SweepsTermIgnoringGroupMember is the regression test
+// for the partial-group shutdown case: the runner's own child honors SIGTERM
+// and is reaped promptly while a same-group process (a package manager, here a
+// TERM-ignoring sleep) survives it. stopUncommittedRun must not return on the
+// child's exit alone — it must hold the DefaultGrace window open for the WHOLE
+// group and SIGKILL-sweep the survivors on expiry, or the survivor keeps
+// writing the base dir past shutdown. The helper is driven directly rather
+// than through runRenovateOnce: the post-Start handshake sends SIGTERM
+// microseconds after Start, so the survive-the-TERM setup needs to be in place
+// BEFORE the signal — the runRenovateOnce routing itself is already pinned by
+// TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild.
+func TestStopUncommittedRun_SweepsTermIgnoringGroupMember(t *testing.T) {
+	t.Parallel()
+	cmd, markReaped := startTermHonoringChild(t)
+	member := startTermIgnoringGroupMember(t, cmd.Process.Pid)
 
 	start := time.Now()
 	stopUncommittedRun(cmd)
-	stopped = true
+	markReaped()
 	elapsed := time.Since(start)
 
 	if cmd.ProcessState == nil {
-		t.Fatal("leader not reaped: Wait never completed")
+		t.Fatal("runner child not reaped: Wait never completed")
 	}
-	// The SIGKILLed orphan may linger as a zombie until init reaps it; poll
-	// briefly rather than asserting instantly.
-	waitFor(t, 5*time.Second, func() bool {
-		return errors.Is(syscall.Kill(descPid, 0), syscall.ESRCH)
-	}, "TERM-ignoring descendant survived stopUncommittedRun's group sweep")
+	member.awaitReap(t)
+	if got := member.exitSignal(); got != syscall.SIGKILL {
+		t.Errorf("TERM-ignoring group member exited on signal %v, want SIGKILL: the grace-expiry sweep must force-kill the whole group", got)
+	}
+	if elapsed < scheduler.DefaultGrace {
+		t.Errorf("stopUncommittedRun returned after %v, inside the %v grace: it must not return on the direct child's exit while the group still has live members", elapsed, scheduler.DefaultGrace)
+	}
 	if elapsed > scheduler.DefaultGrace+10*time.Second {
 		t.Errorf("stopUncommittedRun returned after %v; the group sweep must land at grace expiry, not the run timeout", elapsed)
 	}
@@ -502,51 +574,54 @@ func TestDefaultCommandRunner_CancelOnExitedChildReportsProcessDone(t *testing.T
 	}
 }
 
-// TestStopUncommittedRun_ReturnsPromptlyWhenGroupDiesWithinGrace pins the
-// poll path: the leader honors SIGTERM and exits at once, a TERM-ignoring
-// descendant exits on its own well inside the DefaultGrace window -- so
-// stopUncommittedRun must return as soon as the poll observes the empty
-// group instead of sitting out the full grace and SIGKILL-sweeping
-// processes that already exited (which would stall every shutdown in this
-// window by the whole grace period).
+// TestStopUncommittedRun_ReturnsPromptlyWhenGroupDiesWithinGrace pins the poll
+// path: the runner's own child honors SIGTERM and is reaped at once, a
+// TERM-ignoring group member outlives it and then exits well inside the
+// DefaultGrace window — so stopUncommittedRun must return as soon as the poll
+// observes the empty group instead of sitting out the full grace and
+// SIGKILL-sweeping processes that already exited (which would stall every
+// shutdown in this window by the whole grace period).
+//
+// The member's death is triggered from HERE, so the test knows exactly when the
+// group emptied and asserts promptness relative to that instant. The earlier
+// fixture drove the timing from a `sleep` forked inside the child and compared
+// only against DefaultGrace, which made a slow fork/exec under full-suite load
+// indistinguishable from the bug — it flaked in CI for exactly that reason.
 func TestStopUncommittedRun_ReturnsPromptlyWhenGroupDiesWithinGrace(t *testing.T) {
 	t.Parallel()
-	readyPath := t.TempDir() + "/ready"
-	// The descendant ignores TERM (the exec'd sleep inherits the subshell's
-	// SIG_IGN disposition, so the group SIGTERM does not remove it) and
-	// exits by itself after ~0.8s; the leader traps TERM and exits
-	// immediately (sleep 30 & wait fires the trap as soon as the signal
-	// lands). A single exec'd sleep, not a respawn loop: repeated
-	// fork/exec cycles stretched past the grace window under full-suite
-	// load and flaked the promptness assertion.
-	script := `( trap '' TERM; exec sleep 0.8 ) & trap 'exit 0' TERM; : > "$1"; sleep 30 & wait`
-	cmd := defaultCommandRunner(context.Background(), "sh", "-c", script, "sh", readyPath)
-	cmd.Stdout, cmd.Stderr = nil, nil
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start() = %v", err)
-	}
-	stopped := false
-	t.Cleanup(func() {
-		if !stopped {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			_ = cmd.Wait()
-		}
-	})
-	waitFor(t, 5*time.Second, func() bool {
-		_, err := os.Stat(readyPath)
-		return err == nil
-	}, "child did not finish its setup")
+	cmd, markReaped := startTermHonoringChild(t)
+	member := startTermIgnoringGroupMember(t, cmd.Process.Pid)
+
+	// Outlive the poll's first ticks, then die: far enough inside the grace
+	// that a prompt return is unambiguous, and driven by an in-process timer
+	// rather than a forked child's wall-clock deadline. Stopped on cleanup
+	// (LIFO, so before the member's own kill) in case an assertion above
+	// aborts the test first — a late fire could otherwise signal a recycled
+	// PID belonging to another test.
+	const memberLifetime = 250 * time.Millisecond
+	kill := time.AfterFunc(memberLifetime, func() { _ = syscall.Kill(member.pid, syscall.SIGKILL) })
+	t.Cleanup(func() { kill.Stop() })
 
 	start := time.Now()
 	stopUncommittedRun(cmd)
-	stopped = true
+	markReaped()
 	elapsed := time.Since(start)
+	emptiedAt := member.awaitReap(t).Sub(start)
 
 	if cmd.ProcessState == nil {
-		t.Fatal("leader not reaped: Wait never completed")
+		t.Fatal("runner child not reaped: Wait never completed")
+	}
+	if emptiedAt >= scheduler.DefaultGrace {
+		t.Fatalf("group only emptied %v after the stop, at or past the %v grace: this fixture cannot tell a prompt return from a swept one, so the promptness assertion below is meaningless", emptiedAt, scheduler.DefaultGrace)
 	}
 	if elapsed >= scheduler.DefaultGrace {
-		t.Errorf("stopUncommittedRun returned after %v; the group died within ~0.8s, so the poll must return promptly instead of waiting out the full %v grace", elapsed, scheduler.DefaultGrace)
+		t.Errorf("stopUncommittedRun returned after %v; the group emptied at %v, so the poll must return promptly instead of waiting out the full %v grace", elapsed, emptiedAt, scheduler.DefaultGrace)
+	}
+	// The return must TRACK the group's death, not merely beat the grace. The
+	// bound is one poll interval plus generous scheduling slack, so it stays
+	// far below the grace it is distinguishing itself from.
+	if slack := elapsed - emptiedAt; slack > 2*time.Second {
+		t.Errorf("stopUncommittedRun returned %v after the group emptied; the poll re-probes every %v, so the return must follow the group's death closely", slack, runGroupPollInterval)
 	}
 }
 
@@ -604,6 +679,15 @@ func TestStopUncommittedRun_SweepsLeaderThatIgnoresTermAtGraceExpiry(t *testing.
 // and then outlives the run timeout; when runRenovateOnce returns, the
 // descendant must ALREADY be gone — no post-return polling window — because
 // sweepRunProcessGroup must not return until the whole group has died.
+//
+// Unlike its stopUncommittedRun siblings this fixture keeps the survivor as a
+// DESCENDANT of the run child rather than a test-owned group member (see
+// startTermIgnoringGroupMember): the instantaneous "already gone" assertion is
+// what catches a submit-and-return sweep, and a test-owned member would have to
+// be reaped by a goroutine here, whose scheduling cannot be ordered against the
+// sweep's return. The cost is that this one test needs an ambient reaper for
+// the orphaned descendant's zombie, so it passes under CI's init but not in a
+// container whose PID 1 never reaps.
 func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
 	t.Parallel()
 	descPath := t.TempDir() + "/desc.pid"
