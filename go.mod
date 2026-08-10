@@ -11,6 +11,6 @@ require (
 	github.com/cplieger/scheduler/v3 v3.0.0
 )
 
-require github.com/cplieger/atomicfile/v2 v2.8.0
+require github.com/cplieger/atomicfile/v2 v2.9.0
 
 require github.com/cplieger/pathinside v1.0.0 // indirect
