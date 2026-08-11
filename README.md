@@ -241,7 +241,7 @@ The image bakes a conservative 30s `start_period`; the example `compose.yaml` ra
 
 ## Security
 
-No network listener, no HTTP server, no exposed ports: triggering happens over an **in-container unix socket** in `/tmp`, owner-only (`0600`), so trigger authority is scoped to the container's own user (the same boundary `docker exec` already enforces; a mismatched trigger user fails loudly at connect). The unused `docker` CLI is stripped from the base image, removing that container-execution surface (see [Not distroless, on purpose](#not-distroless-on-purpose)). Runs as the base image's non-root user (UID `12021`) by default, or whatever you set via Compose `user:`; the socket and health marker are owned by that user, so external run triggers must execute as it (see [Scheduling modes](#scheduling-modes)). The daemon executes Renovate via the image entrypoint with an explicit argument slice (no shell); a triggered run's forwarded environment crosses only that same-user socket, no broader boundary than the exec that carried it. Renovate's token is never logged by the scheduler. The base image is Renovate's own (AGPL-3.0); the scheduler wrapper is GPL-3.0.
+No network listener, no HTTP server, no exposed ports: triggering happens over an **in-container unix socket** in `/tmp`, owner-only (`0600`), so trigger authority is scoped to the container's own user (the same boundary `docker exec` already enforces; a mismatched trigger user fails loudly at connect). The unused `docker` CLI is stripped from the base image, removing that container-execution surface (see [Not distroless, on purpose](#not-distroless-on-purpose)). Runs as the base image's non-root user (UID `12021`) by default, or whatever you set via Compose `user:`; the socket and health marker are owned by that user, so external run triggers must execute as it (see [Scheduling modes](#scheduling-modes)). The daemon executes Renovate via the image entrypoint with an explicit argument slice (no shell); a triggered run's forwarded environment crosses only that same-user socket, no broader boundary than the exec that carried it. Renovate's token is never logged by the scheduler. The base image is Renovate's own (AGPL-3.0); the scheduler wrapper is Apache-2.0.
 
 ## Dependencies
 
@@ -273,4 +273,4 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).
