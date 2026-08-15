@@ -23,6 +23,7 @@ import (
 // and a channel closed when the executor has drained.
 func newTestDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, context.CancelFunc, <-chan struct{}) {
 	t.Helper()
+	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	d, _ := newBareDaemon(t, ctx, runner)
 	done := make(chan struct{})
@@ -86,6 +87,7 @@ func TestExecutor_RunsJobsInOrderWithTheirScopes(t *testing.T) {
 func TestExecutor_MarkerFollowsRunOutcome(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 
+	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d, markerPath := newBareDaemon(t, ctx, recordingRunner("true", nil))
@@ -279,7 +281,7 @@ func TestStartTicker_FiresStartupThenInterval(t *testing.T) {
 
 	d, cancel, execDone := newTestDaemon(t, recordingRunner("true", nil))
 
-	ctx, stop := context.WithCancel(context.Background())
+	ctx, stop := context.WithCancel(t.Context())
 	tickerDone := startTicker(ctx, d, 15*time.Millisecond, true)
 
 	waitFor(t, 5*time.Second, func() bool {
@@ -305,7 +307,7 @@ func TestStartTicker_FiresStartupThenInterval(t *testing.T) {
 func TestStartTicker_DisabledInExternalMode(t *testing.T) {
 	t.Parallel()
 	d := &daemon{queue: trigger.NewQueue[runPayload](4)}
-	done := startTicker(context.Background(), d, time.Millisecond, false)
+	done := startTicker(t.Context(), d, time.Millisecond, false)
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -329,7 +331,7 @@ func TestRunDaemon_ExternalModeBootsHealthyServesAndShutsDownCleanly(t *testing.
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	sock := testSocketPath(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	var runErr error
 	go func() {
@@ -416,14 +418,14 @@ func TestRunDaemon_BootFailuresReturnError(t *testing.T) {
 		}
 		t.Setenv("RENOVATE_BASE_DIR", file)
 		sock := filepath.Join(t.TempDir(), "trigger.sock")
-		if err := runDaemon(context.Background(), sock, recordingRunner("true", nil), nil); err == nil {
+		if err := runDaemon(t.Context(), sock, recordingRunner("true", nil), nil); err == nil {
 			t.Error("runDaemon() = nil, want error when the base dir is unwritable at boot")
 		}
 	})
 	t.Run("unbindable socket path fails boot", func(t *testing.T) {
 		t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 		sock := filepath.Join(t.TempDir(), "missing-parent", "trigger.sock")
-		if err := runDaemon(context.Background(), sock, recordingRunner("true", nil), nil); err == nil {
+		if err := runDaemon(t.Context(), sock, recordingRunner("true", nil), nil); err == nil {
 			t.Error("runDaemon() = nil, want error when the socket cannot be bound")
 		}
 	})
@@ -453,7 +455,7 @@ func TestRunDaemon_BootFailureClearsPreviousLifesHealthyMarker(t *testing.T) {
 		}
 		t.Setenv("RENOVATE_BASE_DIR", file)
 		sock := filepath.Join(t.TempDir(), "trigger.sock")
-		if err := runDaemon(context.Background(), sock, recordingRunner("true", nil), nil); err == nil {
+		if err := runDaemon(t.Context(), sock, recordingRunner("true", nil), nil); err == nil {
 			t.Fatal("runDaemon() = nil, want error")
 		}
 		if _, err := os.Stat(healthMarkerPath); !errors.Is(err, fs.ErrNotExist) {
@@ -466,7 +468,7 @@ func TestRunDaemon_BootFailureClearsPreviousLifesHealthyMarker(t *testing.T) {
 		}
 		t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 		sock := filepath.Join(t.TempDir(), "missing-parent", "trigger.sock")
-		if err := runDaemon(context.Background(), sock, recordingRunner("true", nil), nil); err == nil {
+		if err := runDaemon(t.Context(), sock, recordingRunner("true", nil), nil); err == nil {
 			t.Fatal("runDaemon() = nil, want error")
 		}
 		if _, err := os.Stat(healthMarkerPath); !errors.Is(err, fs.ErrNotExist) {
@@ -499,7 +501,7 @@ func TestRunDaemon_BuiltinModeStartsUnhealthyThenFlipsHealthy(t *testing.T) {
 	}
 
 	sock := testSocketPath(t)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	var runErr error
 	go func() {
@@ -547,6 +549,7 @@ func TestRunDaemon_BuiltinModeStartsUnhealthyThenFlipsHealthy(t *testing.T) {
 func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 
+	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	invocations := 0
 	d, _ := newBareDaemon(t, ctx, recordingRunner("true", nil))
@@ -630,6 +633,7 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 	}
 
 	sock := testSocketPath(t)
+	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	var runErr error
@@ -725,6 +729,7 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 	}
 
 	sock := testSocketPath(t)
+	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	var runErr error
