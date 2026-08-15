@@ -29,6 +29,7 @@ func startTestServer(t *testing.T, runner scheduler.CommandRunner) string {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	sock := testSocketPath(t)
 
+	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	d, _ := newBareDaemon(t, ctx, runner)
 	ln, err := trigger.Listen(sock)
@@ -130,6 +131,7 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 
 	runOnce, awaitEntered, release := gatedRunOnce(t)
 
+	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	d, _ := newBareDaemon(t, ctx, recordingRunner("true", nil))
 	d.runOnce = runOnce
@@ -220,6 +222,7 @@ func TestRunDaemon_FullQueueRejectsTriggerImmediately(t *testing.T) {
 	runner, awaitEntered, release := gatedRunner(t)
 
 	sock := testSocketPath(t)
+	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {

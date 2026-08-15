@@ -120,7 +120,7 @@ func TestVerifyBaseDir(t *testing.T) {
 	t.Run("creates and verifies a writable dir", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "renovate-data")
 		t.Setenv("RENOVATE_BASE_DIR", dir)
-		if err := verifyBaseDir(context.Background()); err != nil {
+		if err := verifyBaseDir(t.Context()); err != nil {
 			t.Fatalf("verifyBaseDir() = %v, want nil", err)
 		}
 		if _, err := os.Stat(dir); err != nil {
@@ -133,7 +133,7 @@ func TestVerifyBaseDir(t *testing.T) {
 			t.Fatalf("setup: %v", err)
 		}
 		t.Setenv("RENOVATE_BASE_DIR", file)
-		if err := verifyBaseDir(context.Background()); err == nil {
+		if err := verifyBaseDir(t.Context()); err == nil {
 			t.Error("verifyBaseDir() = nil, want error when base dir is a file")
 		}
 	})
@@ -150,7 +150,7 @@ func TestVerifyBaseDir(t *testing.T) {
 func TestProbeBaseDirWrite(t *testing.T) {
 	t.Run("writes, syncs, and cleans up its probe file", func(t *testing.T) {
 		dir := t.TempDir()
-		if err := probeBaseDirWrite(context.Background(), dir); err != nil {
+		if err := probeBaseDirWrite(t.Context(), dir); err != nil {
 			t.Fatalf("probeBaseDirWrite() = %v, want nil", err)
 		}
 		entries, err := os.ReadDir(dir)
@@ -171,7 +171,7 @@ func TestProbeBaseDirWrite(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-		err := probeBaseDirWrite(context.Background(), dir)
+		err := probeBaseDirWrite(t.Context(), dir)
 		if err == nil {
 			t.Fatal("probeBaseDirWrite() = nil, want error when the write probe cannot be created")
 		}
@@ -308,7 +308,7 @@ func TestSetupLogger_MapsLogLevelEnvToHandlerLevel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("LOG_LEVEL", tt.env)
 			setupLogger()
-			ctx := context.Background()
+			ctx := t.Context()
 			if !slog.Default().Enabled(ctx, tt.enabled) {
 				t.Errorf("setupLogger() with LOG_LEVEL=%q: level %v not enabled", tt.env, tt.enabled)
 			}
@@ -339,7 +339,7 @@ func TestVerifyBaseDirAt_TimesOutWhileProbeSlotHeld(t *testing.T) {
 		t.Errorf("verifyBaseDirAt() error = %v, want it to mention %q", err, "timed out")
 	}
 
-	if err := verifyBaseDirAt(context.Background(), t.TempDir()); err != nil {
+	if err := verifyBaseDirAt(t.Context(), t.TempDir()); err != nil {
 		t.Errorf("verifyBaseDirAt() = %v after the slot was released, want nil (the slot must be reusable)", err)
 	}
 }

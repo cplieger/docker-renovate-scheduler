@@ -85,7 +85,7 @@ func TestRunRenovateOnce_EnvHandling(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("RENOVATE_TEST_MARKER", "inherited")
 			runner := shellAssertRunner(tt.script)
-			if ok, _, _ := runRenovateOnce(context.Background(), context.Background(), time.Minute, "test", nil, tt.env, runner); !ok {
+			if ok, _, _ := runRenovateOnce(t.Context(), t.Context(), time.Minute, "test", nil, tt.env, runner); !ok {
 				t.Errorf("runRenovateOnce() = false: the child did not see the expected environment (env=%v)", tt.env)
 			}
 		})
@@ -94,7 +94,7 @@ func TestRunRenovateOnce_EnvHandling(t *testing.T) {
 
 func TestDefaultCommandRunner(t *testing.T) {
 	t.Parallel()
-	cmd := defaultCommandRunner(context.Background(), "echo", "hi")
+	cmd := defaultCommandRunner(t.Context(), "echo", "hi")
 	if cmd.Stdout != os.Stdout {
 		t.Error("Stdout not wired to os.Stdout (Renovate output must stream to the container log)")
 	}
@@ -121,7 +121,7 @@ func TestDefaultCommandRunner(t *testing.T) {
 // TestDefaultCommandRunner.
 func TestDefaultCommandRunner_ChildRunsInOwnProcessGroup(t *testing.T) {
 	t.Parallel()
-	cmd := defaultCommandRunner(context.Background(), "sleep", "2")
+	cmd := defaultCommandRunner(t.Context(), "sleep", "2")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Start() failed: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestRunRenovateOnce_TimeoutCancelsRun(t *testing.T) {
 	}
 
 	start := time.Now()
-	ok, _, _ := runRenovateOnce(context.Background(), context.Background(), 100*time.Millisecond, "test", nil, nil, slowRunner)
+	ok, _, _ := runRenovateOnce(t.Context(), t.Context(), 100*time.Millisecond, "test", nil, nil, slowRunner)
 	elapsed := time.Since(start)
 
 	if ok {
@@ -185,7 +185,7 @@ func TestRunRenovateOnce_EnvForcesDumbInitInGroup(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("DUMB_INIT_SETSID", "1") // daemon environ must be overridden too
 			runner := shellAssertRunner(`[ "$DUMB_INIT_SETSID" = "0" ]`)
-			if ok, _, _ := runRenovateOnce(context.Background(), context.Background(), time.Minute, "test", nil, tt.env, runner); !ok {
+			if ok, _, _ := runRenovateOnce(t.Context(), t.Context(), time.Minute, "test", nil, tt.env, runner); !ok {
 				t.Errorf("runRenovateOnce() = false: child did not see DUMB_INIT_SETSID=0 (env=%v)", tt.env)
 			}
 		})
@@ -223,7 +223,7 @@ exec setsid -w sh -c 'echo $$ > "$0"; exec sleep 30' "$1"`
 		return cmd
 	}
 
-	if ok, _, _ := runRenovateOnce(context.Background(), context.Background(), 500*time.Millisecond, "test", nil, nil, runner); ok {
+	if ok, _, _ := runRenovateOnce(t.Context(), t.Context(), 500*time.Millisecond, "test", nil, nil, runner); ok {
 		t.Fatal("runRenovateOnce() = true for a run that exceeded the timeout, want false")
 	}
 
@@ -269,7 +269,7 @@ func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := capture.Default(t)
-			ok, _, _ := runRenovateOnce(context.Background(), context.Background(), tt.timeout, "test", nil, nil, tt.runner)
+			ok, _, _ := runRenovateOnce(t.Context(), t.Context(), tt.timeout, "test", nil, nil, tt.runner)
 			if ok {
 				t.Errorf("runRenovateOnce() = true, want false")
 			}
@@ -289,7 +289,7 @@ func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 func TestRunRenovateOnce_SuccessLogsCompleteAtInfo(t *testing.T) {
 	rec := capture.Default(t)
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd { return exec.CommandContext(ctx, "true") }
-	ok, cancelled, survived := runRenovateOnce(context.Background(), context.Background(), time.Minute, "test", nil, nil, runner)
+	ok, cancelled, survived := runRenovateOnce(t.Context(), t.Context(), time.Minute, "test", nil, nil, runner)
 	if !ok || cancelled || survived {
 		t.Fatalf("runRenovateOnce() = (%v, %v, %v), want (true, false, false)", ok, cancelled, survived)
 	}
@@ -313,7 +313,7 @@ func TestRunRenovateOnce_SuccessLogsCompleteAtInfo(t *testing.T) {
 // install under load and make a correct runner look like SIGKILL behavior.
 func TestDefaultCommandRunner_CancelSendsSIGTERMNotSIGKILL(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	readyPath := t.TempDir() + "/ready"
 	cmd := defaultCommandRunner(ctx, "sh", "-c", `trap 'exit 42' TERM; : > "$1"; sleep 30 & wait`, "sh", readyPath)
 	cmd.Stdout, cmd.Stderr = nil, nil
@@ -358,7 +358,7 @@ func TestDefaultCommandRunner_CancelSendsSIGTERMNotSIGKILL(t *testing.T) {
 func TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild(t *testing.T) {
 	rec := capture.Default(t)
 
-	shutdownCtx, shutdown := context.WithCancel(context.Background())
+	shutdownCtx, shutdown := context.WithCancel(t.Context())
 	var child *exec.Cmd
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		shutdown() // SIGTERM lands after the pre-start check, before Start
@@ -368,7 +368,7 @@ func TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild(t *testing.T) {
 	}
 
 	start := time.Now()
-	ok, cancelled, _ := runRenovateOnce(context.Background(), shutdownCtx, time.Minute, "test", nil, nil, runner)
+	ok, cancelled, _ := runRenovateOnce(t.Context(), shutdownCtx, time.Minute, "test", nil, nil, runner)
 	elapsed := time.Since(start)
 
 	if ok || !cancelled {
@@ -476,6 +476,7 @@ func (m *groupMember) exitSignal() syscall.Signal {
 // reaped it, so an early t.Fatal cannot leak the group.
 func startTermHonoringChild(t *testing.T) (*exec.Cmd, func()) {
 	t.Helper()
+	// context.Background() (not t.Context()): the child is reaped in t.Cleanup, which runs after t.Context() would already have cancelled it.
 	cmd := defaultCommandRunner(context.Background(), "sleep", "30")
 	cmd.Stdout, cmd.Stderr = nil, nil
 	if err := cmd.Start(); err != nil {
@@ -542,7 +543,7 @@ func TestRunRenovateOnce_StartFailureIsARunFailureNotAPanic(t *testing.T) {
 		return exec.CommandContext(ctx, missing)
 	}
 
-	ok, cancelled, _ := runRenovateOnce(context.Background(), context.Background(), time.Minute, "test", nil, nil, runner)
+	ok, cancelled, _ := runRenovateOnce(t.Context(), t.Context(), time.Minute, "test", nil, nil, runner)
 
 	if ok || cancelled {
 		t.Fatalf("runRenovateOnce() = (ok=%v, cancelled=%v) for an unstartable child, want (false, false)", ok, cancelled)
@@ -560,7 +561,7 @@ func TestRunRenovateOnce_StartFailureIsARunFailureNotAPanic(t *testing.T) {
 // that cmd.Wait would surface, misreporting a clean run as failed.
 func TestDefaultCommandRunner_CancelOnExitedChildReportsProcessDone(t *testing.T) {
 	t.Parallel()
-	cmd := defaultCommandRunner(context.Background(), "true")
+	cmd := defaultCommandRunner(t.Context(), "true")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("Start() = %v", err)
 	}
@@ -637,6 +638,7 @@ func TestStopUncommittedRun_SweepsLeaderThatIgnoresTermAtGraceExpiry(t *testing.
 	// The leader ignores TERM and respawns its sleep forever; only the
 	// grace-expiry group SIGKILL removes it.
 	script := `trap '' TERM; : > "$1"; while :; do sleep 1; done`
+	// context.Background() (not t.Context()): the child is reaped in t.Cleanup, which runs after t.Context() would already have cancelled it.
 	cmd := defaultCommandRunner(context.Background(), "sh", "-c", script, "sh", readyPath)
 	cmd.Stdout, cmd.Stderr = nil, nil
 	if err := cmd.Start(); err != nil {
@@ -701,7 +703,7 @@ func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
 		return cmd
 	}
 
-	ok, _, groupSurvived := runRenovateOnce(context.Background(), context.Background(), 500*time.Millisecond, "test", nil, nil, runner)
+	ok, _, groupSurvived := runRenovateOnce(t.Context(), t.Context(), 500*time.Millisecond, "test", nil, nil, runner)
 	if ok {
 		t.Fatal("runRenovateOnce() = true for a run that exceeded the timeout, want false")
 	}
@@ -822,6 +824,7 @@ func TestSweepRunProcessGroup_NeverStartedChildIsNothingToSweep(t *testing.T) {
 func TestSweepRunGroupOrWarn_UnconfirmableGroupDeathReportsSurvived(t *testing.T) {
 	rec := capture.Default(t)
 
+	// context.Background() (not t.Context()): the child is reaped in t.Cleanup, which runs after t.Context() would already have cancelled it.
 	cmd := defaultCommandRunner(context.Background(), "sleep", "30")
 	cmd.Stdout, cmd.Stderr = nil, nil
 	if err := cmd.Start(); err != nil {
@@ -862,6 +865,7 @@ func TestStopUncommittedRun_WarnsWhenGroupSurvivesGraceExpirySweep(t *testing.T)
 	rec := capture.Default(t)
 
 	readyPath := t.TempDir() + "/ready"
+	// context.Background() (not t.Context()): the child is reaped in t.Cleanup, which runs after t.Context() would already have cancelled it.
 	cmd := defaultCommandRunner(context.Background(), "sh", "-c", `trap 'exit 0' TERM; : > "$1"; sleep 30 & wait`, "sh", readyPath)
 	cmd.Stdout, cmd.Stderr = nil, nil
 	if err := cmd.Start(); err != nil {
