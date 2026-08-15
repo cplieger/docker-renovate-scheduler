@@ -60,7 +60,16 @@ RUN find /opt/containerbase -name docker -prune -exec rm -rf {} + \
 # becomes a no-op once the base ships the fixes. upgrade never removes
 # packages, so native MySQL-driver builds during lockfile maintenance keep
 # working.
-RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+# PKG_REFRESH busts the cache for this layer. Without it BuildKit restores the
+# layer verbatim on every rebuild and the apt upgrade below never runs again, so
+# the image keeps shipping whatever packages were current when the layer was
+# first built — which defeats the whole point of the broad upgrade described
+# above. The central release/CI/scan builds pass today's UTC date. The `echo` is
+# load-bearing: BuildKit keys a RUN on the build args it actually CONSUMES, so a
+# merely-declared ARG would change nothing.
+ARG PKG_REFRESH=static
+RUN echo "OS package refresh: ${PKG_REFRESH}" \
+    && apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 
 # Renovate stores repo clones and caches under RENOVATE_BASE_DIR. Persisting
 # it on a volume lets runs git-fetch instead of git-clone and reuse the
