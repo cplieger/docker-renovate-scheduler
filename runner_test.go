@@ -348,7 +348,7 @@ func TestDefaultCommandRunner_CancelSendsSIGTERMNotSIGKILL(t *testing.T) {
 // test for the post-Start shutdown handshake: a SIGTERM landing in the
 // check-then-act window between execute's pre-start shutdown check and
 // process creation must not commit a fresh pass under the uncancellable run
-// context (bounded only by SCHED_TIMEOUT, which can outlive
+// context (bounded only by RUN_TIMEOUT, which can outlive
 // stop_grace_period). The injected runner cancels shutdown at process
 // creation — after the pre-start check, before Start — so the child starts
 // with shutdown already won. runRenovateOnce must report cancelled, reap the

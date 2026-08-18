@@ -66,7 +66,7 @@ func renovateInvocation(repos []string) (name string, args []string) {
 // group and is TERMed out-of-band in the same instant as the daemon (exit
 // 143), silently defeating the shutdown drain (runCtx's WithoutCancel never
 // gets a say). With its own group the child only ever receives signals the
-// daemon sends it (the SCHED_TIMEOUT cancellation path), so a container
+// daemon sends it (the RUN_TIMEOUT cancellation path), so a container
 // recreate mid-run drains the pass to completion as designed, bounded by
 // stop_grace_period. Log capture is unaffected: the child inherits the
 // daemon's stdout/stderr fds regardless of process group.
@@ -136,7 +136,7 @@ func withDumbInitInGroup(env []string) []string {
 // window (uninterruptible I/O), so a package-manager tree may still be
 // writing the base dir: the caller must NOT start another run against it —
 // the group-death observation is a containment state, not just a log line.
-// The pass is bounded by timeout (SCHED_TIMEOUT); on expiry
+// The pass is bounded by timeout (RUN_TIMEOUT); on expiry
 // the command runner sends SIGTERM with a short grace before SIGKILL. env,
 // when non-nil, replaces the child's environment wholesale (a socket client's
 // forwarded environment); nil inherits the daemon's — either way with ONE
@@ -148,14 +148,14 @@ func withDumbInitInGroup(env []string) []string {
 //
 // shutdownCtx closes the check-then-act window between execute's pre-start
 // shutdown check and process creation: a SIGTERM landing in that gap would
-// otherwise launch a fresh pass bounded only by SCHED_TIMEOUT, which can
+// otherwise launch a fresh pass bounded only by RUN_TIMEOUT, which can
 // outlive the container's stop_grace_period and recreate the exit-137 path
 // the drain contract exists to prevent. Immediately after Start, shutdownCtx
 // is re-checked: if shutdown already won the race, the just-started child is
 // reaped (see stopUncommittedRun) and the run reports cancelled=true — logged
 // at Warn, never as a run failure — without ever being committed as
 // in-flight. Only a run that passes this post-Start handshake drains under
-// ctx/SCHED_TIMEOUT.
+// ctx/RUN_TIMEOUT.
 func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, trig string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -186,7 +186,7 @@ func runRenovateOnce(ctx, shutdownCtx context.Context, timeout time.Duration, tr
 		return true, false, false
 	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
 		survived := sweepRunGroupOrWarn(cmd, "renovate run process group survived the post-timeout kill sweep; halting run admission to prevent an overlapping run", trig)
-		// The run exceeded SCHED_TIMEOUT. Logged distinctly from a genuine
+		// The run exceeded RUN_TIMEOUT. Logged distinctly from a genuine
 		// non-zero Renovate exit so operators can tell a slow run from a
 		// real failure during triage.
 		slog.Error("renovate run timed out",

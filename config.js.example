@@ -1,7 +1,7 @@
 // Example Renovate self-hosted bot configuration.
 //
 // This is RENOVATE's own config, NOT the scheduler's — the scheduler only
-// reads SCHED_INTERVAL / SCHED_TIMEOUT / LOG_LEVEL. Mount this at
+// reads RUN_INTERVAL / RUN_TIMEOUT / LOG_LEVEL. Mount this at
 // /usr/src/app/config.js (or point RENOVATE_CONFIG_FILE at it) if you prefer
 // a file over RENOVATE_* environment variables. Everything here is documented
 // at https://docs.renovatebot.com/self-hosted-configuration/

@@ -315,7 +315,7 @@ func (d *daemon) runJobs(shutdownCtx context.Context) {
 	// handed its lifetime at the point it begins running, and the derivation
 	// sits next to the loop whose children it parents. Decoupled from the
 	// shutdown signal (context.WithoutCancel) so an in-flight run drains to
-	// completion — bounded by its own SCHED_TIMEOUT — instead of being
+	// completion — bounded by its own RUN_TIMEOUT — instead of being
 	// cancelled mid-pass; the container's stop_grace_period is the real outer
 	// bound.
 	runCtx := context.WithoutCancel(shutdownCtx)

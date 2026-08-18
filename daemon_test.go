@@ -326,7 +326,7 @@ func TestStartTicker_DisabledInExternalMode(t *testing.T) {
 // healthMarkerPath (the real path the health subcommand probes).
 func TestRunDaemon_ExternalModeBootsHealthyServesAndShutsDownCleanly(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	t.Setenv("SCHED_INTERVAL", "off")
+	t.Setenv("RUN_INTERVAL", "off")
 	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
 	prev := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prev) })
@@ -487,7 +487,7 @@ func TestRunDaemon_BootFailureClearsPreviousLifesHealthyMarker(t *testing.T) {
 // uses the package-global healthMarkerPath.
 func TestRunDaemon_BuiltinModeStartsUnhealthyThenFlipsHealthy(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	t.Setenv("SCHED_INTERVAL", "6h") // one startup run; no further tick within the test
+	t.Setenv("RUN_INTERVAL", "6h") // one startup run; no further tick within the test
 	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
 	prev := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prev) })

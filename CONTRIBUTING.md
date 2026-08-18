@@ -45,7 +45,7 @@ child; triggers only submit requests.
   the shutdown/fatal select). Shutdown is `signal.NotifyContext` + queue
   close: the in-flight run drains uncancelled (`runJobs` derives its
   `context.WithoutCancel` run context when the executor starts, bounded by
-  `SCHED_TIMEOUT`), queued requests are cancelled with explicit results.
+  `RUN_TIMEOUT`), queued requests are cancelled with explicit results.
 - `client.go`: the `run` subcommand: a thin synchronous client that forwards
   its repo args and its **complete environment** (that is what makes
   `docker exec -e RENOVATE_X=… … run` overrides reach Renovate) and exits
@@ -60,7 +60,7 @@ child; triggers only submit requests.
   `/usr/local/sbin/renovate-entrypoint.sh` (re-establishing containerbase per
   run, whatever environment the request carried; the Dockerfile asserts the
   path at build time); `runRenovateOnce` executes one pass under
-  `SCHED_TIMEOUT`; `defaultCommandRunner` wraps `scheduler.NewCommandRunner`
+  `RUN_TIMEOUT`; `defaultCommandRunner` wraps `scheduler.NewCommandRunner`
   (wiring `Stdout`/`Stderr` to the daemon's streams, so every run's output
   lands in the container log).
 - `config.go`: env loading (`loadInterval` via `scheduler.ParseInterval`,
@@ -76,11 +76,16 @@ There is no cross-process coordination state: no flock, no rerun flag, no
 drain latch. Mutual exclusion is the executor loop; the socket is the only
 trigger path.
 
-## Env-var convention (don't collide with Renovate)
+## Env-var convention (name the job, don't collide with Renovate)
 
-Scheduler knobs use the **`SCHED_*`** prefix (`SCHED_INTERVAL`,
-`SCHED_TIMEOUT`), never `RENOVATE_*`: that is Renovate's own config
-namespace and the bot would try to interpret our knobs as config. `LOG_LEVEL`
+Scheduler knobs use the **`RUN_*`** prefix (`RUN_INTERVAL`, `RUN_TIMEOUT`),
+named after the JOB — one Renovate run — not after the mechanism that drives
+it. Naming the mechanism is what let three sibling schedulers spell the same
+knob three different ways; job-named knobs never drifted.
+
+They stay outside `RENOVATE_*`: that is Renovate's own config namespace and
+the bot would try to interpret our knobs as config. `RENOVATE_INTERVAL` would
+be wrong for a second reason — it would imply Renovate reads it. `LOG_LEVEL`
 is intentionally shared. Renovate itself is configured the normal way
 (`config.js` / `RENOVATE_*` env / each repo's `renovate.json`); the scheduler
 never parses or rewrites Renovate config.
@@ -105,7 +110,7 @@ never parses or rewrites Renovate config.
   `RENOVATE_TOKEN`) must never cross a wider boundary than the same-user
   socket.
 - `exec.CommandContext` arg lists only; never build a `sh -c` string from env.
-- The run timeout (`SCHED_TIMEOUT`) is propagated via context so a wedged
+- The run timeout (`RUN_TIMEOUT`) is propagated via context so a wedged
   renovate run is killed, not left running into the next tick.
 - The bundled `docker` CLI is removed in the Dockerfile (`binarySource=install`
   never invokes it). Don't re-add it or switch to `binarySource=docker`; if a
@@ -115,9 +120,9 @@ never parses or rewrites Renovate config.
 
 ## Scheduling modes
 
-- **Built-in** (default): `SCHED_INTERVAL=<Go duration>` (e.g. `1h`) → a
+- **Built-in** (default): `RUN_INTERVAL=<Go duration>` (e.g. `1h`) → a
   `scheduler.RunLoop` (startup pass, then every interval).
-- **External**: `SCHED_INTERVAL=off` (or `disabled` / `0` / `0s`) → the
+- **External**: `RUN_INTERVAL=off` (or `disabled` / `0` / `0s`) → the
   container idles and an external scheduler triggers
   `docker exec renovate docker-renovate-scheduler run` (e.g. Ofelia on a fixed
   cadence, or a webhook-driven action for ad-hoc runs).
