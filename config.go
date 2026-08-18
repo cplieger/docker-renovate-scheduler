@@ -29,19 +29,19 @@ import (
 // RENOVATE_* namespace so Renovate cannot misinterpret them as config
 // options:
 //
-//	SCHED_INTERVAL  built-in cadence (Go duration), or off/disabled/0 to
+//	RUN_INTERVAL  built-in cadence (Go duration), or off/disabled/0 to
 //	                disable the built-in scheduler and trigger runs externally
-//	SCHED_TIMEOUT   whole-run timeout for a single `renovate` invocation
+//	RUN_TIMEOUT   whole-run timeout for a single `renovate` invocation
 //	LOG_LEVEL       slog level (also honoured by Renovate itself)
 
 const (
 	// defaultInterval is the fallback built-in scheduler cadence when
-	// SCHED_INTERVAL is unset or unparseable (non-sentinel). Six hours keeps
+	// RUN_INTERVAL is unset or unparseable (non-sentinel). Six hours keeps
 	// dependencies fresh without hammering registries or platform APIs.
 	defaultInterval = 6 * time.Hour
 
 	// defaultRunTimeout caps a single `renovate` invocation — the whole run
-	// across every configured repository. Override with SCHED_TIMEOUT.
+	// across every configured repository. Override with RUN_TIMEOUT.
 	// Renovate's own RENOVATE_EXECUTION_TIMEOUT is a separate per-child-
 	// process limit inside Renovate; this is the outer bound on the process.
 	defaultRunTimeout = time.Hour
@@ -107,7 +107,7 @@ func baseDirForEnv(env []string) string {
 	return defaultBaseDir
 }
 
-// loadInterval parses SCHED_INTERVAL and reports the built-in scheduler
+// loadInterval parses RUN_INTERVAL and reports the built-in scheduler
 // cadence and whether the built-in scheduler runs at all. It delegates to
 // scheduler.ParseInterval, the fleet-standard *_INTERVAL parser: a Go
 // duration ("1h", "30m") sets the interval; the sentinels "off"/"disabled"
@@ -118,20 +118,20 @@ func baseDirForEnv(env []string) string {
 // negative and unparseable cases). scheduleEnabled is true only in built-in
 // mode.
 func loadInterval() (interval time.Duration, scheduleEnabled bool) {
-	s := scheduler.ParseInterval(os.Getenv("SCHED_INTERVAL"), defaultInterval,
-		scheduler.WithName("SCHED_INTERVAL"))
+	s := scheduler.ParseInterval(os.Getenv("RUN_INTERVAL"), defaultInterval,
+		scheduler.WithName("RUN_INTERVAL"))
 	return s.Interval, s.Mode == scheduler.ModeBuiltin
 }
 
-// loadRunTimeout reads SCHED_TIMEOUT (a Go duration) and falls back to
+// loadRunTimeout reads RUN_TIMEOUT (a Go duration) and falls back to
 // defaultRunTimeout on unset or unparseable values (envx.Duration warns on
 // malformed input), logging a warning rather than refusing to start. The
 // positive-only rule stays app-side: a zero or negative timeout would expire
 // every run before it starts.
 func loadRunTimeout() time.Duration {
-	d := envx.Duration("SCHED_TIMEOUT", defaultRunTimeout)
+	d := envx.Duration("RUN_TIMEOUT", defaultRunTimeout)
 	if d <= 0 {
-		slog.Warn("SCHED_TIMEOUT must be positive, using default",
+		slog.Warn("RUN_TIMEOUT must be positive, using default",
 			"value", d.String(), "default", defaultRunTimeout)
 		return defaultRunTimeout
 	}

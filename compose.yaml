@@ -7,7 +7,7 @@ services:
     stop_grace_period: 10m  # let an in-flight run drain on stop instead of exit 137; see README "Graceful shutdown"
 
     environment:
-      SCHED_INTERVAL: "6h"  # built-in cadence (Go duration); "off" = external trigger; see README "Scheduling modes"
+      RUN_INTERVAL: "6h"  # built-in cadence (Go duration); "off" = external trigger; see README "Scheduling modes"
       LOG_FORMAT: "json"  # Renovate's own knob, not the scheduler's: structured logs for Alloy/Loki; see README "What it does"
       # Renovate's own config (RENOVATE_*) is passed straight through:
       RENOVATE_PLATFORM: "github"
