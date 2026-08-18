@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	scheduler "github.com/cplieger/scheduler/v3"
+	"github.com/cplieger/scheduler/v4"
 )
 
 // --- Renovate execution ---
