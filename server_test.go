@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	scheduler "github.com/cplieger/scheduler/v3"
-	"github.com/cplieger/scheduler/v3/trigger"
+	"github.com/cplieger/scheduler/v4"
+	"github.com/cplieger/scheduler/v4/trigger"
 )
 
 // The broker mechanics (queue semantics, socket hygiene, wire ordering,
 // accept-loop degradation, departed clients) are the scheduler library's and
-// are tested in scheduler/v3/trigger. These tests pin what stays THIS app's:
+// are tested in scheduler/v4/trigger. These tests pin what stays THIS app's:
 // the daemon executor's policy as observed over the real socket — scope and
 // environment forwarding into the Renovate child, and shutdown's
 // drain-versus-cancel split.
@@ -31,7 +31,7 @@ func startTestServer(t *testing.T, runner scheduler.CommandRunner) string {
 
 	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
-	d, _ := newBareDaemon(t, ctx, runner)
+	d, _ := newBareDaemon(t, runner)
 	ln, err := trigger.Listen(sock)
 	if err != nil {
 		t.Fatalf("trigger.Listen() = %v", err)
@@ -133,7 +133,7 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 
 	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
-	d, _ := newBareDaemon(t, ctx, recordingRunner("true", nil))
+	d, _ := newBareDaemon(t, recordingRunner("true", nil))
 	d.runOnce = runOnce
 	ln, err := trigger.Listen(sock)
 	if err != nil {
@@ -227,7 +227,7 @@ func TestRunDaemon_FullQueueRejectsTriggerImmediately(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = runDaemon(ctx, sock, runner, nil)
+		_ = runDaemon(ctx, sock, runner)
 	}()
 	t.Cleanup(func() {
 		cancel()

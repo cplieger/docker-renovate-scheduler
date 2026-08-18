@@ -37,20 +37,22 @@ Go module `github.com/cplieger/docker-renovate-scheduler`; binary
 child; triggers only submit requests.
 
 - `main.go`: subcommand dispatch (`daemon` / `run` / `health`).
-- `daemon.go`: the daemon composition root (`runDaemon`): health marker,
-  trigger socket, the executor goroutine (`runJobs`, the ONLY code that
-  starts Renovate), and the built-in ticker (`startTicker`, a
-  `scheduler.RunLoop` that submits tick jobs like any other trigger).
-  Shutdown is `signal.NotifyContext` + queue close: the in-flight run drains
-  uncancelled (bounded by `SCHED_TIMEOUT`), queued requests are cancelled
-  with explicit results.
+- `daemon.go`: the composition root (`runDaemon`: boot — logger, marker
+  clear, base-dir check, config, socket bind — then compose and delegate)
+  and the orchestration (`daemon.run`: the executor goroutine (`runJobs`,
+  the ONLY code that starts Renovate), the built-in ticker (`startTicker`,
+  a `scheduler.RunLoop` that submits tick jobs like any other trigger), and
+  the shutdown/fatal select). Shutdown is `signal.NotifyContext` + queue
+  close: the in-flight run drains uncancelled (`runJobs` derives its
+  `context.WithoutCancel` run context when the executor starts, bounded by
+  `SCHED_TIMEOUT`), queued requests are cancelled with explicit results.
 - `client.go`: the `run` subcommand: a thin synchronous client that forwards
   its repo args and its **complete environment** (that is what makes
   `docker exec -e RENOVATE_X=… … run` overrides reach Renovate) and exits
   with the run's own result.
 - `payload.go`: the `runPayload` wire type (repos + forwarded environment)
   submitted over the scheduler library's trigger broker
-  (`scheduler/v3/trigger`: bounded FIFO queue, owner-only unix-socket server,
+  (`scheduler/v4/trigger`: bounded FIFO queue, owner-only unix-socket server,
   newline-JSON queued/started/done protocol, synchronous client). The broker
   mechanics live and are tested in that library; this app supplies only the
   payload type, the executor policy, and the log wording.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -11,8 +12,8 @@ import (
 	"time"
 
 	"github.com/cplieger/health"
-	scheduler "github.com/cplieger/scheduler/v3"
-	"github.com/cplieger/scheduler/v3/trigger"
+	"github.com/cplieger/scheduler/v4"
+	"github.com/cplieger/scheduler/v4/trigger"
 )
 
 // --- Daemon: the single owner of Renovate execution ---
@@ -26,7 +27,7 @@ import (
 // queued, and every run's output lands on the container log stream because
 // the child inherits the daemon's stdout/stderr.
 
-// errContainmentLost is runDaemon's fatal exit cause when a run's process
+// errContainmentLost is daemon.run's fatal exit cause when a run's process
 // group survives the post-run kill sweep: a package-manager tree may still
 // be writing the base directory, so the daemon halts instead of admitting
 // another run, and the non-zero exit lets the container restart policy reap
@@ -53,9 +54,8 @@ func newJob(trig string, repos, env []string) *trigger.Job[runPayload] {
 
 // runOnceFunc executes one Renovate pass and reports whether it exited
 // cleanly, whether shutdown cancelled it at start, and whether its process
-// group survived the post-run kill sweep. It is the shared signature of
-// daemon.runOnce and runDaemon's runOnce parameter; runRenovateOnce is the
-// production value.
+// group survived the post-run kill sweep. It is the type of daemon.runOnce;
+// runRenovateOnce is the production value.
 type runOnceFunc func(ctx, shutdownCtx context.Context, timeout time.Duration, trig string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled, groupSurvived bool)
 
 // daemon carries the executor's dependencies.
@@ -69,15 +69,10 @@ type daemon struct {
 	// fabricated from real test children, so the surviving-group report is
 	// injected at this boundary.
 	runOnce runOnceFunc
-	// fatal delivers the executor's containment-loss error to runDaemon.
+	// fatal delivers the executor's containment-loss error to daemon.run.
 	// Buffered 1: the executor halts after its single send, so the send can
-	// never block even if runDaemon is already past its receive.
-	fatal chan error
-	// runCtx parents every Renovate child. It is decoupled from the shutdown
-	// signal (context.WithoutCancel) so an in-flight run drains to completion
-	// — bounded by its own SCHED_TIMEOUT — instead of being cancelled
-	// mid-pass; the container's stop_grace_period is the real outer bound.
-	runCtx  context.Context
+	// never block even if run is already past its receive.
+	fatal   chan error
 	timeout time.Duration
 	// healthMu orders the shutdown health transition against per-run marker
 	// updates: once beginShutdown flips stopping, a draining run's completion
@@ -116,15 +111,14 @@ func (d *daemon) setRunHealth(ok bool) {
 }
 
 // runDaemon is the composition root for the long-running container (the
-// `daemon` subcommand and the default no-arg command). It configures logging,
-// verifies the Renovate base directory, binds the trigger socket, wires the
-// health marker, starts the executor, and — in built-in mode — drives the
-// interval ticker. newCmd builds each Renovate child (defaultCommandRunner in
-// production; injected by tests). runOnce is copied into the daemon it
-// builds; nil — the production value — selects runRenovateOnce, and a
-// non-nil value exists only for the shutdown-ordering containment regression
-// test (see daemon.runOnce). Returning an error exits non-zero.
-func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandRunner, runOnce runOnceFunc) error {
+// `daemon` subcommand and the default no-arg command). It owns boot: logging,
+// clearing the previous life's marker, verifying the Renovate base directory,
+// loading the interval and timeout, and binding the trigger socket — every
+// step that can fail before a daemon exists — then composes the daemon and
+// delegates the whole lifecycle to daemon.run. newCmd builds each Renovate
+// child (defaultCommandRunner in production; injected by tests). Returning an
+// error exits non-zero.
+func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandRunner) error {
 	setupLogger()
 	warnIfRootlessCacheUnwritable()
 
@@ -148,6 +142,35 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	interval, scheduleEnabled := loadInterval()
 	timeout := loadRunTimeout()
 
+	ln, err := trigger.Listen(socketPath)
+	if err != nil {
+		slog.Error("cannot bind trigger socket", "path", socketPath, "error", err)
+		return err
+	}
+
+	d := &daemon{
+		queue:   trigger.NewQueue[runPayload](queueCapacity),
+		marker:  marker,
+		newCmd:  newCmd,
+		timeout: timeout,
+		fatal:   make(chan error, 1),
+	}
+	return d.run(ctx, ln, socketPath, interval, scheduleEnabled)
+}
+
+// run is the daemon's orchestration: admission (socket server + built-in
+// ticker) feeding the single executor, the shutdown/fatal select, and the
+// drain sequence. runDaemon has already verified the boot preconditions,
+// cleared the previous life's marker, and bound the listener; run owns the
+// SIGTERM/interrupt wrapping and the abort cause (so a fatal executor
+// condition drains through the same context a signal does), the marker's
+// mode-appropriate initial state, its cleanup, and the socket file's
+// removal. It is a method rather than more of runDaemon so the composition
+// root carries no test-only parameter: the containment-halt regression tests
+// compose a daemon with the runOnce seam themselves and drive this method
+// with a real listener (a SIGKILL-surviving process group cannot be
+// fabricated from real test children).
+func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, interval time.Duration, scheduleEnabled bool) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	// abort lets a fatal executor condition (containment loss) shut the
@@ -157,28 +180,13 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	ctx, abort := context.WithCancelCause(ctx)
 	defer abort(nil)
 
-	ln, err := trigger.Listen(socketPath)
-	if err != nil {
-		slog.Error("cannot bind trigger socket", "path", socketPath, "error", err)
-		return err
-	}
 	defer func() { _ = os.Remove(socketPath) }()
 
-	defer marker.Cleanup()
+	defer d.marker.Cleanup()
 	// Built-in mode starts unhealthy until the first run proves the setup
 	// (the startup pass flips it); external mode starts healthy — idle,
 	// nothing has failed — and each triggered run updates it.
-	marker.Set(!scheduleEnabled)
-
-	d := &daemon{
-		queue:   trigger.NewQueue[runPayload](queueCapacity),
-		marker:  marker,
-		newCmd:  newCmd,
-		runOnce: runOnce,
-		runCtx:  context.WithoutCancel(ctx),
-		timeout: timeout,
-		fatal:   make(chan error, 1),
-	}
+	d.marker.Set(!scheduleEnabled)
 
 	executorDone := make(chan struct{})
 	go func() {
@@ -207,11 +215,11 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		mode = "built-in"
 	}
 	slog.Info("container started",
-		"mode", mode, "interval", interval, "timeout", timeout, "base_dir", baseDir(), "socket", socketPath)
+		"mode", mode, "interval", interval, "timeout", d.timeout, "base_dir", baseDir(), "socket", socketPath)
 
 	// Block until SIGTERM or the executor's fatal containment-loss signal;
 	// the latter shuts down through the same abort context so the ticker,
-	// admission, and handlers drain identically, but runDaemon returns the
+	// admission, and handlers drain identically, but run returns the
 	// error so main exits non-zero and the container restart reaps the
 	// surviving process tree.
 	var fatalErr error
@@ -302,6 +310,15 @@ func (d *daemon) tick(trig string) {
 // containment reason instead of run: a surviving package-manager tree may
 // still be writing the base directory, so no further run may be admitted.
 func (d *daemon) runJobs(shutdownCtx context.Context) {
+	// runCtx parents every Renovate child. It is derived here, when the
+	// executor starts, rather than stashed at construction: the component is
+	// handed its lifetime at the point it begins running, and the derivation
+	// sits next to the loop whose children it parents. Decoupled from the
+	// shutdown signal (context.WithoutCancel) so an in-flight run drains to
+	// completion — bounded by its own SCHED_TIMEOUT — instead of being
+	// cancelled mid-pass; the container's stop_grace_period is the real outer
+	// bound.
+	runCtx := context.WithoutCancel(shutdownCtx)
 	for j := range d.queue.Jobs() {
 		switch {
 		case d.halted:
@@ -309,7 +326,7 @@ func (d *daemon) runJobs(shutdownCtx context.Context) {
 		case shutdownCtx.Err() != nil:
 			cancelJobForShutdown(j, "queued")
 		default:
-			d.execute(shutdownCtx, j)
+			d.execute(runCtx, shutdownCtx, j)
 		}
 	}
 }
@@ -353,12 +370,12 @@ func cancelJobForContainment(j *trigger.Job[runPayload]) {
 // creation — so shutdownCtx is also passed into runRenovateOnce, whose
 // post-Start handshake reaps a child that started after shutdown won and
 // reports it cancelled instead of committing it as in-flight.
-func (d *daemon) execute(shutdownCtx context.Context, j *trigger.Job[runPayload]) {
+func (d *daemon) execute(runCtx, shutdownCtx context.Context, j *trigger.Job[runPayload]) {
 	j.Start()
 	start := time.Now()
 
 	dir := baseDirForEnv(j.Payload.Env)
-	if err := verifyBaseDirAt(d.runCtx, dir); err != nil {
+	if err := verifyBaseDirAt(runCtx, dir); err != nil {
 		logBaseDirError(dir, err)
 		d.setRunHealth(false)
 		j.Finish(trigger.Outcome{OK: false, Duration: time.Since(start), Reason: "base directory not writable"})
@@ -374,7 +391,7 @@ func (d *daemon) execute(shutdownCtx context.Context, j *trigger.Job[runPayload]
 	if runOnce == nil {
 		runOnce = runRenovateOnce
 	}
-	ok, cancelled, groupSurvived := runOnce(d.runCtx, shutdownCtx, d.timeout, j.Trigger, j.Payload.Repos, j.Payload.Env, d.newCmd)
+	ok, cancelled, groupSurvived := runOnce(runCtx, shutdownCtx, d.timeout, j.Trigger, j.Payload.Repos, j.Payload.Env, d.newCmd)
 	if cancelled {
 		// runRenovateOnce already reaped the child and logged the Warn; the
 		// health marker is left alone (beginShutdown pinned it unhealthy).
