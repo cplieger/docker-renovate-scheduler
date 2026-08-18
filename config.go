@@ -4,6 +4,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -69,7 +70,7 @@ func setupLogger() {
 	// handler — matching the interval/timeout parsers' fall-back diagnostics
 	// (a typo like LOG_LEVEL=debig must not silently suppress the requested
 	// visibility). Renovate itself also honours LOG_LEVEL.
-	raw := strings.TrimSpace(envx.String("LOG_LEVEL", "info"))
+	raw := strings.TrimSpace(cmp.Or(envx.String("LOG_LEVEL"), "info"))
 	level, recognized := slogx.ParseLevel(raw, slog.LevelInfo)
 	slogx.Setup(slogx.Options{Level: level})
 	if !recognized {
@@ -81,7 +82,7 @@ func setupLogger() {
 // to defaultBaseDir. It is read — never set — by the scheduler so it can
 // verify the directory is writable before handing off to Renovate.
 func baseDir() string {
-	return envx.String("RENOVATE_BASE_DIR", defaultBaseDir)
+	return cmp.Or(envx.String("RENOVATE_BASE_DIR"), defaultBaseDir)
 }
 
 // baseDirForEnv resolves the base directory from the environment the child
