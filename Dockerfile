@@ -1,5 +1,5 @@
 # check=error=true
-FROM golang:1.26-trixie@sha256:87ffdb09b6a2e29ff910748b745395e8a0299aa80b7c0551cdca9b55e3fd2b3e AS go-builder
+FROM golang:1.27-trixie@sha256:22b64c486d44847387a2d9591bb705dc4b3a1227bb393d76a9d4ae176d046327 AS go-builder
 ENV GOTOOLCHAIN=auto
 
 WORKDIR /src
@@ -90,7 +90,7 @@ ENV RENOVATE_BASE_DIR=/data
 # runs the image default 12021:0, but this stays load-bearing for external
 # rootless operators -- see the README "Running as a non-default user".)
 # renovate: datasource=golang-version depName=go
-ARG GOLANG_VERSION=1.26.7
+ARG GOLANG_VERSION=1.27.0
 RUN install-tool golang "${GOLANG_VERSION}"
 ENV GOTOOLCHAIN=auto
 
