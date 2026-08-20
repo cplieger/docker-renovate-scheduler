@@ -37,8 +37,8 @@ Go module `github.com/cplieger/docker-renovate-scheduler`; binary
 child; triggers only submit requests.
 
 - `main.go`: subcommand dispatch (`daemon` / `run` / `health`).
-- `daemon.go`: the composition root (`runDaemon`: boot — logger, marker
-  clear, base-dir check, config, socket bind — then compose and delegate)
+- `daemon.go`: the composition root (`runDaemon`: boot, meaning logger, marker
+  clear, base-dir check, config, socket bind, then compose and delegate)
   and the orchestration (`daemon.run`: the executor goroutine (`runJobs`,
   the ONLY code that starts Renovate), the built-in ticker (`startTicker`,
   a `scheduler.RunLoop` that submits tick jobs like any other trigger), and
@@ -79,13 +79,13 @@ trigger path.
 ## Env-var convention (name the job, don't collide with Renovate)
 
 Scheduler knobs use the **`RUN_*`** prefix (`RUN_INTERVAL`, `RUN_TIMEOUT`),
-named after the JOB — one Renovate run — not after the mechanism that drives
+named after the JOB, one Renovate run, not after the mechanism that drives
 it. Naming the mechanism is what let three sibling schedulers spell the same
 knob three different ways; job-named knobs never drifted.
 
 They stay outside `RENOVATE_*`: that is Renovate's own config namespace and
 the bot would try to interpret our knobs as config. `RENOVATE_INTERVAL` would
-be wrong for a second reason — it would imply Renovate reads it. `LOG_LEVEL`
+be wrong for a second reason: it would imply Renovate reads it. `LOG_LEVEL`
 is intentionally shared. Renovate itself is configured the normal way
 (`config.js` / `RENOVATE_*` env / each repo's `renovate.json`); the scheduler
 never parses or rewrites Renovate config.
