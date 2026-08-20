@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/cplieger/scheduler/v4/trigger"
 )
@@ -28,7 +31,15 @@ import (
 func runClient(socketPath string, repos []string) int {
 	setupLogger()
 
-	final, err := trigger.Submit(socketPath, runPayload{Repos: repos, Env: os.Environ()}, func(ev trigger.Event) {
+	// The daemon owns the run; this process only waits for its result, and
+	// that wait is unbounded by contract. Bind it to the terminal so an
+	// operator interrupting the `docker exec` unwinds here -- closing the
+	// connection, which the daemon observes -- instead of leaving the socket
+	// half-open until the kernel reaps this process.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	final, err := trigger.Submit(ctx, socketPath, runPayload{Repos: repos, Env: os.Environ()}, func(ev trigger.Event) {
 		switch ev.Kind {
 		case trigger.EventQueued:
 			slog.Info("triggered run accepted", "repos", repos)
@@ -45,6 +56,12 @@ func runClient(socketPath string, repos []string) int {
 		return 1
 	case errors.Is(err, trigger.ErrSend):
 		slog.Error("cannot send run request", "error", err)
+		return 1
+	case errors.Is(err, context.Canceled):
+		// The operator interrupted the wait. The daemon keeps running the
+		// run it already accepted; only this observer gave up, so the exit
+		// code reports "outcome unknown to me", not "the run failed".
+		slog.Warn("interrupted while waiting for the run; it continues in the daemon")
 		return 1
 	case err != nil:
 		slog.Error("connection lost before the run completed (daemon stopped?)", "error", err)
