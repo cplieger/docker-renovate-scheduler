@@ -112,7 +112,7 @@ docker exec renovate docker-renovate-scheduler run            # all configured r
 docker exec renovate docker-renovate-scheduler run owner/repo # just one (positional args go straight to Renovate)
 ```
 
-The `run` command submits the request to the daemon and blocks until that run completes, exiting 0 on success and 1 on failure (the run's own result, even when it waited its turn behind an in-flight pass). Because the daemon executes the run, its full Renovate output lands on the **container's** log stream in this mode too; the trigger's log (an Ofelia job log, a webhook action's output) shows only the `run` command's lifecycle lines (`triggered run accepted` / `started` / `complete`). Read per-run detail from `docker logs` / Loki; read the outcome from the exit code.
+The `run` command submits the request to the daemon and blocks until that run completes, exiting 0 on success and 1 on failure (the run's own result, even when it waited its turn behind an in-flight pass). If you interrupt that wait, the run continues in the daemon and the client exits 1 with a warning. Exit 1 there means the outcome is unknown to the client, not that the run failed. Because the daemon executes the run, its full Renovate output lands on the **container's** log stream in this mode too; the trigger's log (an Ofelia job log, a webhook action's output) shows only the `run` command's lifecycle lines (`triggered run accepted` / `started` / `complete`). Read per-run detail from `docker logs` / Loki; read the outcome from the exit code.
 
 Environment overrides ride along: `docker exec -e RENOVATE_AUTODISCOVER=false renovate docker-renovate-scheduler run owner/repo` forwards the exec's environment with the request, and the daemon starts that run's Renovate child with exactly that environment.
 
@@ -251,6 +251,7 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 | --- | --- |
 | renovate/renovate | [Docker Hub](https://hub.docker.com/r/renovate/renovate) (the runtime base) |
 | golang | [Go](https://hub.docker.com/_/golang) (builder stage only) |
+| [`github.com/cplieger/atomicfile`](https://github.com/cplieger/atomicfile) | base-directory write probe |
 | [`github.com/cplieger/envx`](https://github.com/cplieger/envx) | environment variable parsing |
 | [`github.com/cplieger/health`](https://github.com/cplieger/health) | file-marker healthcheck |
 | [`github.com/cplieger/scheduler`](https://github.com/cplieger/scheduler) | interval parsing, run loop, graceful command runner, unix-socket trigger broker |
