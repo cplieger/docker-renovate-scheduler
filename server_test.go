@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	scheduler "github.com/cplieger/scheduler/v3"
-	"github.com/cplieger/scheduler/v3/trigger"
+	scheduler "github.com/cplieger/scheduler/v4"
+	"github.com/cplieger/scheduler/v4/trigger"
 )
 
 // The broker mechanics (queue semantics, socket hygiene, wire ordering,

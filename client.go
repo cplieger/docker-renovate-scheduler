@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/cplieger/scheduler/v3/trigger"
+	"github.com/cplieger/scheduler/v4/trigger"
 )
 
 // --- `run` subcommand: the trigger client ---

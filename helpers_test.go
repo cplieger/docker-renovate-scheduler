@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/cplieger/health"
-	scheduler "github.com/cplieger/scheduler/v3"
-	"github.com/cplieger/scheduler/v3/trigger"
+	scheduler "github.com/cplieger/scheduler/v4"
+	"github.com/cplieger/scheduler/v4/trigger"
 )
 
 // newBareDaemon builds the standard test daemon fixture — temp health
