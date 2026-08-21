@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/cplieger/scheduler/v4/trigger"
+	"github.com/cplieger/slogx/capture"
 )
 
 // TestRunClient_ExitCodesOverRealSocket pins the trigger contract end-to-end
@@ -125,5 +128,48 @@ func TestRunClient_RequestSendFailureExitsOne(t *testing.T) {
 
 	if code := runClient(sock, nil); code != 1 {
 		t.Errorf("runClient() = %d when the request write fails, want 1", code)
+	}
+}
+
+// TestFinishResult_FailedRunLogsTheReasonOrItsFallback pins the reason
+// attribute on the client's failure line -- the whole diagnostic an operator
+// reading an Ofelia job log or a Komodo action gets, since the run's own
+// output goes to the container log stream. A reason the daemon sent is
+// reported verbatim; a failure that arrived without one still points at the
+// log stream instead of logging an empty reason. Serial: swaps slog.Default.
+func TestFinishResult_FailedRunLogsTheReasonOrItsFallback(t *testing.T) {
+	tests := []struct {
+		name       string
+		reason     string
+		wantReason string
+	}{
+		{
+			name:       "a reason from the daemon is reported verbatim",
+			reason:     "renovate exited 1 on owner/repo",
+			wantReason: "renovate exited 1 on owner/repo",
+		},
+		{
+			name:       "a failure without a reason points at the log stream",
+			reason:     "",
+			wantReason: "renovate exited non-zero (see the container log stream)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := capture.Default(t)
+
+			code := finishResult(trigger.Event{Reason: tt.reason, DurationMs: 42}, []string{"owner/repo"})
+
+			if code != 1 {
+				t.Errorf("finishResult(Event{OK: false, Reason: %q}) = %d, want 1", tt.reason, code)
+			}
+			got, ok := rec.AttrValueExact("triggered run failed", "reason")
+			if !ok {
+				t.Fatalf("finishResult(Event{OK: false, Reason: %q}) logged no reason attribute on the failure line; captured: %v", tt.reason, rec.Messages())
+			}
+			if got != tt.wantReason {
+				t.Errorf("finishResult(Event{OK: false, Reason: %q}) logged reason = %q, want %q", tt.reason, got, tt.wantReason)
+			}
+		})
 	}
 }

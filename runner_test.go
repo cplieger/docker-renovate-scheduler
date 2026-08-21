@@ -400,7 +400,36 @@ type groupMember struct {
 
 // startTermIgnoringGroupMember adds a SIGTERM-ignoring process to pgid's
 // process group, modelling the package-manager grandchild that shrugs off the
-// runner's group SIGTERM and has to be SIGKILL-swept.
+// runner's group SIGTERM and has to be SIGKILL-swept. Fixture strategy (why
+// it is a child of the test binary): startGroupMember.
+func startTermIgnoringGroupMember(t *testing.T, pgid int) *groupMember {
+	t.Helper()
+	// exec replaces the shell, so the surviving process has no children of
+	// its own to orphan, and an ignored disposition survives exec, so the
+	// sleep inherits the TERM ignore.
+	return startGroupMember(t, pgid, `trap '' TERM; : > "$1"; exec sleep 30`,
+		"group member never installed its SIGTERM ignore")
+}
+
+// startTermHonoringGroupMember adds a process with the DEFAULT SIGTERM
+// disposition to pgid's process group, modelling the package-manager
+// grandchild that stops as soon as the run's group SIGTERM reaches it. Which
+// signal actually reached it is then readable from its exit signal: SIGTERM
+// when the whole group was addressed, SIGKILL when only the leader was and
+// the member had to be force-swept afterwards.
+func startTermHonoringGroupMember(t *testing.T, pgid int) *groupMember {
+	t.Helper()
+	// exec replaces the shell, so the surviving process has no children of
+	// its own to orphan and takes the default SIGTERM disposition.
+	return startGroupMember(t, pgid, `: > "$1"; exec sleep 30`,
+		"group member never started")
+}
+
+// startGroupMember starts `sh -c script` as a direct child of the TEST binary
+// joined into pgid's process group, waits for the readiness file the script
+// creates at "$1" (failing with readyMsg if it never appears), and asserts
+// the join. A reaper goroutine collects the member the instant it dies and
+// records when.
 //
 // It joins the group as a direct child of the TEST binary rather than being
 // forked as a descendant of the runner's own child, and that is what makes
@@ -413,13 +442,10 @@ type groupMember struct {
 // code under test: it fails outright wherever PID 1 does not reap (any
 // app-as-PID-1 container) and flakes on a loaded CI runner, where the reap can
 // miss the bounded window. A direct child is reaped here, at a known instant.
-func startTermIgnoringGroupMember(t *testing.T, pgid int) *groupMember {
+func startGroupMember(t *testing.T, pgid int, script, readyMsg string) *groupMember {
 	t.Helper()
 	readyPath := t.TempDir() + "/member-ready"
-	// exec replaces the shell, so the surviving process has no children of
-	// its own to orphan, and an ignored disposition survives exec, so the
-	// sleep inherits the TERM ignore.
-	cmd := exec.Command("sh", "-c", `trap '' TERM; : > "$1"; exec sleep 30`, "sh", readyPath)
+	cmd := exec.Command("sh", "-c", script, "sh", readyPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start group member: %v", err)
@@ -434,7 +460,7 @@ func startTermIgnoringGroupMember(t *testing.T, pgid int) *groupMember {
 	waitFor(t, 5*time.Second, func() bool {
 		_, err := os.Stat(readyPath)
 		return err == nil
-	}, "group member never installed its SIGTERM ignore")
+	}, readyMsg)
 	// Guard against a vacuous fixture: a member that failed to join the group
 	// leaves the group empty as soon as the runner's child is reaped, and
 	// every assertion downstream then passes for the wrong reason.
@@ -445,8 +471,8 @@ func startTermIgnoringGroupMember(t *testing.T, pgid int) *groupMember {
 }
 
 // awaitReap waits for the reaper goroutine to collect the member and returns
-// the instant it did. The member outlives the runner's own child in every
-// fixture here, so that instant is when the process group emptied.
+// the instant it did, which is also when the process group emptied in every
+// fixture whose member outlives the runner's own child.
 func (m *groupMember) awaitReap(t *testing.T) time.Time {
 	t.Helper()
 	select {
@@ -528,6 +554,32 @@ func TestStopUncommittedRun_SweepsTermIgnoringGroupMember(t *testing.T) {
 	}
 }
 
+// TestStopUncommittedRun_TermsTheWholeGroupNotJustTheLeader pins the target of
+// the shutdown SIGTERM: it addresses the run's process GROUP, so a
+// package-manager process beside the leader gets the same chance to stop
+// cleanly. A signal aimed at the leader alone leaves that process running
+// until the grace-expiry force-kill, which is both a slower shutdown and a
+// package manager killed mid-write against the base directory.
+//
+// Read from the member's exit signal, not from timing: SIGTERM means the group
+// TERM reached it, SIGKILL means only the sweep did.
+func TestStopUncommittedRun_TermsTheWholeGroupNotJustTheLeader(t *testing.T) {
+	t.Parallel()
+	cmd, markReaped := startTermHonoringChild(t)
+	member := startTermHonoringGroupMember(t, cmd.Process.Pid)
+
+	stopUncommittedRun(cmd)
+	markReaped()
+
+	if cmd.ProcessState == nil {
+		t.Fatal("runner child not reaped: Wait never completed")
+	}
+	member.awaitReap(t)
+	if got := member.exitSignal(); got != syscall.SIGTERM {
+		t.Errorf("group member exit signal = %v, want SIGTERM: the shutdown TERM must address the run's whole process group, not the leader alone", got)
+	}
+}
+
 // TestRunRenovateOnce_StartFailureIsARunFailureNotAPanic pins the launch
 // failure mode: when the child cannot even be started (a missing entrypoint
 // binary -- e.g. a base-image relocation that slipped past the Dockerfile's
@@ -572,6 +624,34 @@ func TestDefaultCommandRunner_CancelOnExitedChildReportsProcessDone(t *testing.T
 	// empty: the Cancel closure's group SIGTERM gets ESRCH.
 	if err := cmd.Cancel(); !errors.Is(err, os.ErrProcessDone) {
 		t.Errorf("Cancel() on an exited child = %v, want os.ErrProcessDone (ESRCH must map to process-done, not surface as a cancel failure)", err)
+	}
+}
+
+// TestDefaultCommandRunner_CancelSignalsTheWholeProcessGroup pins the target of
+// the Cancel closure's SIGTERM: the run's process GROUP, so the package-manager
+// toolchains Renovate installs at runtime stop with it instead of continuing to
+// write the base directory after the run timeout fired. os/exec's own WaitDelay
+// SIGKILL reaches the direct child only, so a signal aimed at the leader alone
+// leaves those processes for the post-timeout sweep — or, on the paths that do
+// not sweep, running against the next FIFO job's base directory.
+//
+// Read from the member's exit signal rather than from timing: SIGTERM means the
+// group was addressed, and a member that is never signalled at all outlives the
+// cancel entirely.
+func TestDefaultCommandRunner_CancelSignalsTheWholeProcessGroup(t *testing.T) {
+	t.Parallel()
+	cmd, markReaped := startTermHonoringChild(t)
+	member := startTermHonoringGroupMember(t, cmd.Process.Pid)
+
+	if err := cmd.Cancel(); err != nil {
+		t.Fatalf("Cancel() = %v, want nil for a live run group", err)
+	}
+	_ = cmd.Wait()
+	markReaped()
+
+	member.awaitReap(t)
+	if got := member.exitSignal(); got != syscall.SIGTERM {
+		t.Errorf("group member exit signal = %v, want SIGTERM: Cancel must address the run's whole process group, not the leader alone", got)
 	}
 }
 
