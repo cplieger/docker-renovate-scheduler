@@ -51,6 +51,39 @@ RUN find /opt/containerbase -name docker -prune -exec rm -rf {} + \
     && [ -z "$(find /opt/containerbase -name docker 2>/dev/null)" ] \
     && test -x /usr/local/sbin/renovate-entrypoint.sh
 
+# Strip the native TypeScript compiler out of the base image's pnpm store, for
+# the same reason as the docker CLI above: it is a 24 MB Go binary nothing here
+# can reach, and Trivy reads its embedded module list and reports the Go stdlib
+# and golang.org/x/text CVEs of whatever toolchain TypeScript was built with
+# (10 HIGH on 44.50.1). None of them are fixable here -- we do not build it and
+# renovate pins the version -- so they would otherwise sit open forever.
+#
+# It is unreachable at runtime, which is NOT obvious from renovate's manifest.
+# `typescript` is a devDependency there, and the image installs `--prod`, so the
+# expected conclusion is that it should not be present at all. It arrives
+# through the production graph instead: the `openpgp` optional dependency needs
+# peer `@openpgp/web-stream-tools`, which declares a types-only `typescript`
+# peerDependency, which pulls typescript's per-platform binary. A types peer is
+# consumed by a compiler, never by the library at runtime -- verified in the
+# live v3.0.31 image, where the app root has no `node_modules/typescript`, no
+# `node_modules/@typescript` and no `.bin/tsc`, and no JS anywhere in the image
+# requires typescript, web-stream-tools' own sources included.
+#
+# Only the BINARY goes. The `.d.ts` files beside it and typescript's JS API stay
+# where pnpm put them, so nothing about module resolution changes; this removes
+# the CVE surface rather than the package.
+#
+# find DRIVES the removal and covers both arches (`typescript-linux-x64` and
+# `-arm64`), because the store path embeds the TypeScript version and moves on
+# renovate bumps -- a hardcoded path would rot into a silent no-op. The
+# pre-check is what makes that failure loud: a base bump that stops shipping the
+# binary fails THIS build instead of leaving a removal that protects nothing.
+RUN tsc_glob='*/@typescript/typescript-linux-*/lib/tsc' \
+    && store=/usr/local/renovate/node_modules/.pnpm \
+    && [ -n "$(find "$store" -type f -path "$tsc_glob")" ] \
+    && find "$store" -type f -path "$tsc_glob" -delete \
+    && [ -z "$(find "$store" -type f -path "$tsc_glob")" ]
+
 # Apply all available Ubuntu security updates the renovate base inherits from
 # its Ubuntu layer. The base lags the distro security mirror between upstream
 # rebuilds, so Trivy flags stale OS packages (perl, tar, libxml2, libssh2,
