@@ -26,7 +26,7 @@ One deliberate trim: the bundled `docker` CLI is removed. Renovate invokes it on
 ## What it does
 
 - Runs `renovate` on a **built-in interval** (`RUN_INTERVAL=6h`): one run at startup for immediate freshness, then every interval. Or set `RUN_INTERVAL=off` and trigger each run **externally** (`docker exec … run`).
-- **The daemon owns every run.** PID 1 executes Renovate as its own child process, whichever trigger asked. The `run` subcommand is a thin client that submits the request over an in-container unix socket, forwarding its repo arguments **and its environment** (a `docker exec -e RENOVATE_X=… … run` override reaches Renovate intact), and exits with that run's true result.
+- **The daemon owns every run.** It executes Renovate as its own child process, whichever trigger asked. The `run` subcommand is a thin client that submits the request over an in-container unix socket, forwarding its repo arguments **and its environment** (a `docker exec -e RENOVATE_X=… … run` override reaches Renovate intact), and exits with that run's true result.
 - **One run at a time, every request served.** Requests queue in order behind an in-flight run; each gets its own run and its own exit code. See [One run at a time](#one-run-at-a-time-queueing).
 - File-marker healthcheck via [`github.com/cplieger/health`](https://github.com/cplieger/health): unhealthy when the last run failed, recovers on the next clean run.
 - Streams Renovate's own structured logs straight through to the container's stdout/stderr (set `LOG_FORMAT=json`) for collection by Alloy/Promtail/Loki, **in both scheduling modes**. The scheduler neither captures nor parses Renovate's output; it emits only its own lifecycle lines, with UTC timestamps regardless of the container's `TZ`.
@@ -116,7 +116,7 @@ docker exec renovate docker-renovate-scheduler run owner/repo # just one (positi
 
 The `run` command submits the request to the daemon and blocks until that run completes, exiting 0 on success and 1 on failure (the run's own result, even when it waited its turn behind an in-flight pass). If you interrupt that wait, a run the daemon already accepted continues there; an interrupt before acceptance leaves the outcome unknown to the client. Either way the client exits 1 with a warning. Exit 1 there means the outcome is unknown to the client, not that the run failed. Because the daemon executes the run, its full Renovate output lands on the **container's** log stream in this mode too; the trigger's log (an Ofelia job log, a webhook action's output) shows only the `run` command's lifecycle lines (`triggered run accepted` / `started` / `complete`). Read per-run detail from `docker logs` / Loki; read the outcome from the exit code.
 
-Environment overrides ride along: `docker exec -e RENOVATE_AUTODISCOVER=false renovate docker-renovate-scheduler run owner/repo` forwards the exec's environment with the request, and the daemon starts that run's Renovate child with exactly that environment.
+Environment overrides ride along: `docker exec -e RENOVATE_AUTODISCOVER=false renovate docker-renovate-scheduler run owner/repo` forwards the exec's environment with the request, and the daemon starts that run's Renovate child with that environment.
 
 Example with [Ofelia](https://github.com/mcuadros/ofelia):
 
@@ -171,7 +171,7 @@ The drain is internally capped at `RUN_TIMEOUT` (a run can't outlast its own tim
 
 | Command | Purpose |
 | --- | --- |
-| `daemon` (default) | PID 1; owns every Renovate run, serves the trigger socket, and drives the built-in interval when `RUN_INTERVAL` is a duration. |
+| `daemon` (default) | Owns every Renovate run, serves the trigger socket, and drives the built-in interval when `RUN_INTERVAL` is a duration. |
 | `run [repo …]` | Submit one run to the daemon and wait for it; exit 0/1 is the run's own result. The external-trigger entry point; extra args pass through to Renovate as repository slugs, and the exec's environment is forwarded to the run. |
 | `health` | The Docker healthcheck probe (stats the marker file). |
 

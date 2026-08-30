@@ -33,7 +33,7 @@ HTTP, not via the CLI.
 
 Go module `github.com/cplieger/docker-renovate-scheduler`; binary
 `docker-renovate-scheduler`. Flat package. The architecture is
-**single-owner**: the daemon (PID 1) executes every Renovate run as its own
+**single-owner**: the daemon executes every Renovate run as its own
 child; triggers only submit requests.
 
 - `main.go`: subcommand dispatch (`daemon` / `run` / `health`), and the one

@@ -125,7 +125,8 @@ const (
 // is reaped (see stopUncommittedRun) and the run reports runCancelled.
 func runRenovateOnce(ctx context.Context, stopping stopRequested,
 	timeout time.Duration, trig string, p runPayload,
-	newCmd scheduler.CommandRunner) runOutcome {
+	newCmd scheduler.CommandRunner,
+) runOutcome {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
