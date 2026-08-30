@@ -85,19 +85,14 @@ COPY --chmod=755 --from=go-builder /docker-renovate-scheduler /usr/local/bin/doc
 
 USER 12021
 
-# ENTRYPOINT is inherited from the base image (renovate-entrypoint.sh, which
-# exec-chains to the containerbase docker-entrypoint.sh). It sets up the
-# containerbase environment and then execs `dumb-init -- CMD`, so PID 1 is
-# dumb-init and the scheduler daemon is its child; that hop is what the
-# child's own process group in runner.go is written against. The daemon owns
-# every Renovate run as a child process; a run triggered via
-# `docker exec … run` executes with the CLIENT's forwarded environment (which
-# never passed through this ENTRYPOINT), so the daemon routes each child
-# through the same entrypoint internally to re-establish containerbase per
-# run regardless of the environment it starts from.
-# The HEALTHCHECK bypasses the ENTRYPOINT above, so it calls the binary by
-# absolute path (no containerbase PATH setup); the CMD below is passed through
-# the ENTRYPOINT, which sets up PATH, so its bare name resolves.
+# No ENTRYPOINT here: the base image's chain (renovate-entrypoint.sh into
+# containerbase's docker-entrypoint.sh) ends `exec dumb-init -- CMD`, so PID 1
+# is dumb-init and the daemon is its child. runner.go's own process group is
+# written against that hop, and it routes each Renovate child back through this
+# same entrypoint to re-establish containerbase per run.
+
+# HEALTHCHECK bypasses the entrypoint, so it needs the absolute path; CMD goes
+# through it and gets containerbase's PATH, so a bare name resolves there.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=10m \
     CMD ["/usr/local/bin/docker-renovate-scheduler", "health"]
 CMD ["docker-renovate-scheduler", "daemon"]

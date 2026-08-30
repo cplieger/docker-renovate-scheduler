@@ -22,17 +22,9 @@ import (
 
 // --- Configuration ---
 //
-// This scheduler has no config file of its own: Renovate reads its entire
-// configuration from its own RENOVATE_* environment variables, a config.js,
-// or a config file (see config.js.example). The scheduler is configured by
-// three environment variables, all deliberately OUTSIDE Renovate's
-// RENOVATE_* namespace so Renovate cannot misinterpret them as config
-// options:
-//
-//	RUN_INTERVAL  built-in cadence (Go duration), or off/disabled/0 to
-//	                disable the built-in scheduler and trigger runs externally
-//	RUN_TIMEOUT   whole-run timeout for a single `renovate` invocation
-//	LOG_LEVEL       slog level (also honoured by Renovate itself)
+// The scheduler's own env vars sit deliberately OUTSIDE Renovate's RENOVATE_*
+// namespace, so Renovate cannot read them as its own config options. Renovate's
+// configuration stays entirely Renovate's; nothing here wraps or re-exposes it.
 
 const (
 	// defaultInterval is the fallback built-in scheduler cadence when
@@ -116,16 +108,10 @@ func baseDirForEnv(env []string) string {
 	return defaultBaseDir
 }
 
-// loadInterval parses RUN_INTERVAL and reports the built-in scheduler
-// cadence and whether the built-in scheduler runs at all. It delegates to
-// the scheduler library's shared *_INTERVAL parser: a Go
-// duration ("1h", "30m") sets the interval; the sentinels "off"/"disabled"
-// (case-insensitive) or a zero duration ("0", "0s") select external mode
-// (the built-in scheduler idles and runs are triggered out-of-band via the
-// `run` subcommand); unset, negative, or unparseable falls back to
-// defaultInterval with the scheduler enabled (a warning is logged for the
-// negative and unparseable cases). scheduleEnabled is true only in built-in
-// mode.
+// loadInterval reports the built-in scheduler cadence and whether the built-in
+// scheduler runs at all. scheduler.ParseInterval owns the grammar: a Go duration
+// sets the interval, the "off"/"disabled"/zero sentinels select external mode,
+// and anything else falls back to defaultInterval with the scheduler enabled.
 func loadInterval() (interval time.Duration, scheduleEnabled bool) {
 	s := scheduler.ParseInterval(os.Getenv("RUN_INTERVAL"), defaultInterval,
 		scheduler.WithName("RUN_INTERVAL"))
