@@ -223,14 +223,17 @@ groups:
         annotations:
           summary: "renovate has not completed a run in 13h"
           description: >
-            The scheduler logs `renovate run complete` after every run in
-            both modes (built-in: at startup and then every RUN_INTERVAL,
-            default 6h; external: per trigger). None in 13h while the
-            container is up means the schedule is wedged or the triggers
-            stopped arriving, and no dependency PRs are being raised even
-            though nothing logged an error. Restart the container (or check
-            the trigger source). The 13h window spans two default 6h
-            intervals plus margin; adjust it to your cadence.
+            The scheduler logs `renovate run complete` after every run that
+            completes, in both modes (built-in: at startup and then every
+            RUN_INTERVAL, default 6h; external: per trigger). One case
+            suppresses it on purpose: a run that exits zero whose process
+            tree cannot be confirmed dead halts admission and logs at ERROR,
+            which `RenovateRunFailed` catches. Otherwise, none in 13h while
+            the container is up means the schedule is wedged or the triggers
+            stopped arriving, and no dependency PRs are being raised.
+            Restart the container (or check the trigger source). The 13h
+            window spans two default 6h intervals plus margin; adjust it to
+            your cadence.
 ```
 
 Thresholds and the `severity` label are starting points; adjust the deadman window to your `RUN_INTERVAL` and the `container` selector (or `job` / `service`, depending on your log collector) to your deployment, and route by whatever labels your Alertmanager uses.
