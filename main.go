@@ -17,12 +17,15 @@ import (
 // default when no argument is given — runs the long-lived daemon that owns
 // all runs. Any other subcommand is rejected loudly with exit code 2.
 func main() {
+	// Logging is configured before anything can diagnose: the health probe's
+	// own config-parse warnings (an unparseable RUN_INTERVAL / RUN_TIMEOUT
+	// read by probeOptions) must come out as logfmt like every other line,
+	// and RunProbe calls os.Exit, so nothing after it runs.
+	setupLogger()
+
 	// CLI health probe for the Docker healthcheck. RunProbe calls os.Exit, so
-	// this is checked before the subcommand switch; the logger is configured
-	// first so config-parse warnings from probeOptions (an unparseable
-	// RUN_INTERVAL / RUN_TIMEOUT) come out as logfmt like every other line.
+	// this is checked before the subcommand switch.
 	if len(os.Args) > 1 && os.Args[1] == "health" {
-		setupLogger()
 		health.RunProbe(healthMarkerPath, probeOptions()...)
 	}
 
@@ -39,7 +42,6 @@ func main() {
 	case "run":
 		os.Exit(runClient(socketPath, os.Args[2:]))
 	default:
-		setupLogger()
 		slog.Error("unknown subcommand", "command", cmd, "valid", "daemon, run, health")
 		os.Exit(2)
 	}

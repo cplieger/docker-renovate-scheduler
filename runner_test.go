@@ -76,6 +76,11 @@ func TestRunRenovateOnce_EnvHandling(t *testing.T) {
 			script: `[ "$RENOVATE_TEST_MARKER" = "forwarded" ]`,
 		},
 		{
+			name:   "forwarded env does not merge omitted daemon variables",
+			env:    []string{"RENOVATE_TEST_MARKER=forwarded", "PATH=" + os.Getenv("PATH")},
+			script: `[ -z "${RENOVATE_DAEMON_ONLY+x}" ]`,
+		},
+		{
 			name:   "nil env inherits the daemon environment",
 			env:    nil,
 			script: `[ "$RENOVATE_TEST_MARKER" = "inherited" ]`,
@@ -84,9 +89,10 @@ func TestRunRenovateOnce_EnvHandling(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("RENOVATE_TEST_MARKER", "inherited")
+			t.Setenv("RENOVATE_DAEMON_ONLY", "daemon")
 			runner := shellAssertRunner(tt.script)
-			if ok, _, _ := runRenovateOnce(t.Context(), t.Context(), time.Minute, "test", nil, tt.env, runner); !ok {
-				t.Errorf("runRenovateOnce() = false: the child did not see the expected environment (env=%v)", tt.env)
+			if got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{Env: tt.env}, runner); got != runComplete {
+				t.Errorf("runRenovateOnce() = %v, want runComplete: the child did not see the expected environment (env=%v)", got, tt.env)
 			}
 		})
 	}
@@ -146,26 +152,6 @@ func TestDefaultCommandRunner_ChildRunsInOwnProcessGroup(t *testing.T) {
 	}
 }
 
-// TestRunRenovateOnce_TimeoutCancelsRun pins the documented guardrail that a
-// wedged run is killed rather than left running into the next request.
-func TestRunRenovateOnce_TimeoutCancelsRun(t *testing.T) {
-	t.Parallel()
-	slowRunner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		return exec.CommandContext(ctx, "sleep", "5")
-	}
-
-	start := time.Now()
-	ok, _, _ := runRenovateOnce(t.Context(), t.Context(), 100*time.Millisecond, "test", nil, nil, slowRunner)
-	elapsed := time.Since(start)
-
-	if ok {
-		t.Error("runRenovateOnce() = true for a run that exceeded the timeout, want false")
-	}
-	if elapsed > 3*time.Second {
-		t.Errorf("runRenovateOnce() returned after %v; the timeout did not cancel the run", elapsed)
-	}
-}
-
 // TestRunRenovateOnce_EnvForcesDumbInitInGroup pins the one scheduler-
 // internal environment override: whatever env a run starts from (nil/ticker
 // or a forwarded client environ, even one that tries to re-enable setsid),
@@ -185,8 +171,8 @@ func TestRunRenovateOnce_EnvForcesDumbInitInGroup(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("DUMB_INIT_SETSID", "1") // daemon environ must be overridden too
 			runner := shellAssertRunner(`[ "$DUMB_INIT_SETSID" = "0" ]`)
-			if ok, _, _ := runRenovateOnce(t.Context(), t.Context(), time.Minute, "test", nil, tt.env, runner); !ok {
-				t.Errorf("runRenovateOnce() = false: child did not see DUMB_INIT_SETSID=0 (env=%v)", tt.env)
+			if got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{Env: tt.env}, runner); got != runComplete {
+				t.Errorf("runRenovateOnce() = %v, want runComplete: child did not see DUMB_INIT_SETSID=0 (env=%v)", got, tt.env)
 			}
 		})
 	}
@@ -223,8 +209,8 @@ exec setsid -w sh -c 'echo $$ > "$0"; exec sleep 30' "$1"`
 		return cmd
 	}
 
-	if ok, _, _ := runRenovateOnce(t.Context(), t.Context(), 500*time.Millisecond, "test", nil, nil, runner); ok {
-		t.Fatal("runRenovateOnce() = true for a run that exceeded the timeout, want false")
+	if got := runRenovateOnce(t.Context(), t.Context().Err, 500*time.Millisecond, "test", runPayload{}, runner); got == runComplete {
+		t.Fatal("runRenovateOnce() = runComplete for a run that exceeded the timeout, want a failure outcome")
 	}
 
 	raw, err := os.ReadFile(pidPath)
@@ -241,8 +227,8 @@ exec setsid -w sh -c 'echo $$ > "$0"; exec sleep 30' "$1"`
 }
 
 // TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly pins the distinct
-// ERROR messages for a timed-out run vs a genuine non-zero exit. Both return
-// false, so a boolean-only assertion can't tell them apart; alerting keys on
+// ERROR messages for a timed-out run vs a genuine non-zero exit. Both report
+// the same outcome, so the outcome alone can't tell them apart; alerting keys on
 // the message, so a mutation that swaps or downgrades either must fail here.
 func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	tests := []struct {
@@ -269,9 +255,9 @@ func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := capture.Default(t)
-			ok, _, _ := runRenovateOnce(t.Context(), t.Context(), tt.timeout, "test", nil, nil, tt.runner)
-			if ok {
-				t.Errorf("runRenovateOnce() = true, want false")
+			got := runRenovateOnce(t.Context(), t.Context().Err, tt.timeout, "test", runPayload{}, tt.runner)
+			if got == runComplete {
+				t.Errorf("runRenovateOnce() = runComplete, want a failure outcome")
 			}
 			if got := rec.CountLevel(slog.LevelError, tt.wantMsg); got != 1 {
 				t.Errorf("ERROR records matching %q = %d, want 1; captured: %v", tt.wantMsg, got, rec.Messages())
@@ -284,18 +270,203 @@ func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 // line's exact message and level. The README's RenovateNoRecentRun deadman
 // alert keys on absent_over_time of this exact string, so a silent rewording
 // would make that alert fire permanently at the next quiet window; the
-// boolean result alone (asserted elsewhere) cannot catch it. Serial: swaps
+// outcome alone (asserted elsewhere) cannot catch it. Serial: swaps
 // slog.Default.
 func TestRunRenovateOnce_SuccessLogsCompleteAtInfo(t *testing.T) {
 	rec := capture.Default(t)
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd { return exec.CommandContext(ctx, "true") }
-	ok, cancelled, survived := runRenovateOnce(t.Context(), t.Context(), time.Minute, "test", nil, nil, runner)
-	if !ok || cancelled || survived {
-		t.Fatalf("runRenovateOnce() = (%v, %v, %v), want (true, false, false)", ok, cancelled, survived)
+	got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{}, runner)
+	if got != runComplete {
+		t.Fatalf("runRenovateOnce() = %v, want runComplete", got)
 	}
 	if got := rec.CountLevel(slog.LevelInfo, "renovate run complete"); got != 1 {
 		t.Errorf("INFO records matching %q = %d, want 1; captured: %v", "renovate run complete", got, rec.Messages())
 	}
+}
+
+// TestRunRenovateOnce_CleanRunSweepsLeftoverGroupMember pins the containment
+// sweep on the SUCCESS arm. A zero exit is no proof the run's process group is
+// empty: the leader here exits cleanly while a TERM-ignoring member of its
+// group is still alive, modelling a package manager that outlives Renovate. The
+// member must be gone by the time runRenovateOnce returns, because the executor
+// is released to the next FIFO job against the same base directory the instant
+// it does.
+func TestRunRenovateOnce_CleanRunSweepsLeftoverGroupMember(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	pidPath := dir + "/leader.pid"
+	proceedPath := dir + "/proceed"
+	// The leader publishes its own pid (which is its pgid, via Setpgid) so the
+	// test can join a member to that group, then blocks until released and
+	// exits zero.
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		cmd := defaultCommandRunner(ctx, "sh", "-c",
+			`echo $$ > "$1"; until [ -e "$2" ]; do sleep 0.05; done`, "sh", pidPath, proceedPath)
+		cmd.Stdout, cmd.Stderr = nil, nil // the member must not hold the test's stdout pipe
+		return cmd
+	}
+
+	resultCh := make(chan runOutcome, 1)
+	go func() {
+		resultCh <- runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{}, runner)
+	}()
+
+	waitFor(t, 5*time.Second, func() bool {
+		raw, err := os.ReadFile(pidPath)
+		return err == nil && len(strings.TrimSpace(string(raw))) > 0
+	}, "the run leader never published its pid")
+	raw, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("read the leader pid file: %v", err)
+	}
+	leaderPid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("bad leader PID file content %q: %v", raw, err)
+	}
+	member := startTermIgnoringGroupMember(t, leaderPid)
+	if err := os.WriteFile(proceedPath, nil, 0o600); err != nil {
+		t.Fatalf("release the run leader: %v", err)
+	}
+
+	got := <-resultCh
+	// A clean pass stays a success: the point is that the leftover group
+	// member is reaped BEFORE the executor is released to the next job, not
+	// that a completed run is reported failed.
+	if got != runComplete {
+		t.Fatalf("runRenovateOnce() = %v, want runComplete: a zero-exiting leader whose live group member was swept is still a successful run", got)
+	}
+	member.awaitReap(t)
+	if got := member.exitSignal(); got != syscall.SIGKILL {
+		t.Errorf("leftover group member exited on signal %v, want SIGKILL: a clean run must still sweep its process group", got)
+	}
+}
+
+// TestRunRenovateOnce_EnvironmentValuesNeverReachLifecycleLogs pins the
+// credential boundary on the run's own lifecycle records: the forwarded
+// environment can carry RENOVATE_TOKEN, so no value from it may appear in a
+// message or an attribute. Serial: swaps slog.Default.
+func TestRunRenovateOnce_EnvironmentValuesNeverReachLifecycleLogs(t *testing.T) {
+	const secret = "test-only-renovate-token-7f3c9d"
+	rec := capture.Default(t)
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "true")
+	}
+
+	got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "external",
+		runPayload{Repos: []string{"owner/repo"}, Env: []string{"RENOVATE_TOKEN=" + secret}}, runner)
+
+	if got != runComplete {
+		t.Fatalf("runRenovateOnce() = %v, want runComplete", got)
+	}
+	if key, value, found := leakedRecord(rec, secret); found {
+		t.Errorf("runRenovateOnce() leaked a forwarded environment value in %s = %q", key, value)
+	}
+}
+
+// TestRunRenovateOnce_LifecycleRecordsCarryCorrelationAttributes pins the
+// property every arm shares: each pass emits exactly one "renovate run
+// starting" record carrying the attributes that identify the run (trigger,
+// repo scope, timeout) and exactly one terminal record carrying its trigger
+// and elapsed time, so an operator can tie a terminal line back to its start.
+// The per-arm specifics (the timeout attribute on a timed-out run, the error
+// attribute on a failure) belong to the focused tests above. Serial: swaps
+// slog.Default.
+func TestRunRenovateOnce_LifecycleRecordsCarryCorrelationAttributes(t *testing.T) {
+	tests := []struct {
+		name          string
+		trigger       string
+		repos         []string
+		timeout       time.Duration
+		runner        scheduler.CommandRunner
+		terminalMsg   string
+		terminalLevel slog.Level
+	}{
+		{
+			name:          "clean run",
+			trigger:       "startup",
+			repos:         []string{"owner/repo"},
+			timeout:       time.Minute,
+			runner:        func(ctx context.Context, _ string, _ ...string) *exec.Cmd { return exec.CommandContext(ctx, "true") },
+			terminalMsg:   "renovate run complete",
+			terminalLevel: slog.LevelInfo,
+		},
+		{
+			name:    "timed-out run",
+			trigger: "interval",
+			repos:   []string{"owner/slow"},
+			timeout: 100 * time.Millisecond,
+			runner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+				return exec.CommandContext(ctx, "sleep", "5")
+			},
+			terminalMsg:   "renovate run timed out",
+			terminalLevel: slog.LevelError,
+		},
+		{
+			name:          "non-zero exit",
+			trigger:       "external",
+			repos:         []string{"owner/broken"},
+			timeout:       time.Minute,
+			runner:        func(ctx context.Context, _ string, _ ...string) *exec.Cmd { return exec.CommandContext(ctx, "false") },
+			terminalMsg:   "renovate run failed",
+			terminalLevel: slog.LevelError,
+		},
+		{
+			name:    "start failure",
+			trigger: "external",
+			repos:   []string{"owner/unstartable"},
+			timeout: time.Minute,
+			runner: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+				return exec.CommandContext(ctx, "/nonexistent/renovate-entrypoint.sh")
+			},
+			terminalMsg:   "renovate run failed",
+			terminalLevel: slog.LevelError,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := capture.Default(t)
+
+			_ = runRenovateOnce(t.Context(), t.Context().Err, tt.timeout, tt.trigger,
+				runPayload{Repos: tt.repos}, tt.runner)
+
+			if got := rec.CountExact("renovate run starting"); got != 1 {
+				t.Fatalf("records matching %q = %d, want 1; captured: %v", "renovate run starting", got, rec.Messages())
+			}
+			if got := rec.CountExact(tt.terminalMsg); got != 1 {
+				t.Fatalf("records matching %q = %d, want 1; captured: %v", tt.terminalMsg, got, rec.Messages())
+			}
+			if got, ok := rec.AttrValueExact("renovate run starting", "trigger"); !ok || got != tt.trigger {
+				t.Errorf("start record trigger = (%q, %v), want (%q, true)", got, ok, tt.trigger)
+			}
+			if got, ok := rec.Attr("renovate run starting", "repos"); !ok || !slices.Equal(reposAttr(t, got), tt.repos) {
+				t.Errorf("start record repos = (%v, %v), want %v", got, ok, tt.repos)
+			}
+			timeoutAttr, ok := rec.Attr("renovate run starting", "timeout")
+			if !ok || timeoutAttr.Kind() != slog.KindDuration || timeoutAttr.Duration() != tt.timeout {
+				t.Errorf("start record timeout = (%v, %v), want the %v duration", timeoutAttr, ok, tt.timeout)
+			}
+			if got := rec.CountLevel(tt.terminalLevel, tt.terminalMsg); got != 1 {
+				t.Errorf("%s records matching %q = %d, want 1; captured: %v", tt.terminalLevel, tt.terminalMsg, got, rec.Messages())
+			}
+			if got, ok := rec.AttrValueExact(tt.terminalMsg, "trigger"); !ok || got != tt.trigger {
+				t.Errorf("terminal record trigger = (%q, %v), want (%q, true)", got, ok, tt.trigger)
+			}
+			durationAttr, ok := rec.Attr(tt.terminalMsg, "duration_ms")
+			if !ok || durationAttr.Kind() != slog.KindInt64 {
+				t.Errorf("terminal record duration_ms = (%v, %v), want an int64 attribute", durationAttr, ok)
+			}
+		})
+	}
+}
+
+// reposAttr reads a repo-scope attribute back as a string slice.
+func reposAttr(t *testing.T, value slog.Value) []string {
+	t.Helper()
+	repos, ok := value.Any().([]string)
+	if !ok {
+		t.Fatalf("repos attribute is %T, want []string", value.Any())
+	}
+	return repos
 }
 
 // TestDefaultCommandRunner_CancelSendsSIGTERMNotSIGKILL pins the graceful-
@@ -351,7 +522,7 @@ func TestDefaultCommandRunner_CancelSendsSIGTERMNotSIGKILL(t *testing.T) {
 // context (bounded only by RUN_TIMEOUT, which can outlive
 // stop_grace_period). The injected runner cancels shutdown at process
 // creation — after the pre-start check, before Start — so the child starts
-// with shutdown already won. runRenovateOnce must report cancelled, reap the
+// with shutdown already won. runRenovateOnce must report runCancelled, reap the
 // child promptly (not after its 30s payload or the run timeout), and emit no
 // level=ERROR run-failure line: a cancelled start is a Warn, not a failure
 // alert. Serial: swaps slog.Default.
@@ -368,11 +539,11 @@ func TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild(t *testing.T) {
 	}
 
 	start := time.Now()
-	ok, cancelled, _ := runRenovateOnce(t.Context(), shutdownCtx, time.Minute, "test", nil, nil, runner)
+	got := runRenovateOnce(t.Context(), shutdownCtx.Err, time.Minute, "test", runPayload{}, runner)
 	elapsed := time.Since(start)
 
-	if ok || !cancelled {
-		t.Fatalf("runRenovateOnce() = (ok=%v, cancelled=%v), want (false, true)", ok, cancelled)
+	if got != runCancelled {
+		t.Fatalf("runRenovateOnce() = %v, want runCancelled", got)
 	}
 	if child.ProcessState == nil {
 		t.Fatal("child not reaped: Wait never completed on the shutdown-cancelled start")
@@ -583,7 +754,7 @@ func TestStopUncommittedRun_TermsTheWholeGroupNotJustTheLeader(t *testing.T) {
 // TestRunRenovateOnce_StartFailureIsARunFailureNotAPanic pins the launch
 // failure mode: when the child cannot even be started (a missing entrypoint
 // binary -- e.g. a base-image relocation that slipped past the Dockerfile's
-// build-time assert), runRenovateOnce reports (ok=false, cancelled=false)
+// build-time assert), runRenovateOnce reports runFailed
 // and logs the failure at ERROR, so the executor flips the health marker
 // unhealthy and the RenovateRunFailed alert fires, instead of reporting a
 // clean run. Serial: swaps slog.Default.
@@ -595,10 +766,10 @@ func TestRunRenovateOnce_StartFailureIsARunFailureNotAPanic(t *testing.T) {
 		return exec.CommandContext(ctx, missing)
 	}
 
-	ok, cancelled, _ := runRenovateOnce(t.Context(), t.Context(), time.Minute, "test", nil, nil, runner)
+	got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{}, runner)
 
-	if ok || cancelled {
-		t.Fatalf("runRenovateOnce() = (ok=%v, cancelled=%v) for an unstartable child, want (false, false)", ok, cancelled)
+	if got != runFailed {
+		t.Fatalf("runRenovateOnce() = %v for an unstartable child, want runFailed", got)
 	}
 	if got := rec.CountLevel(slog.LevelError, "renovate run failed"); got != 1 {
 		t.Errorf("ERROR records matching the run-failure line = %d, want 1; captured: %v", got, rec.Messages())
@@ -783,12 +954,9 @@ func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
 		return cmd
 	}
 
-	ok, _, groupSurvived := runRenovateOnce(t.Context(), t.Context(), 500*time.Millisecond, "test", nil, nil, runner)
-	if ok {
-		t.Fatal("runRenovateOnce() = true for a run that exceeded the timeout, want false")
-	}
-	if groupSurvived {
-		t.Error("runRenovateOnce() reported groupSurvived=true although the sweep confirmed the group's death")
+	got := runRenovateOnce(t.Context(), t.Context().Err, 500*time.Millisecond, "test", runPayload{}, runner)
+	if got != runFailed {
+		t.Errorf("runRenovateOnce() = %v for a run that exceeded the timeout whose group the sweep confirmed dead, want runFailed", got)
 	}
 
 	raw, err := os.ReadFile(descPath)
@@ -805,13 +973,11 @@ func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
 	}
 }
 
-// TestWithDumbInitInGroup pins the exactly-one-entry contract at the slice
-// level: the pre-existing DUMB_INIT_SETSID entry is DROPPED, not merely
-// overridden by appending. dumb-init is a C program whose getenv returns the
-// FIRST match in environ, while the shells the indirect tests use resolve
-// duplicates last-wins — so a drop-regression (append without drop) passes
-// every existing shell-assertion test yet lets the client's =1 win inside
-// dumb-init, silently reopening the session escape.
+// TestWithDumbInitInGroup pins the override's POSITION at the slice level:
+// every forwarded entry survives in order and DUMB_INIT_SETSID=0 is appended
+// last, which is what makes os/exec's duplicate-key dedup (last value wins)
+// deliver exactly one entry to the child. A regression that appended the
+// override anywhere but last, or dropped a forwarded entry, goes red here.
 func TestWithDumbInitInGroup(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -825,14 +991,9 @@ func TestWithDumbInitInGroup(t *testing.T) {
 			want: []string{"PATH=/usr/bin", "RENOVATE_X=y", "DUMB_INIT_SETSID=0"},
 		},
 		{
-			name: "drops a pre-existing entry so exactly one remains",
+			name: "a pre-existing entry is outranked by the appended override",
 			env:  []string{"DUMB_INIT_SETSID=1", "PATH=/usr/bin"},
-			want: []string{"PATH=/usr/bin", "DUMB_INIT_SETSID=0"},
-		},
-		{
-			name: "drops every duplicate pre-existing entry",
-			env:  []string{"DUMB_INIT_SETSID=1", "PATH=/usr/bin", "DUMB_INIT_SETSID="},
-			want: []string{"PATH=/usr/bin", "DUMB_INIT_SETSID=0"},
+			want: []string{"DUMB_INIT_SETSID=1", "PATH=/usr/bin", "DUMB_INIT_SETSID=0"},
 		},
 		{
 			name: "empty non-nil env still gets the override",
@@ -844,52 +1005,30 @@ func TestWithDumbInitInGroup(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			if got := withDumbInitInGroup(tt.env); !slices.Equal(got, tt.want) {
-				t.Errorf("withDumbInitInGroup(%v) = %v, want %v (getenv returns the FIRST environ match: a leftover client entry would beat the appended override inside dumb-init)", tt.env, got, tt.want)
+				t.Errorf("withDumbInitInGroup(%v) = %v, want %v (os/exec keeps the LAST value for a duplicate key, so the override must be appended last)", tt.env, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestWithDumbInitInGroup_NilEnvUsesDaemonEnviron pins the nil branch at the
-// slice level: the daemon's own environ is inherited, its DUMB_INIT_SETSID
-// is dropped, and exactly one =0 entry remains. Not parallel: t.Setenv.
-func TestWithDumbInitInGroup_NilEnvUsesDaemonEnviron(t *testing.T) {
-	t.Setenv("DUMB_INIT_SETSID", "1")
-	t.Setenv("RENOVATE_TEST_MARKER", "daemon")
-
-	got := withDumbInitInGroup(nil)
-
-	entries := 0
-	for _, kv := range got {
-		if strings.HasPrefix(kv, "DUMB_INIT_SETSID=") {
-			entries++
-			if kv != "DUMB_INIT_SETSID=0" {
-				t.Errorf("DUMB_INIT_SETSID entry = %q, want DUMB_INIT_SETSID=0", kv)
-			}
-		}
-	}
-	if entries != 1 {
-		t.Errorf("DUMB_INIT_SETSID entries = %d, want exactly 1 (dumb-init's getenv takes the first match, so a duplicate is a containment hazard)", entries)
-	}
-	if !slices.Contains(got, "RENOVATE_TEST_MARKER=daemon") {
-		t.Error("daemon environ not inherited for a nil env")
-	}
-}
-
-// TestSweepRunProcessGroup_NeverStartedChildIsNothingToSweep covers the
-// documented never-started contract: a cmd whose Start was never called (or
-// failed) has no process group, so the sweep reports true immediately
-// instead of dereferencing a nil Process or waiting out the grace window.
-func TestSweepRunProcessGroup_NeverStartedChildIsNothingToSweep(t *testing.T) {
+// TestWithDumbInitInGroup_LeavesTheCallersSliceAlone pins the copy: env is the
+// job payload's own slice and the result path still reads it, so appending the
+// override must not write into the caller's backing array. The fixture gives
+// the input spare capacity and watches the first spare cell, which is the only
+// place a bare append could land.
+func TestWithDumbInitInGroup_LeavesTheCallersSliceAlone(t *testing.T) {
 	t.Parallel()
-	cmd := exec.Command("true") // never started: cmd.Process == nil
+	env := append(make([]string, 0, 4), "PATH=/usr/bin", "RENOVATE_X=y")
+	backing := env[:cap(env)]
+	before := slices.Clone(backing)
 
-	start := time.Now()
-	if !sweepRunProcessGroup(cmd) {
-		t.Error("sweepRunProcessGroup() = false for a never-started child, want true (nothing to sweep)")
+	got := withDumbInitInGroup(env)
+
+	if !slices.Equal(backing, before) {
+		t.Errorf("withDumbInitInGroup() wrote into the caller's backing array: %q, want %q", backing, before)
 	}
-	if elapsed := time.Since(start); elapsed >= scheduler.DefaultGrace {
-		t.Errorf("sweepRunProcessGroup returned after %v for a never-started child; it must return immediately, not wait out the %v grace", elapsed, scheduler.DefaultGrace)
+	if len(got) != len(env)+1 {
+		t.Errorf("withDumbInitInGroup() = %v, want the %d forwarded entries plus the override", got, len(env))
 	}
 }
 
@@ -900,7 +1039,7 @@ func TestSweepRunProcessGroup_NeverStartedChildIsNothingToSweep(t *testing.T) {
 // reports live members for the whole bounded window -- the same observable
 // state as a group whose death cannot be confirmed. sweepRunGroupOrWarn
 // must report survived=true (the executor's fatal containment signal) and
-// log the caller's message at Warn with the pid. Serial: swaps slog.Default.
+// log the production survival message at Warn with the pid. Serial: swaps slog.Default.
 func TestSweepRunGroupOrWarn_UnconfirmableGroupDeathReportsSurvived(t *testing.T) {
 	rec := capture.Default(t)
 
@@ -919,12 +1058,12 @@ func TestSweepRunGroupOrWarn_UnconfirmableGroupDeathReportsSurvived(t *testing.T
 	// sweep's entire DefaultGrace window.
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 
-	survived := sweepRunGroupOrWarn(cmd, "run process group survived the kill sweep (test)", "test")
+	survived := sweepRunGroupOrWarn(cmd, "test")
 
 	if !survived {
 		t.Error("sweepRunGroupOrWarn() = false for a group the sweep cannot confirm dead, want true (the fatal containment signal must fire)")
 	}
-	if got := rec.CountLevel(slog.LevelWarn, "run process group survived the kill sweep (test)"); got != 1 {
+	if got := rec.CountLevel(slog.LevelWarn, "renovate run process group survived the kill sweep; halting run admission to prevent an overlapping run"); got != 1 {
 		t.Errorf("Warn records matching the survival message = %d, want 1; captured: %v", got, rec.Messages())
 	}
 }
@@ -987,5 +1126,170 @@ func TestStopUncommittedRun_WarnsWhenGroupSurvivesGraceExpirySweep(t *testing.T)
 	}
 	if elapsed > 25*time.Second {
 		t.Errorf("stopUncommittedRun returned after %v; it must stay bounded by the two grace windows, never hang on an unconfirmable group", elapsed)
+	}
+}
+
+// TestRunRenovateOnce_NonCleanRunsSweepAndReportContainment drives the two
+// unwitnessed links in the NON-CLEAN arms of runRenovateOnce, which the clean-arm
+// sibling (TestRunRenovateOnce_CleanRunSweepsLeftoverGroupMember) and the
+// helper-level sweep test cannot reach: a genuine non-zero exit must still sweep
+// its process group before returning, and a sweep that cannot confirm the group's
+// death must report runContained rather than runFailed. Both fixtures keep the
+// surviving member a direct child of the TEST binary joined into the run leader's
+// group, so the test owns the reap instead of measuring the ambient reaper.
+func TestRunRenovateOnce_NonCleanRunsSweepAndReportContainment(t *testing.T) {
+	t.Parallel()
+	// The leader publishes its own pid (its pgid, via Setpgid) so the test can
+	// join a member to that group, then blocks until released and exits 1.
+	nonZeroLeader := func(leaderPath, releasePath string) scheduler.CommandRunner {
+		return func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+			cmd := defaultCommandRunner(ctx, "sh", "-c",
+				`echo $$ > "$1"; until [ -e "$2" ]; do sleep 0.05; done; exit 1`, "sh", leaderPath, releasePath)
+			cmd.Stdout, cmd.Stderr = nil, nil // a group member must not hold the test's stdout pipe
+			return cmd
+		}
+	}
+	awaitLeaderPID := func(t *testing.T, leaderPath string) int {
+		t.Helper()
+		waitFor(t, 5*time.Second, func() bool {
+			raw, err := os.ReadFile(leaderPath)
+			return err == nil && len(strings.TrimSpace(string(raw))) > 0
+		}, "the non-zero run leader never published its pid")
+		raw, err := os.ReadFile(leaderPath)
+		if err != nil {
+			t.Fatalf("read the leader pid file: %v", err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err != nil {
+			t.Fatalf("bad leader PID file content %q: %v", raw, err)
+		}
+		return pid
+	}
+
+	t.Run("nonzero exit sweeps a surviving group member", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		leaderPath, releasePath := dir+"/leader.pid", dir+"/release"
+
+		resultCh := make(chan runOutcome, 1)
+		go func() {
+			resultCh <- runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test",
+				runPayload{}, nonZeroLeader(leaderPath, releasePath))
+		}()
+
+		member := startTermIgnoringGroupMember(t, awaitLeaderPID(t, leaderPath))
+		if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
+			t.Fatalf("release the non-zero run leader: %v", err)
+		}
+
+		if got := <-resultCh; got != runFailed {
+			t.Fatalf("runRenovateOnce() = %v, want runFailed: a non-zero exit whose live group member was swept is a failed run, not a containment", got)
+		}
+		member.awaitReap(t)
+		if got := member.exitSignal(); got != syscall.SIGKILL {
+			t.Errorf("non-zero run group member exited on signal %v, want SIGKILL: a failed run must still sweep its process group", got)
+		}
+	})
+
+	t.Run("unconfirmable group death reports containment", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		leaderPath, releasePath := dir+"/leader.pid", dir+"/release"
+
+		resultCh := make(chan runOutcome, 1)
+		go func() {
+			resultCh <- runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test",
+				runPayload{}, nonZeroLeader(leaderPath, releasePath))
+		}()
+
+		// A holder joins the leader's group, is SIGKILLed but NOT reaped: the
+		// zombie keeps the group registered, so the sweep's probe reports live
+		// members for its whole bounded window -- the same observable state as
+		// a group whose death cannot be confirmed.
+		holder := exec.Command("sleep", "300")
+		holder.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: awaitLeaderPID(t, leaderPath)}
+		if err := holder.Start(); err != nil {
+			t.Fatalf("start group holder: %v", err)
+		}
+		t.Cleanup(func() { _ = holder.Wait() }) // reap the zombie after the assertions
+		if got, err := syscall.Getpgid(holder.Process.Pid); err != nil || got != holder.SysProcAttr.Pgid {
+			t.Fatalf("group holder pgid = (%d, %v), want (%d, nil)", got, err, holder.SysProcAttr.Pgid)
+		}
+		if err := holder.Process.Kill(); err != nil {
+			t.Fatalf("kill group holder: %v", err)
+		}
+		if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
+			t.Fatalf("release the non-zero run leader: %v", err)
+		}
+
+		if got := <-resultCh; got != runContained {
+			t.Errorf("runRenovateOnce() = %v, want runContained: a non-zero run whose group death cannot be confirmed must raise the containment signal, not report a plain failure", got)
+		}
+	})
+}
+
+// TestRunRenovateOnce_CleanUnconfirmableGroupDeathReportsContainment pins the
+// arm where the two containment inputs disagree: Renovate exited ZERO but the
+// kill sweep could not confirm its process group dead. The run must report
+// runContained so daemon.execute halts admission, and it must NOT emit the
+// "renovate run complete" record the completion-absence alerting watches for --
+// the clean-arm sibling
+// (TestRunRenovateOnce_CleanRunSweepsLeftoverGroupMember) reaches runComplete
+// because its member is promptly reaped, and the helper-level sweep test proves
+// only that sweepRunGroupOrWarn reports survival. The unconfirmable state is a
+// SIGKILLed-but-unreaped zombie joined into the leader's group, a direct child
+// of the TEST binary so the test owns the reap. Serial: swaps slog.Default.
+func TestRunRenovateOnce_CleanUnconfirmableGroupDeathReportsContainment(t *testing.T) {
+	rec := capture.Default(t)
+	dir := t.TempDir()
+	leaderPath, releasePath := dir+"/leader.pid", dir+"/release"
+	// The leader publishes its own pid (its pgid, via Setpgid) so the test can
+	// join a member to that group, then blocks until released and exits zero.
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		cmd := defaultCommandRunner(ctx, "sh", "-c",
+			`echo $$ > "$1"; until [ -e "$2" ]; do sleep 0.05; done`, "sh", leaderPath, releasePath)
+		cmd.Stdout, cmd.Stderr = nil, nil // a group member must not hold the test's stdout pipe
+		return cmd
+	}
+
+	resultCh := make(chan runOutcome, 1)
+	go func() {
+		resultCh <- runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{}, runner)
+	}()
+
+	waitFor(t, 5*time.Second, func() bool {
+		raw, err := os.ReadFile(leaderPath)
+		return err == nil && len(strings.TrimSpace(string(raw))) > 0
+	}, "the clean run leader never published its pid")
+	raw, err := os.ReadFile(leaderPath)
+	if err != nil {
+		t.Fatalf("read the leader pid file: %v", err)
+	}
+	leaderPid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("bad leader PID file content %q: %v", raw, err)
+	}
+
+	holder := exec.Command("sleep", "300")
+	holder.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: leaderPid}
+	if err := holder.Start(); err != nil {
+		t.Fatalf("start group holder: %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Wait() }) // reap the zombie after the assertions
+	if got, err := syscall.Getpgid(holder.Process.Pid); err != nil || got != leaderPid {
+		t.Fatalf("group holder pgid = (%d, %v), want (%d, nil)", got, err, leaderPid)
+	}
+	if err := holder.Process.Kill(); err != nil {
+		t.Fatalf("kill group holder: %v", err)
+	}
+	if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
+		t.Fatalf("release the clean run leader: %v", err)
+	}
+
+	if got := <-resultCh; got != runContained {
+		t.Errorf("runRenovateOnce() = %v, want runContained: a zero exit whose group death cannot be confirmed must raise the containment signal, not report a completed run", got)
+	}
+	if got := rec.CountLevel(slog.LevelInfo, "renovate run complete"); got != 0 {
+		t.Errorf("INFO records matching %q = %d, want 0: a contained run must not log the completion line; captured: %v", "renovate run complete", got, rec.Messages())
 	}
 }

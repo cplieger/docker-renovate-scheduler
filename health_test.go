@@ -9,24 +9,6 @@ import (
 	"github.com/cplieger/health"
 )
 
-// TestProbeOptions_ArmsMaxAgeOnlyInBuiltinMode pins the probe freshness
-// policy: built-in mode arms a max-age deadline (a wedged interval loop must
-// probe unhealthy), external mode does not (an idle container between sparse
-// triggers stays healthy indefinitely).
-func TestProbeOptions_ArmsMaxAgeOnlyInBuiltinMode(t *testing.T) {
-	t.Setenv("RUN_TIMEOUT", "1h")
-
-	t.Setenv("RUN_INTERVAL", "6h")
-	if opts := probeOptions(); len(opts) != 1 {
-		t.Errorf("built-in mode probe options = %d, want 1 (max-age armed)", len(opts))
-	}
-
-	t.Setenv("RUN_INTERVAL", "off")
-	if opts := probeOptions(); len(opts) != 0 {
-		t.Errorf("external mode probe options = %d, want 0 (no deadline on trigger-written markers)", len(opts))
-	}
-}
-
 // TestProbe_WedgedBuiltinLoopFailsFreshness proves the deadman end-to-end
 // with the real probe: a marker older than the armed max-age probes unhealthy
 // in built-in mode, while external mode accepts a marker of any age.

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -216,8 +215,6 @@ func TestRunDaemon_FullQueueRejectsTriggerImmediately(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	t.Setenv("RUN_INTERVAL", "off")
 	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
 
 	runner, awaitEntered, release := gatedRunner(t)
 

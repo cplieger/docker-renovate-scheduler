@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cplieger/scheduler/v4/trigger"
 	"github.com/cplieger/slogx/capture"
@@ -16,8 +18,6 @@ import (
 // (the same `run [repo …]` → exit 0/1 surface Ofelia and the Komodo action
 // consume): a clean run exits 0, a failing run exits 1.
 func TestRunClient_ExitCodesOverRealSocket(t *testing.T) {
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
 	tests := []struct {
 		name string
 		bin  string
@@ -38,12 +38,7 @@ func TestRunClient_ExitCodesOverRealSocket(t *testing.T) {
 
 // TestRunClient_DaemonUnreachableExitsOne pins the no-daemon failure mode:
 // an immediate exit 1 (the trigger reports a failed job), never a hang.
-// Exit code only: runClient installs the production logger (setupLogger), so
-// its output goes to the real stderr, not a capturable test handler — the
-// same reason the old suite asserted runRun by exit code alone.
 func TestRunClient_DaemonUnreachableExitsOne(t *testing.T) {
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
 	sock := filepath.Join(t.TempDir(), "absent.sock")
 	if code := runClient(sock, nil); code != 1 {
 		t.Errorf("runClient() = %d with no daemon, want 1", code)
@@ -55,8 +50,6 @@ func TestRunClient_DaemonUnreachableExitsOne(t *testing.T) {
 // environment, so a `docker exec -e RENOVATE_X=…` override reaches the
 // daemon-spawned child. The fake child asserts the marker variable.
 func TestRunClient_ForwardsItsEnvironment(t *testing.T) {
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
 	t.Setenv("RENOVATE_TEST_MARKER", "exec-override")
 	runner := shellAssertRunner(`[ "$RENOVATE_TEST_MARKER" = "exec-override" ]`)
 	sock := startTestServer(t, runner)
@@ -72,9 +65,6 @@ func TestRunClient_ForwardsItsEnvironment(t *testing.T) {
 // success. The fake daemon accepts the request, streams the queued event,
 // then drops the connection.
 func TestRunClient_ConnectionLostMidRunExitsOne(t *testing.T) {
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
 	sock := testSocketPath(t)
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -103,14 +93,8 @@ func TestRunClient_ConnectionLostMidRunExitsOne(t *testing.T) {
 // to the unreachable-daemon and connection-lost pins. The fake daemon
 // accepts and closes without reading; a ~4 MiB env entry makes the request
 // larger than the unix-socket buffers, so the in-flight write hits the
-// closed peer (EPIPE) instead of completing into the kernel buffer. Exit
-// code only, and the slog default is restored: runClient installs the
-// production logger (setupLogger), the same reason the sibling tests assert
-// by exit code alone.
+// closed peer (EPIPE) instead of completing into the kernel buffer.
 func TestRunClient_RequestSendFailureExitsOne(t *testing.T) {
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
 	t.Setenv("RENOVATE_TEST_HUGE", strings.Repeat("x", 4<<20))
 	sock := testSocketPath(t)
 	ln, err := net.Listen("unix", sock)
@@ -171,5 +155,105 @@ func TestFinishResult_FailedRunLogsTheReasonOrItsFallback(t *testing.T) {
 				t.Errorf("finishResult(Event{OK: false, Reason: %q}) logged reason = %q, want %q", tt.reason, got, tt.wantReason)
 			}
 		})
+	}
+}
+
+// TestRunClient_InterruptBeforeAcceptanceReportsUnknownOutcome pins the
+// operator diagnosis for an interrupt that lands BEFORE the daemon accepted
+// the request: the client cannot claim the run continues there, and it must
+// not diagnose a transport failure it did not have. Serial: capture.Default
+// swaps slog.Default.
+func TestRunClient_InterruptBeforeAcceptanceReportsUnknownOutcome(t *testing.T) {
+	rec := capture.Default(t)
+
+	t.Setenv("RENOVATE_TEST_HUGE", strings.Repeat("x", 16<<20))
+	sock := testSocketPath(t)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("net.Listen() = %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	accepted := make(chan net.Conn, 1)
+	acceptErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		accepted <- conn
+	}()
+
+	done := make(chan int, 1)
+	go func() { done <- runClient(sock, nil) }()
+
+	var conn net.Conn
+	select {
+	case conn = <-accepted:
+		t.Cleanup(func() { _ = conn.Close() })
+	case err := <-acceptErr:
+		t.Fatalf("Accept() = %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("runClient did not connect within 5s")
+	}
+
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("os.FindProcess() = %v", err)
+	}
+	if err := proc.Signal(os.Interrupt); err != nil {
+		t.Fatalf("Signal(os.Interrupt) = %v", err)
+	}
+
+	select {
+	case code := <-done:
+		if code != 1 {
+			t.Errorf("runClient() after an interrupt before acceptance = %d, want 1", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runClient did not return after the interrupt")
+	}
+
+	if !rec.Contains("acceptance was not observed") {
+		t.Errorf("runClient() interrupt records = %v, want the unknown-acceptance warning", rec.Messages())
+	}
+	if rec.Contains("cannot reach the scheduler daemon") || rec.Contains("cannot send run request") {
+		t.Errorf("runClient() interrupt records = %v, must not diagnose a transport failure", rec.Messages())
+	}
+}
+
+// TestRunClient_LogsDocumentedLifecycle pins the three lifecycle lines the
+// README's external-scheduler section publishes, their order, and the
+// attributes that let a trigger's own log tie them to its run. Serial:
+// capture.Default swaps slog.Default.
+func TestRunClient_LogsDocumentedLifecycle(t *testing.T) {
+	rec := capture.Default(t)
+
+	sock := startTestServer(t, recordingRunner("true", nil))
+	if code := runClient(sock, []string{"owner/repo"}); code != 0 {
+		t.Errorf("runClient() = %d, want 0", code)
+	}
+
+	msgs := rec.Messages()
+	accepted := slices.Index(msgs, "triggered run accepted")
+	started := slices.Index(msgs, "triggered run started")
+	complete := slices.Index(msgs, "triggered run complete")
+	if accepted < 0 || started < 0 || complete < 0 {
+		t.Fatalf("runClient() lifecycle records = %v, want accepted, started and complete", msgs)
+	}
+	if accepted >= started || started >= complete {
+		t.Errorf("runClient() lifecycle order = %v, want accepted before started before complete", msgs)
+	}
+	for _, msg := range []string{"triggered run accepted", "triggered run started", "triggered run complete"} {
+		if !rec.AttrContains(msg, "repos", "owner/repo") {
+			t.Errorf("runClient() %q record = %v, want a repos attr naming owner/repo", msg, msgs)
+		}
+	}
+	if !rec.HasAttr("triggered run started", "logs", "full Renovate output is on the container log stream") {
+		t.Errorf("runClient() started record = %v, want the full-output location attr", msgs)
+	}
+	if _, ok := rec.AttrValueExact("triggered run complete", "duration_ms"); !ok {
+		t.Errorf("runClient() complete record = %v, want a duration_ms attr", msgs)
 	}
 }

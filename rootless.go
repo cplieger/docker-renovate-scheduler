@@ -15,44 +15,15 @@ import (
 const defaultImageUID = 12021
 
 // --- Rootless cache-risk classification ---
-//
-// Purpose: a custom (non-root, non-12021) UID has no writable containerbase
-// home, so Renovate's artifact/lockfile regeneration fails SILENTLY — the
-// dependency PR is raised manifest-only and breaks the consuming repo's CI
-// days later. One advisory startup warning turns that delayed, cross-repo
-// failure into an immediate, local signal. Advisory only; never blocks boot.
-//
-// Strategy (one decision, values never read; customEnvVarNames is the only
-// parser -- the soft-warning branch invokes it a second time for its log
-// attribute's name list):
-//
-//	parse    RENOVATE_CUSTOM_ENV_VARIABLES -> sorted JSON-object key names
-//	         (undecodable or non-object input yields no names)
-//	classify (euid, names) ->
-//	         default/root UID          -> silent
-//	         variable unset            -> loud warning  (mechanism not engaged)
-//	         >=1 cache-like name       -> silent        (mechanism engaged)
-//	         otherwise                 -> soft warning  (engaged, no cache named)
-//
-// The line in the sand (decided 2026-07-22, deferred finding h-f1 dismissed):
-// the classifier verifies MECHANISM ENGAGEMENT only — RENOVATE_CUSTOM_ENV_VARIABLES
-// is the documented channel that forwards redirections to Renovate's artifact
-// subprocesses, and naming a cache/path variable there is the operator
-// engaging it. It never judges value correctness: no string test separates a
-// working redirection from a typo'd or unmounted path (only a filesystem
-// probe could, and the classifier is deliberately side-effect-free), so
-// rejecting "" while blessing "/typo" would just blur whose job config
-// correctness is — it is the operator's. The bar for any stricter guard
-// here: it must cover its whole input class, or have security impact, or
-// prevent a crash. An advisory log line meets none of those.
-//
-// Accepted error directions, all costing one advisory line: a cache-like
-// name that redirects nothing suppresses the warning; plain GOCACHE /
-// npm_config_cache env vars on the scheduler do NOT suppress (Renovate
-// forwards only an allowlist to artifact subprocesses — GOPATH yes, those
-// two no — so they are not a "caches work" signal); and a redirection done
-// via a Renovate config.js customEnvVariables is invisible here, drawing a
-// spurious loud warning.
+
+// A custom (non-root, non-12021) UID has no writable containerbase home, so
+// artifact/lockfile regeneration fails and renovate reports it on the PR hours
+// later; one advisory boot warning makes that signal local. The classifier
+// verifies MECHANISM ENGAGEMENT, never value correctness: a stricter guard would
+// have to cover its whole input class, have security impact, or prevent a crash.
+// Accepted error directions, one advisory line each: a cache-like name that
+// redirects nothing suppresses the warning; plain GOCACHE on the scheduler does
+// not (renovate forwards only an allowlist); a config.js redirection is invisible.
 
 // rootlessRisk is the classification result.
 type rootlessRisk int
@@ -99,10 +70,10 @@ func warnIfRootlessCacheUnwritable() {
 // what actually breaks when the tool caches stay unredirected.
 const rootlessCacheConsequence = "a custom UID has no writable containerbase home, " +
 	"so artifact/lockfile regeneration (go.sum, package-lock.json) will likely fail " +
-	"and dependency PRs will be raised with stale lockfiles that break the consuming repo's CI"
+	"and dependency PRs will be raised with stale lockfiles that renovate flags with a red renovate/artifacts check"
 
-// rootlessCacheRisk is the pure decision (see the section comment for the
-// strategy and its line in the sand). getenv is injected so tests exercise
+// rootlessCacheRisk is the pure decision (see the section comment for what it
+// does and does not judge). getenv is injected so tests exercise
 // the matrix without changing the real UID or environment. No filesystem
 // probe: a write-probe of $HOME would be redundant with the UID check and a
 // needless side effect.

@@ -23,83 +23,41 @@ FROM renovate/renovate:44.51.2@sha256:dd5a8ca92b2f3cbb8e3c8de35c63ae46494b074463
 # reverts to the non-root 12021 before the runtime CMD.
 USER root
 
-# Strip the docker CLI that containerbase bakes into the renovate base image
-# (a ~42 MB binary under /opt/containerbase/tools/docker/<ver>/bin/docker, plus
-# its shim at /opt/containerbase/bin/docker, the /usr/local/bin/docker PATH
-# symlink, the containerbase lib dir, and the version marker). Renovate only
-# invokes the docker CLI under binarySource=docker
-# (verified against its exec layer: every docker call is gated on that mode);
-# this scheduler runs binarySource=install, so the binary is never used.
-# Removing it drops the Go-stdlib CVEs Trivy reports against that unused binary
-# and trims attack surface. binarySource=docker is therefore unsupported here
-# (and is deprecated upstream anyway).
-#
-# Let find DRIVE the removal instead of enumerating fixed paths: containerbase
-# reshuffles these locations between releases (the v43.242.0 bump added
-# lib/docker and the versions/ marker, which a hardcoded 3-path list missed and
-# the assertion below then failed the build on). Deleting every entry named
-# `docker` under the containerbase tree, plus the PATH symlink, is layout-stable
-# and won't silently fall behind the next base-image bump.
-#
-# The final assertion pins the base image's own entrypoint script: the
-# scheduler routes every Renovate invocation through it (renovateEntrypoint in
-# runner.go), so a base bump that relocates that private path must fail THIS
-# build, not every run at runtime.
+# Strip the docker CLI containerbase bakes into the renovate base: renovate
+# invokes it only under binarySource=docker (verified against its exec layer,
+# every call gated on that mode) and this image runs binarySource=install, so
+# the binary is unreachable and its Go-stdlib CVEs are noise. find DRIVES the
+# removal because containerbase reshuffles these paths between releases (the
+# v43.242.0 bump added lib/docker and the versions/ marker). The final test pins
+# the base's own entrypoint (runner.go renovateEntrypoint) so a relocating base
+# bump fails THIS build, not every run.
 RUN find /opt/containerbase -name docker -prune -exec rm -rf {} + \
     && rm -f /usr/local/bin/docker \
     && ! command -v docker \
     && [ -z "$(find /opt/containerbase -name docker 2>/dev/null)" ] \
     && test -x /usr/local/sbin/renovate-entrypoint.sh
 
-# Strip the native TypeScript compiler out of the base image's pnpm store, for
-# the same reason as the docker CLI above: it is a 24 MB Go binary nothing here
-# can reach, and Trivy reads its embedded module list and reports the Go stdlib
-# and golang.org/x/text CVEs of whatever toolchain TypeScript was built with
-# (10 HIGH on 44.50.1). None of them are fixable here -- we do not build it and
-# renovate pins the version -- so they would otherwise sit open forever.
-#
-# It is unreachable at runtime, which is NOT obvious from renovate's manifest.
-# `typescript` is a devDependency there, and the image installs `--prod`, so the
-# expected conclusion is that it should not be present at all. It arrives
-# through the production graph instead: the `openpgp` optional dependency needs
-# peer `@openpgp/web-stream-tools`, which declares a types-only `typescript`
-# peerDependency, which pulls typescript's per-platform binary. A types peer is
-# consumed by a compiler, never by the library at runtime -- verified in the
-# live v3.0.31 image, where the app root has no `node_modules/typescript`, no
-# `node_modules/@typescript` and no `.bin/tsc`, and no JS anywhere in the image
-# requires typescript, web-stream-tools' own sources included.
-#
-# Only the BINARY goes. The `.d.ts` files beside it and typescript's JS API stay
-# where pnpm put them, so nothing about module resolution changes; this removes
-# the CVE surface rather than the package.
-#
-# find DRIVES the removal and covers both arches (`typescript-linux-x64` and
-# `-arm64`), because the store path embeds the TypeScript version and moves on
-# renovate bumps -- a hardcoded path would rot into a silent no-op. The
-# pre-check is what makes that failure loud: a base bump that stops shipping the
-# binary fails THIS build instead of leaving a removal that protects nothing.
+# Strip TypeScript's native compiler (lib/tsc, a 24 MB Go binary) from the
+# base's pnpm store: Trivy reads its embedded module list and reports 10 HIGH on
+# 44.50.1, none fixable here, and nothing at runtime can reach it -- it arrives
+# through a types-only `typescript` peerDependency chain and no JS in the image
+# requires typescript (full trace: docker-builds.md). Only the BINARY goes, so
+# the .d.ts files and typescript's JS API stay. find drives the removal because
+# the store path embeds the TypeScript version and moves on renovate bumps; the
+# pre-check fails the build when a base bump stops shipping the binary.
 RUN tsc_glob='*/@typescript/typescript-linux-*/lib/tsc' \
     && store=/usr/local/renovate/node_modules/.pnpm \
     && [ -n "$(find "$store" -type f -path "$tsc_glob")" ] \
     && find "$store" -type f -path "$tsc_glob" -delete \
     && [ -z "$(find "$store" -type f -path "$tsc_glob")" ]
 
-# Apply all available Ubuntu security updates the renovate base inherits from
-# its Ubuntu layer. The base lags the distro security mirror between upstream
-# rebuilds, so Trivy flags stale OS packages (perl, tar, libxml2, libssh2,
-# libmysqlclient, ...) against this image even though fixed builds exist. A
-# broad apt upgrade patches them all at build time -- matching the vibekit and
-# web-terminal-kiro images -- instead of enumerating packages one CVE at a time, and
-# becomes a no-op once the base ships the fixes. upgrade never removes
-# packages, so native MySQL-driver builds during lockfile maintenance keep
-# working.
-# PKG_REFRESH busts the cache for this layer. Without it BuildKit restores the
-# layer verbatim on every rebuild and the apt upgrade below never runs again, so
-# the image keeps shipping whatever packages were current when the layer was
-# first built — which defeats the whole point of the broad upgrade described
-# above. The central release/CI/scan builds pass today's UTC date. The `echo` is
-# load-bearing: BuildKit keys a RUN on the build args it actually CONSUMES, so a
-# merely-declared ARG would change nothing.
+# Apply the Ubuntu security updates the renovate base lags between upstream
+# rebuilds, so Trivy stops flagging stale OS packages against this image.
+# upgrade never removes packages, so native driver builds during lockfile
+# maintenance keep working. PKG_REFRESH busts this layer's cache -- without it
+# BuildKit restores the layer verbatim and the upgrade never runs again -- and
+# the echo is load-bearing, because BuildKit keys a RUN on the build args it
+# actually CONSUMES. Mechanism: docker-builds.md "PKG_REFRESH".
 ARG PKG_REFRESH=static
 RUN echo "OS package refresh: ${PKG_REFRESH}" \
     && apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
@@ -111,17 +69,13 @@ RUN echo "OS package refresh: ${PKG_REFRESH}" \
 RUN mkdir -p /data && chown 12021:0 /data && chmod 0775 /data
 ENV RENOVATE_BASE_DIR=/data
 
-# Pre-install Go so Renovate's gomod artifact step (go mod tidy / go get to
-# refresh go.sum after a dependency bump) works even when the container is run
-# as a non-default UID. A non-default runtime UID cannot write containerbase's
-# tool dir (/opt/containerbase/tools, owned 12021:root) to install Go on
-# demand -- so gomod artifact updates silently fail and every Go dependency PR
-# lands with a stale go.sum. Installing Go here as root makes it
-# world-executable for any runtime UID; GOTOOLCHAIN=auto then lets Go fetch a
-# newer toolchain into the writable RENOVATE_BASE_DIR cache when a repo's
-# go.mod requires a higher version than the baked one. (One consumer now
-# runs the image default 12021:0, but this stays load-bearing for external
-# rootless operators -- see the README "Running as a non-default user".)
+# Pre-install Go as root: a non-default runtime UID cannot write containerbase's
+# tool dir (/opt/containerbase/tools, owned 12021:root), so Renovate's on-demand
+# Go install fails and every Go dependency PR lands with a stale go.sum.
+# Installing here makes it world-executable for any runtime UID; GOTOOLCHAIN=auto
+# then lets Go fetch a newer toolchain into the writable RENOVATE_BASE_DIR cache
+# when a repo's go.mod requires a higher version. See README "Running as a
+# non-default user (rootless)".
 # renovate: datasource=golang-version depName=go
 ARG GOLANG_VERSION=1.27.0
 RUN install-tool golang "${GOLANG_VERSION}"
@@ -133,8 +87,10 @@ USER 12021
 
 # ENTRYPOINT is inherited from the base image (renovate-entrypoint.sh, which
 # exec-chains to the containerbase docker-entrypoint.sh). It sets up the
-# containerbase environment and then execs CMD, our scheduler daemon. The
-# daemon owns every Renovate run as a child process; a run triggered via
+# containerbase environment and then execs `dumb-init -- CMD`, so PID 1 is
+# dumb-init and the scheduler daemon is its child; that hop is what the
+# child's own process group in runner.go is written against. The daemon owns
+# every Renovate run as a child process; a run triggered via
 # `docker exec … run` executes with the CLIENT's forwarded environment (which
 # never passed through this ENTRYPOINT), so the daemon routes each child
 # through the same entrypoint internally to re-establish containerbase per
@@ -142,6 +98,6 @@ USER 12021
 # The HEALTHCHECK bypasses the ENTRYPOINT above, so it calls the binary by
 # absolute path (no containerbase PATH setup); the CMD below is passed through
 # the ENTRYPOINT, which sets up PATH, so its bare name resolves.
-HEALTHCHECK --interval=60s --timeout=5s --retries=3 --start-period=30s \
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=10m \
     CMD ["/usr/local/bin/docker-renovate-scheduler", "health"]
 CMD ["docker-renovate-scheduler", "daemon"]

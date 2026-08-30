@@ -14,6 +14,14 @@ import (
 	"github.com/cplieger/scheduler/v4/trigger"
 )
 
+// newJob builds one queued run request: the trigger label for logs, the
+// positional repository slugs (empty means Renovate's own configuration
+// decides), and the complete child environment (nil means inherit the
+// daemon's own — ticker-submitted runs).
+func newJob(trig string, repos, env []string) *trigger.Job[runPayload] {
+	return trigger.NewJob(trig, runPayload{Repos: repos, Env: env})
+}
+
 // newBareDaemon builds the standard test daemon fixture — temp health
 // marker, one-minute timeout, buffered fatal channel — WITHOUT starting the
 // executor: each caller owns its runJobs
@@ -23,11 +31,12 @@ func newBareDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, strin
 	t.Helper()
 	markerPath := filepath.Join(t.TempDir(), "marker")
 	d := &daemon{
-		queue:   trigger.NewQueue[runPayload](queueCapacity),
-		marker:  health.NewMarker(markerPath),
-		newCmd:  runner,
-		timeout: time.Minute,
-		fatal:   make(chan error, 1),
+		queue:    trigger.NewQueue[runPayload](queueCapacity),
+		marker:   health.NewMarker(markerPath),
+		verifier: newBaseDirVerifier(),
+		newCmd:   runner,
+		timeout:  time.Minute,
+		fatal:    make(chan error, 1),
 	}
 	return d, markerPath
 }
@@ -108,10 +117,10 @@ func gatedRunOnce(t *testing.T) (runOnce runOnceFunc, awaitEntered, release func
 	t.Helper()
 	entered := make(chan struct{})
 	proceed := make(chan struct{})
-	runOnce = func(_, _ context.Context, _ time.Duration, _ string, _, _ []string, _ scheduler.CommandRunner) (ok, cancelled, groupSurvived bool) {
+	runOnce = func(context.Context, stopRequested, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
 		close(entered)
 		<-proceed
-		return true, false, false
+		return runComplete
 	}
 	awaitEntered = func() {
 		select {
