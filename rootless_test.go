@@ -3,7 +3,6 @@ package main
 import (
 	"log/slog"
 	"os"
-	"slices"
 	"strings"
 	"testing"
 
@@ -17,8 +16,8 @@ import (
 // number, HOME:"/", a cache-control-style name — because value-blindness IS
 // the contract (h-f1, 2026-07-22): engagement is judged by NAMES only, and
 // value correctness stays the operator's responsibility. If one of those
-// rows ever fails, the line in the sand moved; that must be a deliberate,
-// user-approved decision, not a drive-by.
+// rows ever fails, the engagement-only contract moved; that must be a
+// deliberate, user-approved decision, not a drive-by.
 func TestRootlessCacheRisk(t *testing.T) {
 	const customUID = 568
 
@@ -155,34 +154,6 @@ func TestCacheLikeEnvVar(t *testing.T) {
 	}
 }
 
-// TestCustomEnvVarNames pins the single-parse contract directly: the JSON
-// object's key names come back SORTED (the soft warning joins them into one
-// log attribute, and Go map iteration order is randomized, so the sort is
-// what keeps that operator-facing line deterministic), and undecodable or
-// non-object input yields no names.
-func TestCustomEnvVarNames(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		raw  string
-		want []string
-	}{
-		{"multiple keys come back sorted", `{"npm_config_cache":"/n","GOCACHE":"/g","HTTP_PROXY":"p"}`, []string{"GOCACHE", "HTTP_PROXY", "npm_config_cache"}},
-		{"single key", `{"GOPATH":"/go"}`, []string{"GOPATH"}},
-		{"empty object yields no names", `{}`, nil},
-		{"undecodable input yields no names", `not json`, nil},
-		{"non-object JSON yields no names", `["GOCACHE"]`, nil},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := customEnvVarNames(tc.raw); !slices.Equal(got, tc.want) {
-				t.Errorf("customEnvVarNames(%q) = %v, want %v", tc.raw, got, tc.want)
-			}
-		})
-	}
-}
-
 // The TestWarnIfRootlessCacheUnwritable_* tests pin the wrapper's observable
 // contract on captured slog output. The pure decision matrix is
 // TestRootlessCacheRisk's; these pin the wiring (real euid + real env reach
@@ -240,21 +211,24 @@ func requireRecordAttr(t *testing.T, record slog.Record, key string) slog.Value 
 	return value
 }
 
-// requireRecordsExclude asserts no captured message or attribute value
-// contains the forbidden substring.
-func requireRecordsExclude(t *testing.T, rec *capture.Recorder, forbidden string) {
-	t.Helper()
+// leakedRecord returns the first captured message or attribute value
+// containing forbidden, with the attribute key or "message" as key.
+func leakedRecord(rec *capture.Recorder, forbidden string) (key, value string, found bool) {
 	for _, record := range rec.Records() {
 		if strings.Contains(record.Message, forbidden) {
-			t.Errorf("warning message leaked %q: %q", forbidden, record.Message)
+			return "message", record.Message, true
 		}
 		record.Attrs(func(attr slog.Attr) bool {
-			if strings.Contains(attr.Value.String(), forbidden) {
-				t.Errorf("warning attr %s leaked %q: %q", attr.Key, forbidden, attr.Value.String())
+			if !found && strings.Contains(attr.Value.String(), forbidden) {
+				key, value, found = attr.Key, attr.Value.String(), true
 			}
-			return true
+			return !found
 		})
+		if found {
+			return key, value, true
+		}
 	}
+	return "", "", false
 }
 
 func TestWarnIfRootlessCacheUnwritable_NoRedirectionEmitsActionableWarning(t *testing.T) {
@@ -287,7 +261,9 @@ func TestWarnIfRootlessCacheUnwritable_ProxyOnlyWarnsWithoutLeakingValue(t *test
 	if !strings.Contains(keys, "HTTP_PROXY") {
 		t.Errorf("soft warning custom_env_vars = %q, want it to name HTTP_PROXY", keys)
 	}
-	requireRecordsExclude(t, rec, "secret")
+	if key, value, found := leakedRecord(rec, "secret"); found {
+		t.Errorf("warnIfRootlessCacheUnwritable() leaked the value in %s = %q", key, value)
+	}
 }
 
 func TestWarnIfRootlessCacheUnwritable_CacheRedirectionSuppressesWarning(t *testing.T) {

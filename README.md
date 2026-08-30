@@ -19,7 +19,7 @@ It deliberately has **no built-in HTTP/webhook server**; triggering is delegated
 
 ### Not distroless, on purpose
 
-Renovate is a Node.js application that shells out to `git` and, for lockfile maintenance, to language package managers; its default `binarySource=install` installs those toolchains at runtime via [containerbase](https://github.com/containerbase/base). There is no static, dependency-free form to drop on `scratch`. So this image **builds on the official `renovate/renovate` image** (the "full" image the Renovate docs recommend when runtime tool installation is needed) and adds only the scheduler binary on top.
+Renovate is a Node.js application that shells out to `git` and, for lockfile maintenance, to language package managers; its default `binarySource=install` installs those toolchains at runtime via [containerbase](https://github.com/containerbase/base). There is no static, dependency-free form to drop on `scratch`. So this image **builds on the official `renovate/renovate` image** (the default image, which Renovate recommends for most users and which installs tools at runtime) and adds only the scheduler binary on top.
 
 One deliberate trim: the bundled `docker` CLI is removed. Renovate invokes it only under `binarySource=docker`, which is [deprecated upstream](https://github.com/renovatebot/renovate/discussions/40742) and **not supported by this image**; dropping the unused ~42 MB binary cuts attack surface and the CVE noise image scanners report against it.
 
@@ -39,7 +39,7 @@ Renovate reads **its entire configuration from its own** `RENOVATE_*` environmen
 | --- | --- | --- |
 | `RUN_INTERVAL` | Built-in scheduler cadence as a Go duration (`6h`, `1h`, `30m`). First run at startup, then every interval. Set to `off` (aliases `disabled`, `0`) to disable the built-in scheduler and trigger runs externally (see [Scheduling modes](#scheduling-modes)). Falls back to `6h` on an unset, negative, or unparseable (non-sentinel) value. | `6h` |
 | `RUN_TIMEOUT` | Whole-run timeout for a single `renovate` invocation, as a Go duration. This is the outer bound on the process; Renovate's own `RENOVATE_EXECUTION_TIMEOUT` is a separate per-child limit. | `1h` |
-| `LOG_LEVEL` | `debug`, `info`, `warn`, or `error` (honoured by both the scheduler and Renovate). | `info` |
+| `LOG_LEVEL` | `debug`, `info`, `warn`, and `error` are honoured by both the scheduler and Renovate. Renovate also accepts `trace` and `fatal`, which the scheduler reports as unrecognized and replaces with `info` for its own lines only. Any other value — including the long form `warning` and slog offset forms such as `warn+1` — makes Renovate refuse to start, which in built-in mode means the healthcheck never goes healthy. | `info` |
 
 Everything else is Renovate's own configuration. The essentials for a self-hosted bot:
 
@@ -53,10 +53,12 @@ Everything else is Renovate's own configuration. The essentials for a self-hoste
 
 By default the container runs as the base image's non-root user, UID `12021`, which has a writable home and a working [containerbase](https://github.com/containerbase/base): Renovate installs toolchains on demand and regenerates lockfiles out of the box.
 
-If you override the user (Compose `user:`) to match host volume ownership (e.g. a `1000:1000` rootless UID), that UID has **no home directory** (`HOME=/`), so every tool cache that defaults under `$HOME` becomes unwritable and two things break **silently**:
+If you override the user (Compose `user:`) to match host volume ownership (e.g. a `1000:1000` rootless UID), that UID has **no home directory** (`HOME=/`), so every tool cache that defaults under `$HOME` becomes unwritable and two things break, and neither failure surfaces here:
 
 - containerbase's on-demand tool installs fail (`binarySource=install` can't write `/opt/containerbase`); and
 - lockfile/artifact regeneration fails: `go mod tidy` can't refresh `go.sum`, `npm install` can't refresh `package-lock.json`. The dependency PR is still raised, but manifest-only (`go.mod` / `package.json`), and then fails the consuming repo's CI (`missing go.sum entry`, or `npm ci` reporting the lock out of sync).
+
+Renovate reports that second failure on the PR itself, as a red `renovate/artifacts` status check; its own log line for it is at `debug`, and this image documents `LOG_LEVEL=info`, so the container stream does not carry it.
 
 The scheduler **logs a startup warning** when it runs as a non-default UID and `RENOVATE_CUSTOM_ENV_VARIABLES` names no cache or toolchain-path variable, so the misconfiguration surfaces at boot instead of as a broken PR days later. The check is name-based: it verifies you engaged the mitigation (a cache variable is named), not that its value is correct; an empty or mistyped path is your configuration to verify.
 
@@ -112,7 +114,7 @@ docker exec renovate docker-renovate-scheduler run            # all configured r
 docker exec renovate docker-renovate-scheduler run owner/repo # just one (positional args go straight to Renovate)
 ```
 
-The `run` command submits the request to the daemon and blocks until that run completes, exiting 0 on success and 1 on failure (the run's own result, even when it waited its turn behind an in-flight pass). If you interrupt that wait, the run continues in the daemon and the client exits 1 with a warning. Exit 1 there means the outcome is unknown to the client, not that the run failed. Because the daemon executes the run, its full Renovate output lands on the **container's** log stream in this mode too; the trigger's log (an Ofelia job log, a webhook action's output) shows only the `run` command's lifecycle lines (`triggered run accepted` / `started` / `complete`). Read per-run detail from `docker logs` / Loki; read the outcome from the exit code.
+The `run` command submits the request to the daemon and blocks until that run completes, exiting 0 on success and 1 on failure (the run's own result, even when it waited its turn behind an in-flight pass). If you interrupt that wait, a run the daemon already accepted continues there; an interrupt before acceptance leaves the outcome unknown to the client. Either way the client exits 1 with a warning. Exit 1 there means the outcome is unknown to the client, not that the run failed. Because the daemon executes the run, its full Renovate output lands on the **container's** log stream in this mode too; the trigger's log (an Ofelia job log, a webhook action's output) shows only the `run` command's lifecycle lines (`triggered run accepted` / `started` / `complete`). Read per-run detail from `docker logs` / Loki; read the outcome from the exit code.
 
 Environment overrides ride along: `docker exec -e RENOVATE_AUTODISCOVER=false renovate docker-renovate-scheduler run owner/repo` forwards the exec's environment with the request, and the daemon starts that run's Renovate child with exactly that environment.
 
@@ -205,7 +207,7 @@ groups:
             (`renovate run failed`), a run that hit RUN_TIMEOUT
             (`renovate run timed out`), a base-directory error, or a
             containment halt (`halting run admission: renovate run process
-            group survived the kill sweep`; a failed/timed-out run's
+            group survived the kill sweep`; a run's
             process tree could not be confirmed dead, so the daemon stops
             admitting runs and exits non-zero; the container restart reaps
             the surviving tree). No dependency PRs are raised until the
@@ -237,7 +239,7 @@ Thresholds and the `severity` label are starting points; adjust the deadman wind
 
 `docker-renovate-scheduler health` checks a marker file the daemon sets after each run. In **built-in** mode the container starts unhealthy and flips to healthy after the first successful run (size `healthcheck.start_period` for the time a first run may take); a failed run flips it unhealthy, and it recovers on the next clean run. Built-in mode additionally treats a stale marker as unhealthy: if no run has refreshed it within `2*RUN_INTERVAL + RUN_TIMEOUT`, the probe fails, so a wedged interval loop surfaces as an unhealthy container instead of a silently idle one. In **external** mode the container starts healthy (idle, nothing has failed), each triggered run updates the marker, and no staleness deadline applies (an idle container between sparse triggers stays healthy).
 
-The image bakes a conservative 30s `start_period`; the example `compose.yaml` raises it to `10m` because a first run on a cold cache installs toolchains on demand and can take several minutes. Compose merges this single field onto the baked healthcheck (test, interval, timeout, and retries are inherited); size it to your own first-run duration.
+The image bakes a 10m `start_period`, sized to a cold first run that installs its toolchains on demand. Docker reports the container healthy as soon as a probe succeeds inside that window, so a warm `/data` is not penalised. The trade runs the other way: a boot that is genuinely broken reports `starting` for up to the start period before it turns unhealthy. To detect a dead boot sooner, set a timing-only `healthcheck:` block in your own compose file (`test`, `interval`, `timeout`, and `retries` are inherited from the image).
 
 ## Security
 

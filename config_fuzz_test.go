@@ -9,7 +9,7 @@ import (
 // over a job's FORWARDED environment — the socket client's complete environ,
 // JSON-decoded off the wire by the trigger library and handed here unparsed.
 // The resolved string is then created, written to and fsynced by the preflight
-// (verifyBaseDirAt) and becomes Renovate's own data directory, so this is the
+// (baseDirVerifier) and becomes Renovate's own data directory, so this is the
 // one place in the app where wire content decides a filesystem path.
 //
 // Two invariants, both independent of how the scan is written:

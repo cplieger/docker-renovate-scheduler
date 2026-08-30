@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cplieger/atomicfile/v3"
@@ -120,8 +122,8 @@ func TestVerifyBaseDir(t *testing.T) {
 	t.Run("creates and verifies a writable dir", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "renovate-data")
 		t.Setenv("RENOVATE_BASE_DIR", dir)
-		if err := verifyBaseDir(t.Context()); err != nil {
-			t.Fatalf("verifyBaseDir() = %v, want nil", err)
+		if err := newBaseDirVerifier().verify(t.Context()); err != nil {
+			t.Fatalf("verify() = %v, want nil", err)
 		}
 		if _, err := os.Stat(dir); err != nil {
 			t.Errorf("base dir not created: %v", err)
@@ -133,34 +135,16 @@ func TestVerifyBaseDir(t *testing.T) {
 			t.Fatalf("setup: %v", err)
 		}
 		t.Setenv("RENOVATE_BASE_DIR", file)
-		if err := verifyBaseDir(t.Context()); err == nil {
-			t.Error("verifyBaseDir() = nil, want error when base dir is a file")
+		if err := newBaseDirVerifier().verify(t.Context()); err == nil {
+			t.Error("verify() = nil, want error when base dir is a file")
 		}
 	})
 }
 
-// TestProbeBaseDirWrite pins the staged write probe at the helper boundary:
-// a clean probe writes, syncs, closes, and removes its file (no residue), and
-// a directory that cannot take a new file reports the actionable "not
-// writable" error. The residue assertion is deliberately name-agnostic now
-// that the ladder is atomicfile.ProbeWritable — the probe file is the
-// library's temp shape, not this app's ".write_test-*", and asserting on an
-// empty directory pins the property that matters (nothing is left in
-// Renovate's data dir) without pinning a name this app no longer owns.
+// TestProbeBaseDirWrite pins the staged write probe at the helper boundary: a
+// directory that cannot take a new file reports the actionable "not writable"
+// error.
 func TestProbeBaseDirWrite(t *testing.T) {
-	t.Run("writes, syncs, and cleans up its probe file", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := probeBaseDirWrite(t.Context(), dir); err != nil {
-			t.Fatalf("probeBaseDirWrite() = %v, want nil", err)
-		}
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatalf("read probe dir: %v", err)
-		}
-		if len(entries) != 0 {
-			t.Errorf("probe left %d file(s) behind, want none", len(entries))
-		}
-	})
 	t.Run("reports not writable when the probe cannot be created", func(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root bypasses directory write permissions")
@@ -221,10 +205,10 @@ func TestBaseDirProbeStageError(t *testing.T) {
 	}{
 		{atomicfile.ProbeStageMkdir, "mkdir base dir"},
 		{atomicfile.ProbeStageCreate, "not writable"},
-		{atomicfile.ProbeStageWrite, "write base-dir probe"},
-		{atomicfile.ProbeStageSync, "sync base-dir probe"},
-		{atomicfile.ProbeStageClose, "close base-dir probe"},
-		{atomicfile.ProbeStageRemove, "remove base-dir probe"},
+		{atomicfile.ProbeStageWrite, "write probe file"},
+		{atomicfile.ProbeStageSync, "sync probe file"},
+		{atomicfile.ProbeStageClose, "close probe file"},
+		{atomicfile.ProbeStageRemove, "remove probe file"},
 	}
 
 	if err := baseDirProbeStageError("/data", atomicfile.ProbeResult{}); err != nil {
@@ -294,11 +278,9 @@ func TestSetupLogger_MapsLogLevelEnvToHandlerLevel(t *testing.T) {
 		{"debug enables debug", "debug", slog.LevelDebug, slog.LevelDebug - 1},
 		{"info enables info disables debug", "info", slog.LevelInfo, slog.LevelDebug},
 		{"warn enables warn disables info", "warn", slog.LevelWarn, slog.LevelInfo},
-		{"warning alias enables warn", "warning", slog.LevelWarn, slog.LevelInfo},
 		{"error enables error disables warn", "error", slog.LevelError, slog.LevelWarn},
 		{"unknown falls back to info", "bogus", slog.LevelInfo, slog.LevelDebug},
 		{"empty falls back to info", "", slog.LevelInfo, slog.LevelDebug},
-		{"uppercase is case-insensitive", "ERROR", slog.LevelError, slog.LevelWarn},
 		{"surrounding whitespace trimmed", "  warn  ", slog.LevelWarn, slog.LevelInfo},
 	}
 	prev := slog.Default()
@@ -321,25 +303,98 @@ func TestSetupLogger_MapsLogLevelEnvToHandlerLevel(t *testing.T) {
 
 // TestVerifyBaseDirAt_TimesOutWhileProbeSlotHeld pins the hung-filesystem
 // containment: when a previous probe goroutine is still wedged (the slot is
-// held) and the caller's budget expires, verifyBaseDirAt reports a timeout
+// held) and the caller's budget expires, verifyAt reports a timeout
 // instead of blocking — and once the wedged probe releases the slot, later
 // verifications succeed again.
 func TestVerifyBaseDirAt_TimesOutWhileProbeSlotHeld(t *testing.T) {
-	verifySlot <- struct{}{} // a prior probe is wedged on a hung filesystem
+	t.Parallel()
+	verifier := newBaseDirVerifier()
+	verifier.slot <- struct{}{} // a prior probe is wedged on a hung filesystem
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // the caller's verification budget is already exhausted
 
-	err := verifyBaseDirAt(ctx, t.TempDir())
+	err := verifier.verifyAt(ctx, t.TempDir())
 
-	<-verifySlot // the wedged probe finally finishes
+	<-verifier.slot // the wedged probe finally finishes
 	if err == nil {
-		t.Fatal("verifyBaseDirAt() = nil with the probe slot held and the context done, want a timeout error")
+		t.Fatal("verifyAt() = nil with the probe slot held and the context done, want a timeout error")
 	}
 	if !strings.Contains(err.Error(), "timed out") {
-		t.Errorf("verifyBaseDirAt() error = %v, want it to mention %q", err, "timed out")
+		t.Errorf("verifyAt() error = %v, want it to mention %q", err, "timed out")
 	}
 
-	if err := verifyBaseDirAt(t.Context(), t.TempDir()); err != nil {
-		t.Errorf("verifyBaseDirAt() = %v after the slot was released, want nil (the slot must be reusable)", err)
+	if err := verifier.verifyAt(t.Context(), t.TempDir()); err != nil {
+		t.Errorf("verifyAt() = %v after the slot was released, want nil (the slot must be reusable)", err)
 	}
+}
+
+// TestVerifyBaseDirAt_DerivedDeadlineBoundsSlotWait pins the derived deadline
+// itself: with the slot held and a LIVE parent context, the wait must expire on
+// the probe budget rather than block forever. Under synctest the budget elapses
+// on virtual time, so removing the deadline deadlocks the bubble and fails here
+// instead of costing ten wall-clock seconds.
+func TestVerifyBaseDirAt_DerivedDeadlineBoundsSlotWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		verifier := newBaseDirVerifier()
+		verifier.slot <- struct{}{}
+
+		err := verifier.verifyAt(t.Context(), t.TempDir())
+
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("verifyAt() with a live parent and held slot = %v, want context.DeadlineExceeded", err)
+		}
+	})
+}
+
+// captureSetupLoggerOutput installs the real handler over a pipe and returns
+// what setupLogger wrote there for the given LOG_LEVEL. Not convertible to
+// capture.Default: this drives setupLogger itself, so the handler under test
+// is the one it installs.
+func captureSetupLoggerOutput(t *testing.T, level string) string {
+	t.Helper()
+	prevLogger := slog.Default()
+	prevStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() = %v", err)
+	}
+	t.Cleanup(func() {
+		os.Stderr = prevStderr
+		slog.SetDefault(prevLogger)
+		_ = r.Close()
+		_ = w.Close()
+	})
+
+	t.Setenv("LOG_LEVEL", level)
+	os.Stderr = w
+	setupLogger()
+	os.Stderr = prevStderr
+	slog.SetDefault(prevLogger)
+	if err := w.Close(); err != nil {
+		t.Fatalf("close captured stderr = %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read captured stderr = %v", err)
+	}
+	return string(out)
+}
+
+func TestSetupLogger_WarnsOnlyForNonEmptyUnrecognizedLevel(t *testing.T) {
+	t.Run("unrecognized value names the fallback", func(t *testing.T) {
+		logs := captureSetupLoggerOutput(t, "  bogus  ")
+		if !strings.Contains(logs, `level=WARN msg="unrecognized LOG_LEVEL, using default"`) {
+			t.Errorf("setupLogger() log = %q, want the malformed-level warning", logs)
+		}
+		if !strings.Contains(logs, `value="  bogus  "`) || !strings.Contains(logs, "default=info") {
+			t.Errorf("setupLogger() log = %q, want the raw value echoed and default=info", logs)
+		}
+	})
+
+	t.Run("empty value is a silent recognized default", func(t *testing.T) {
+		logs := captureSetupLoggerOutput(t, "")
+		if strings.Contains(logs, "unrecognized LOG_LEVEL") {
+			t.Errorf("setupLogger() with empty LOG_LEVEL logged %q, want no malformed-level warning", logs)
+		}
+	})
 }

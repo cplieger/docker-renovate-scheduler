@@ -18,14 +18,8 @@ import (
 
 // --- Daemon: the single owner of Renovate execution ---
 //
-// PID 1 owns every Renovate run as its own child process. Triggers only
-// submit requests: the built-in ticker (built-in mode) and the unix-socket
-// clients (`run` subcommand, both modes) all feed one FIFO queue served by
-// one executor goroutine. That single-ownership is the design: mutual
-// exclusion is the executor loop (nothing else may start Renovate), shutdown
-// is ordinary parent/child draining plus explicit cancellation of the still-
-// queued, and every run's output lands on the container log stream because
-// the child inherits the daemon's stdout/stderr.
+// The executor goroutine is the only code that starts Renovate, and every
+// trigger reaches it through one FIFO queue.
 
 // errContainmentLost is daemon.run's fatal exit cause when a run's process
 // group survives the post-run kill sweep: a package-manager tree may still
@@ -44,25 +38,16 @@ const containmentLostReason = "failed: run process group survived the kill sweep
 // immediately with a clear reason (honest backpressure).
 const queueCapacity = 16
 
-// newJob builds one queued run request: the trigger label for logs, the
-// positional repository slugs (empty means Renovate's own configuration
-// decides), and the complete child environment (nil means inherit the
-// daemon's own — ticker-submitted runs).
-func newJob(trig string, repos, env []string) *trigger.Job[runPayload] {
-	return trigger.NewJob(trig, runPayload{Repos: repos, Env: env})
-}
-
-// runOnceFunc executes one Renovate pass and reports whether it exited
-// cleanly, whether shutdown cancelled it at start, and whether its process
-// group survived the post-run kill sweep. It is the type of daemon.runOnce;
-// runRenovateOnce is the production value.
-type runOnceFunc func(ctx, shutdownCtx context.Context, timeout time.Duration, trig string, repos, env []string, newCmd scheduler.CommandRunner) (ok, cancelled, groupSurvived bool)
+// runOnceFunc executes one Renovate pass and reports its outcome. It is the
+// type of daemon.runOnce; runRenovateOnce is the production value.
+type runOnceFunc func(ctx context.Context, stopping stopRequested, timeout time.Duration, trig string, p runPayload, newCmd scheduler.CommandRunner) runOutcome
 
 // daemon carries the executor's dependencies.
 type daemon struct {
-	queue  *trigger.Queue[runPayload]
-	marker *health.Marker
-	newCmd scheduler.CommandRunner
+	queue    *trigger.Queue[runPayload]
+	marker   *health.Marker
+	verifier *baseDirVerifier
+	newCmd   scheduler.CommandRunner
 	// runOnce executes one Renovate pass; nil means runRenovateOnce (the
 	// production path). It exists as a seam for the containment-halt
 	// regression tests only: a SIGKILL-surviving process group cannot be
@@ -111,7 +96,7 @@ func (d *daemon) setRunHealth(ok bool) {
 }
 
 // runDaemon is the composition root for the long-running container (the
-// `daemon` subcommand and the default no-arg command). It owns boot: logging,
+// `daemon` subcommand and the default no-arg command). It owns boot:
 // clearing the previous life's marker, verifying the Renovate base directory,
 // loading the interval and timeout, and binding the trigger socket — every
 // step that can fail before a daemon exists — then composes the daemon and
@@ -119,7 +104,6 @@ func (d *daemon) setRunHealth(ok bool) {
 // child (defaultCommandRunner in production; injected by tests). Returning an
 // error exits non-zero.
 func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandRunner) error {
-	setupLogger()
 	warnIfRootlessCacheUnwritable()
 
 	// The marker is created up front so every boot-failure path can
@@ -134,7 +118,8 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	// (built-in mode boots unhealthy by contract).
 	marker.Set(false)
 
-	if err := verifyBaseDir(ctx); err != nil {
+	verifier := newBaseDirVerifier()
+	if err := verifier.verify(ctx); err != nil {
 		logBaseDirError(baseDir(), err)
 		return err
 	}
@@ -149,27 +134,22 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	}
 
 	d := &daemon{
-		queue:   trigger.NewQueue[runPayload](queueCapacity),
-		marker:  marker,
-		newCmd:  newCmd,
-		timeout: timeout,
-		fatal:   make(chan error, 1),
+		queue:    trigger.NewQueue[runPayload](queueCapacity),
+		marker:   marker,
+		verifier: verifier,
+		newCmd:   newCmd,
+		timeout:  timeout,
+		fatal:    make(chan error, 1),
 	}
 	return d.run(ctx, ln, socketPath, interval, scheduleEnabled)
 }
 
 // run is the daemon's orchestration: admission (socket server + built-in
 // ticker) feeding the single executor, the shutdown/fatal select, and the
-// drain sequence. runDaemon has already verified the boot preconditions,
-// cleared the previous life's marker, and bound the listener; run owns the
-// SIGTERM/interrupt wrapping and the abort cause (so a fatal executor
-// condition drains through the same context a signal does), the marker's
-// mode-appropriate initial state, its cleanup, and the socket file's
-// removal. It is a method rather than more of runDaemon so the composition
-// root carries no test-only parameter: the containment-halt regression tests
-// compose a daemon with the runOnce seam themselves and drive this method
-// with a real listener (a SIGKILL-surviving process group cannot be
-// fabricated from real test children).
+// drain sequence. It owns the SIGTERM/interrupt wrapping and the abort cause
+// (so a fatal executor condition drains through the same context a signal
+// does), the marker's mode-appropriate initial state, its cleanup, and the
+// socket file's removal; runDaemon has already done the boot.
 func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, interval time.Duration, scheduleEnabled bool) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -210,12 +190,15 @@ func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, in
 
 	tickerDone := startTicker(ctx, d, interval, scheduleEnabled)
 
-	mode := "external"
+	// interval is ParseInterval's fallback in external mode, where nothing
+	// else reads it; logging it would state a cadence that does not run.
 	if scheduleEnabled {
-		mode = "built-in"
+		slog.Info("container started", "mode", "built-in", "interval", interval,
+			"timeout", d.timeout, "base_dir", baseDir(), "socket", socketPath)
+	} else {
+		slog.Info("container started", "mode", "external",
+			"timeout", d.timeout, "base_dir", baseDir(), "socket", socketPath)
 	}
-	slog.Info("container started",
-		"mode", mode, "interval", interval, "timeout", d.timeout, "base_dir", baseDir(), "socket", socketPath)
 
 	// Block until SIGTERM or the executor's fatal containment-loss signal;
 	// the latter shuts down through the same abort context so the ticker,
@@ -293,7 +276,7 @@ func startTicker(ctx context.Context, d *daemon, interval time.Duration, enabled
 // shutdown racing the tick — is logged and skipped: the next interval
 // provides freshness.
 func (d *daemon) tick(trig string) {
-	j := newJob(trig, nil, nil)
+	j := trigger.NewJob(trig, runPayload{})
 	if err := d.queue.Submit(j); err != nil {
 		slog.Warn("scheduled run skipped", "trigger", trig, "reason", err)
 		return
@@ -326,7 +309,7 @@ func (d *daemon) runJobs(shutdownCtx context.Context) {
 		case shutdownCtx.Err() != nil:
 			cancelJobForShutdown(j, "queued")
 		default:
-			d.execute(runCtx, shutdownCtx, j)
+			d.execute(runCtx, shutdownCtx.Err, j)
 		}
 	}
 }
@@ -334,8 +317,10 @@ func (d *daemon) runJobs(shutdownCtx context.Context) {
 // shutdownCancelReason is the not-ok outcome reason a waiting trigger
 // receives whenever shutdown cancels its job — still queued, caught by the
 // post-preflight re-check, or reaped by runRenovateOnce's post-Start
-// handshake.
-const shutdownCancelReason = "cancelled: scheduler shutting down"
+// handshake. The string is the trigger package's, and it travels the wire
+// verbatim to the waiting client; the app-local name keeps the daemon-side
+// reading unchanged.
+const shutdownCancelReason = trigger.CancelledReason
 
 // cancelJobForShutdown delivers the explicit shutdown-cancellation result —
 // the shared bookkeeping for both the already-shutting-down dequeue branch
@@ -360,29 +345,24 @@ func cancelJobForContainment(j *trigger.Job[runPayload]) {
 }
 
 // execute performs one job: signal the waiter, re-verify the base directory
-// (a volume can degrade after boot; failing here beats a confusing Renovate
-// error), run the pass, record the outcome on the health marker, and deliver
-// the result. The base-dir preflight runs on the uncancelled runCtx (it can
-// take up to 10s), so shutdownCtx is re-checked after it succeeds: a SIGTERM
-// that lands during the preflight must cancel the job, never start a fresh
-// Renovate pass after shutdown was requested. That re-check alone is a
-// check-then-act race — a SIGTERM can still land between it and process
-// creation — so shutdownCtx is also passed into runRenovateOnce, whose
-// post-Start handshake reaps a child that started after shutdown won and
-// reports it cancelled instead of committing it as in-flight.
-func (d *daemon) execute(runCtx, shutdownCtx context.Context, j *trigger.Job[runPayload]) {
+// (a volume can degrade after boot), run the pass, record the outcome on the
+// health marker, and deliver the result. The preflight runs on the uncancelled
+// runCtx (bounded by baseDirProbeBudget), so stopping is re-polled after it
+// succeeds; runRenovateOnce's post-Start handshake closes the rest of that
+// check-then-act window.
+func (d *daemon) execute(runCtx context.Context, stopping stopRequested, j *trigger.Job[runPayload]) {
 	j.Start()
 	start := time.Now()
 
 	dir := baseDirForEnv(j.Payload.Env)
-	if err := verifyBaseDirAt(runCtx, dir); err != nil {
+	if err := d.verifier.verifyAt(runCtx, dir); err != nil {
 		logBaseDirError(dir, err)
 		d.setRunHealth(false)
-		j.Finish(trigger.Outcome{OK: false, Duration: time.Since(start), Reason: "base directory not writable"})
+		j.Finish(trigger.Outcome{OK: false, Duration: time.Since(start), Reason: "base directory preflight failed"})
 		return
 	}
 
-	if shutdownCtx.Err() != nil {
+	if stopping() != nil {
 		cancelJobForShutdown(j, "preflight")
 		return
 	}
@@ -391,14 +371,14 @@ func (d *daemon) execute(runCtx, shutdownCtx context.Context, j *trigger.Job[run
 	if runOnce == nil {
 		runOnce = runRenovateOnce
 	}
-	ok, cancelled, groupSurvived := runOnce(runCtx, shutdownCtx, d.timeout, j.Trigger, j.Payload.Repos, j.Payload.Env, d.newCmd)
-	if cancelled {
+	outcome := runOnce(runCtx, stopping, d.timeout, j.Trigger, j.Payload, d.newCmd)
+	if outcome == runCancelled {
 		// runRenovateOnce already reaped the child and logged the Warn; the
 		// health marker is left alone (beginShutdown pinned it unhealthy).
 		j.Finish(trigger.Outcome{OK: false, Reason: shutdownCancelReason})
 		return
 	}
-	if groupSurvived {
+	if outcome == runContained {
 		// The kill sweep could not confirm the group's death: a
 		// package-manager tree may still be writing the base directory.
 		// Admitting another run would break the single-executor guarantee,
@@ -415,6 +395,7 @@ func (d *daemon) execute(runCtx, shutdownCtx context.Context, j *trigger.Job[run
 		d.fatal <- errContainmentLost
 		return
 	}
+	ok := outcome == runComplete
 	d.setRunHealth(ok)
 	j.Finish(trigger.Outcome{OK: ok, Duration: time.Since(start)})
 }
