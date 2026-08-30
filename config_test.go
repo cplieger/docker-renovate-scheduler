@@ -195,7 +195,7 @@ func TestProbeBaseDirWrite(t *testing.T) {
 // distinct, stage-naming errors wrapping the filesystem cause, and a passing
 // probe must still produce no error. This is the regression guard for the
 // adoption itself — a mapping that collapsed two stages onto one message, or
-// swallowed a teardown failure the way the pre-adoption probes in the fleet
+// swallowed a teardown failure the way the hand-rolled predecessor did,
 // did, would leave the preflight silently weaker while every other test passed.
 func TestBaseDirProbeStageError(t *testing.T) {
 	cause := errors.New("boom")

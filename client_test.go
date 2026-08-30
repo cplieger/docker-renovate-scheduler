@@ -15,8 +15,8 @@ import (
 )
 
 // TestRunClient_ExitCodesOverRealSocket pins the trigger contract end-to-end
-// (the same `run [repo …]` → exit 0/1 surface Ofelia and the Komodo action
-// consume): a clean run exits 0, a failing run exits 1.
+// (the same `run [repo …]` → exit 0/1 surface an external scheduler
+// consumes): a clean run exits 0, a failing run exits 1.
 func TestRunClient_ExitCodesOverRealSocket(t *testing.T) {
 	tests := []struct {
 		name string
@@ -117,7 +117,7 @@ func TestRunClient_RequestSendFailureExitsOne(t *testing.T) {
 
 // TestFinishResult_FailedRunLogsTheReasonOrItsFallback pins the reason
 // attribute on the client's failure line -- the whole diagnostic an operator
-// reading an Ofelia job log or a Komodo action gets, since the run's own
+// reading the trigger's own job log gets, since the run's own
 // output goes to the container log stream. A reason the daemon sent is
 // reported verbatim; a failure that arrived without one still points at the
 // log stream instead of logging an empty reason. Serial: swaps slog.Default.
