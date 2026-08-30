@@ -555,6 +555,7 @@ func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	invocations := 0
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
+	d.marker.Set(true) // a healthy pre-containment state the halt must clear
 	d.runOnce = func(context.Context, stopRequested, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
 		invocations++
 		return runContained // the group survived the sweep

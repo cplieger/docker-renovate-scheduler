@@ -148,6 +148,11 @@ func runRenovateOnce(ctx context.Context, stopping stopRequested,
 	}
 	runErr := cmd.Wait()
 	durationMs := time.Since(start).Milliseconds()
+	// Snapshot the deadline verdict here, not after the sweep: runCtx's
+	// timer keeps running while the sweep confirms the group's death, so a
+	// read taken later relabels a run that exited non-zero in time as a
+	// timeout.
+	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
 	// Wait reaps the leader only, and a zero exit is not proof the group is
 	// empty: a hard-crashed Renovate (an OOM-killed node) leaves its
 	// package-manager children, and a clean one can leave a backgrounded
@@ -165,7 +170,7 @@ func runRenovateOnce(ctx context.Context, stopping stopRequested,
 		}
 		slog.Info("renovate run complete", "trigger", trig, "duration_ms", durationMs)
 		return runComplete
-	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
+	case timedOut:
 		// Logged distinctly from a genuine non-zero Renovate exit so
 		// operators can tell a slow run from a real failure during triage.
 		slog.Error("renovate run timed out",

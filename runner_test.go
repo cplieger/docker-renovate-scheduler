@@ -1129,7 +1129,6 @@ func TestStopUncommittedRun_WarnsWhenGroupSurvivesGraceExpirySweep(t *testing.T)
 	}
 }
 
-
 // TestRunRenovateOnce_NonCleanRunsSweepAndReportContainment drives the two
 // unwitnessed links in the NON-CLEAN arms of runRenovateOnce, which the clean-arm
 // sibling (TestRunRenovateOnce_CleanRunSweepsLeftoverGroupMember) and the
@@ -1227,4 +1226,70 @@ func TestRunRenovateOnce_NonCleanRunsSweepAndReportContainment(t *testing.T) {
 			t.Errorf("runRenovateOnce() = %v, want runContained: a non-zero run whose group death cannot be confirmed must raise the containment signal, not report a plain failure", got)
 		}
 	})
+}
+
+// TestRunRenovateOnce_CleanUnconfirmableGroupDeathReportsContainment pins the
+// arm where the two containment inputs disagree: Renovate exited ZERO but the
+// kill sweep could not confirm its process group dead. The run must report
+// runContained so daemon.execute halts admission, and it must NOT emit the
+// "renovate run complete" record the completion-absence alerting watches for --
+// the clean-arm sibling
+// (TestRunRenovateOnce_CleanRunSweepsLeftoverGroupMember) reaches runComplete
+// because its member is promptly reaped, and the helper-level sweep test proves
+// only that sweepRunGroupOrWarn reports survival. The unconfirmable state is a
+// SIGKILLed-but-unreaped zombie joined into the leader's group, a direct child
+// of the TEST binary so the test owns the reap. Serial: swaps slog.Default.
+func TestRunRenovateOnce_CleanUnconfirmableGroupDeathReportsContainment(t *testing.T) {
+	rec := capture.Default(t)
+	dir := t.TempDir()
+	leaderPath, releasePath := dir+"/leader.pid", dir+"/release"
+	// The leader publishes its own pid (its pgid, via Setpgid) so the test can
+	// join a member to that group, then blocks until released and exits zero.
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		cmd := defaultCommandRunner(ctx, "sh", "-c",
+			`echo $$ > "$1"; until [ -e "$2" ]; do sleep 0.05; done`, "sh", leaderPath, releasePath)
+		cmd.Stdout, cmd.Stderr = nil, nil // a group member must not hold the test's stdout pipe
+		return cmd
+	}
+
+	resultCh := make(chan runOutcome, 1)
+	go func() {
+		resultCh <- runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{}, runner)
+	}()
+
+	waitFor(t, 5*time.Second, func() bool {
+		raw, err := os.ReadFile(leaderPath)
+		return err == nil && len(strings.TrimSpace(string(raw))) > 0
+	}, "the clean run leader never published its pid")
+	raw, err := os.ReadFile(leaderPath)
+	if err != nil {
+		t.Fatalf("read the leader pid file: %v", err)
+	}
+	leaderPid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatalf("bad leader PID file content %q: %v", raw, err)
+	}
+
+	holder := exec.Command("sleep", "300")
+	holder.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: leaderPid}
+	if err := holder.Start(); err != nil {
+		t.Fatalf("start group holder: %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Wait() }) // reap the zombie after the assertions
+	if got, err := syscall.Getpgid(holder.Process.Pid); err != nil || got != leaderPid {
+		t.Fatalf("group holder pgid = (%d, %v), want (%d, nil)", got, err, leaderPid)
+	}
+	if err := holder.Process.Kill(); err != nil {
+		t.Fatalf("kill group holder: %v", err)
+	}
+	if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
+		t.Fatalf("release the clean run leader: %v", err)
+	}
+
+	if got := <-resultCh; got != runContained {
+		t.Errorf("runRenovateOnce() = %v, want runContained: a zero exit whose group death cannot be confirmed must raise the containment signal, not report a completed run", got)
+	}
+	if got := rec.CountLevel(slog.LevelInfo, "renovate run complete"); got != 0 {
+		t.Errorf("INFO records matching %q = %d, want 0: a contained run must not log the completion line; captured: %v", "renovate run complete", got, rec.Messages())
+	}
 }

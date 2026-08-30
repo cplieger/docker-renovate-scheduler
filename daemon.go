@@ -49,10 +49,9 @@ type daemon struct {
 	verifier *baseDirVerifier
 	newCmd   scheduler.CommandRunner
 	// runOnce executes one Renovate pass; nil means runRenovateOnce (the
-	// production path). It exists as a seam for the containment-halt
-	// regression tests only: a SIGKILL-surviving process group cannot be
-	// fabricated from real test children, so the surviving-group report is
-	// injected at this boundary.
+	// production path). It is the tests' injection boundary for two facts a
+	// real child cannot supply: a SIGKILL-surviving process group, and an
+	// unambiguous committed-run barrier past the post-Start handshake.
 	runOnce runOnceFunc
 	// fatal delivers the executor's containment-loss error to daemon.run.
 	// Buffered 1: the executor halts after its single send, so the send can
