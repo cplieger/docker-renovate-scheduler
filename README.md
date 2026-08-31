@@ -9,6 +9,7 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/docker-renovate-scheduler/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/docker-renovate-scheduler)
 [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/docker-renovate-scheduler/releases)
 
+<!-- hub-overview BEGIN -->
 Run [Renovate](https://github.com/renovatebot/renovate) as a resident, always-on container instead of a one-shot job, driven by a built-in interval scheduler **or** an external trigger. A tiny Go wrapper around the official `renovate/renovate` image; structured logs, no metrics, no open ports.
 
 ## Why this exists
@@ -30,6 +31,7 @@ One deliberate trim: the bundled `docker` CLI is removed. Renovate invokes it on
 - **One run at a time, every request served.** Requests queue in order behind an in-flight run; each gets its own run and its own exit code. See [One run at a time](#one-run-at-a-time-queueing).
 - File-marker healthcheck via [`github.com/cplieger/health`](https://github.com/cplieger/health): unhealthy when the last run failed, recovers on the next clean run.
 - Streams Renovate's own structured logs straight through to the container's stdout/stderr (set `LOG_FORMAT=json`) for collection by Alloy/Promtail/Loki, **in both scheduling modes**. The scheduler neither captures nor parses Renovate's output; it emits only its own lifecycle lines, with UTC timestamps regardless of the container's `TZ`.
+<!-- hub-overview END -->
 
 ## Configuration reference
 
