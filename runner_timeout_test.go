@@ -15,19 +15,7 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-// TestRunRenovateOnce_DeadlineCrossedDuringSweepStillLogsFailure pins the
-// timeout classification against the containment sweep's own duration. The
-// run's deadline keeps running while sweepRunGroupOrWarn confirms the process
-// group is dead (a bounded window of up to scheduler.DefaultGrace), so a
-// leader that exited non-zero WITHIN its deadline must still be recorded as a
-// failure when that window crosses the deadline -- reading the deadline after
-// the sweep instead relabels a real Renovate failure as a timeout, which sends
-// triage after a slow run that never happened.
-//
-// The fixture owns both instants: the leader exits 23 on release, and a
-// SIGKILLed-but-unreaped group member (a direct child of the TEST binary, so
-// the test reaps it) holds the sweep's probe unsatisfied until the deadline has
-// certainly fired. Serial: swaps slog.Default.
+// The leader exits before its deadline; an unreaped member holds the sweep open.
 func TestRunRenovateOnce_DeadlineCrossedDuringSweepStillLogsFailure(t *testing.T) {
 	rec := capture.Default(t)
 	const timeout = 2 * time.Second

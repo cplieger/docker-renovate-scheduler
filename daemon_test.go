@@ -20,12 +20,8 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-// newTestDaemon builds a daemon wired to a temp health marker and the given
-// runner, with the executor started. Returns the daemon, the shutdown cancel,
-// and a channel closed when the executor has drained.
 func newTestDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, context.CancelFunc, <-chan struct{}) {
 	t.Helper()
-	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	d, _ := newBareDaemon(t, runner)
 	done := make(chan struct{})
@@ -55,10 +51,6 @@ func submitWait(t *testing.T, d *daemon, j *trigger.Job[runPayload]) trigger.Out
 		return trigger.Outcome{}
 	}
 }
-
-// TestExecutor_RunsJobsInOrderWithTheirScopes pins the FIFO execution and the
-// per-job scope: each run receives ITS OWN repo args — the property the old
-// coalescing design lost.
 func TestExecutor_RunsJobsInOrderWithTheirScopes(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	var argsLog [][]string
@@ -89,7 +81,6 @@ func TestExecutor_RunsJobsInOrderWithTheirScopes(t *testing.T) {
 func TestExecutor_MarkerFollowsRunOutcome(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 
-	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	d, markerPath := newBareDaemon(t, recordingRunner("true", nil))
@@ -551,7 +542,6 @@ func TestRunDaemon_BuiltinModeStartsUnhealthyThenFlipsHealthy(t *testing.T) {
 func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 
-	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	invocations := 0
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
@@ -647,7 +637,6 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 		timeout:  time.Minute,
 		fatal:    make(chan error, 1),
 	}
-	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	var runErr error
@@ -752,7 +741,6 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 		timeout:  time.Minute,
 		fatal:    make(chan error, 1),
 	}
-	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	var runErr error

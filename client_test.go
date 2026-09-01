@@ -14,9 +14,6 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-// TestRunClient_ExitCodesOverRealSocket pins the trigger contract end-to-end
-// (the same `run [repo …]` → exit 0/1 surface an external scheduler
-// consumes): a clean run exits 0, a failing run exits 1.
 func TestRunClient_ExitCodesOverRealSocket(t *testing.T) {
 	tests := []struct {
 		name string
@@ -35,20 +32,12 @@ func TestRunClient_ExitCodesOverRealSocket(t *testing.T) {
 		})
 	}
 }
-
-// TestRunClient_DaemonUnreachableExitsOne pins the no-daemon failure mode:
-// an immediate exit 1 (the trigger reports a failed job), never a hang.
 func TestRunClient_DaemonUnreachableExitsOne(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "absent.sock")
 	if code := runClient(sock, nil); code != 1 {
 		t.Errorf("runClient() = %d with no daemon, want 1", code)
 	}
 }
-
-// TestRunClient_ForwardsItsEnvironment pins the env half of the trigger
-// contract at the runClient level: the client forwards its own process
-// environment, so a `docker exec -e RENOVATE_X=…` override reaches the
-// daemon-spawned child. The fake child asserts the marker variable.
 func TestRunClient_ForwardsItsEnvironment(t *testing.T) {
 	t.Setenv("RENOVATE_TEST_MARKER", "exec-override")
 	runner := shellAssertRunner(`[ "$RENOVATE_TEST_MARKER" = "exec-override" ]`)

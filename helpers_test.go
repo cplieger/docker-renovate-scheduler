@@ -14,19 +14,11 @@ import (
 	"github.com/cplieger/scheduler/v4/trigger"
 )
 
-// newJob builds one queued run request: the trigger label for logs, the
-// positional repository slugs (empty means Renovate's own configuration
-// decides), and the complete child environment (nil means inherit the
-// daemon's own — ticker-submitted runs).
 func newJob(trig string, repos, env []string) *trigger.Job[runPayload] {
 	return trigger.NewJob(trig, runPayload{Repos: repos, Env: env})
 }
 
-// newBareDaemon builds the standard test daemon fixture — temp health
-// marker, one-minute timeout, buffered fatal channel — WITHOUT starting the
-// executor: each caller owns its runJobs
-// goroutine and shutdown ordering. Returns the marker path for tests that
-// assert on the marker file directly.
+// The executor is deliberately not started; callers control its lifetime.
 func newBareDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, string) {
 	t.Helper()
 	markerPath := filepath.Join(t.TempDir(), "marker")

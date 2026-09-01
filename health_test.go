@@ -9,9 +9,6 @@ import (
 	"github.com/cplieger/health"
 )
 
-// TestProbe_WedgedBuiltinLoopFailsFreshness proves the deadman end-to-end
-// with the real probe: a marker older than the armed max-age probes unhealthy
-// in built-in mode, while external mode accepts a marker of any age.
 func TestProbe_WedgedBuiltinLoopFailsFreshness(t *testing.T) {
 	t.Setenv("RUN_TIMEOUT", "1s")
 	marker := filepath.Join(t.TempDir(), "marker")
@@ -34,12 +31,6 @@ func TestProbe_WedgedBuiltinLoopFailsFreshness(t *testing.T) {
 	}
 }
 
-// TestProbeOptions_ExtremeIntervalSaturatesDeadline pins the overflow guard
-// in probeOptions: with RUN_INTERVAL at time.Duration's maximum, computing
-// 2*interval+timeout naively wraps to a SMALL POSITIVE max-age (~= timeout),
-// which would fail a perfectly fresh marker and restart a healthy container.
-// The guard must saturate the deadline at maxDuration instead, so an aged
-// marker still probes healthy.
 func TestProbeOptions_ExtremeIntervalSaturatesDeadline(t *testing.T) {
 	t.Setenv("RUN_TIMEOUT", "1h")
 	t.Setenv("RUN_INTERVAL", "9223372036854775807ns") // time.Duration max: 2*interval wraps to -2

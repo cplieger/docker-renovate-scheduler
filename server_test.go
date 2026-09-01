@@ -14,13 +14,6 @@ import (
 	"github.com/cplieger/scheduler/v4/trigger"
 )
 
-// The broker mechanics (queue semantics, socket hygiene, wire ordering,
-// accept-loop degradation, departed clients) are the scheduler library's and
-// are tested in scheduler/v4/trigger. These tests pin what stays THIS app's:
-// the daemon executor's policy as observed over the real socket — scope and
-// environment forwarding into the Renovate child, and shutdown's
-// drain-versus-cancel split.
-
 // startTestServer wires a queue + executor + trigger server on a temp socket
 // and returns the socket path. Everything is torn down via t.Cleanup.
 func startTestServer(t *testing.T, runner scheduler.CommandRunner) string {
@@ -115,15 +108,7 @@ func TestServer_ForwardsScopeAndEnvironmentToTheRun(t *testing.T) {
 	}
 }
 
-// TestServer_ShutdownCancelsQueuedRequestWithExplicitResult pins the
-// shutdown contract on the wire: a request queued behind an in-flight run
-// receives done{ok:false, reason: cancelled…} when the daemon stops — the
-// trigger reports a failed job instead of hanging or being silently dropped.
-// The in-flight run pauses INSIDE the runOnce seam (the committed-run
-// boundary) and blocks until released, so the shutdown lands on a run that
-// has unambiguously committed and A drains with its real outcome instead of
-// being cancelled at start (a child-start readiness marker would race
-// runRenovateOnce's post-Start handshake).
+// The in-flight run blocks at runOnce, so shutdown drains it and cancels the queued request.
 func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	sock := testSocketPath(t)

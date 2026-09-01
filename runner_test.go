@@ -178,17 +178,7 @@ func TestRunRenovateOnce_EnvForcesDumbInitInGroup(t *testing.T) {
 	}
 }
 
-// TestRunRenovateOnce_TimeoutKillsSessionEscapedDescendants is the process-
-// level regression test for the containment boundary: the image entrypoint
-// chain ends in a nested per-run dumb-init whose DEFAULT mode forks Renovate
-// into a new session/process group, out of reach of both group escalation
-// stages (Cancel's SIGTERM and the post-timeout SIGKILL, both aimed at
-// -cmd.Process.Pid). The fake entrypoint here models exactly that split: it
-// honors DUMB_INIT_SETSID the way dumb-init does — "0" keeps the payload in
-// the scheduler-created group, anything else setsids it away. With
-// runRenovateOnce forcing DUMB_INIT_SETSID=0, the long-running payload must
-// be dead after the timeout; if the override regresses, the payload escapes
-// into its own session, survives the sweep, and this test fails.
+// DUMB_INIT_SETSID=0 keeps descendants in the runner's process group.
 func TestRunRenovateOnce_TimeoutKillsSessionEscapedDescendants(t *testing.T) {
 	t.Parallel()
 	if _, err := exec.LookPath("setsid"); err != nil {
@@ -469,19 +459,7 @@ func reposAttr(t *testing.T, value slog.Value) []string {
 	return repos
 }
 
-// TestDefaultCommandRunner_CancelSendsSIGTERMNotSIGKILL pins the graceful-
-// shutdown guardrail in defaultCommandRunner: on context cancellation the
-// Cancel closure sends SIGTERM (not os/exec's default SIGKILL), giving
-// Renovate a 5s WaitDelay grace to exit cleanly. A shell that traps SIGTERM
-// and exits 42 proves the signal arrived as SIGTERM -- a SIGKILLed process
-// cannot run its trap, so its result would be "signal: killed" (ExitCode -1).
-// `sleep 30 & wait` makes the trap fire promptly (a foreground sleep would
-// defer it until the sleep returned); Stdout/Stderr are detached so the
-// backgrounded sleep, reparented when the shell exits, does not hold the test
-// process's stdout pipe open and stall `go test`. The child creates a
-// readiness marker AFTER installing its trap, and the test polls that
-// observable event before cancelling — a fixed sleep would race the trap
-// install under load and make a correct runner look like SIGKILL behavior.
+// The child writes its PID after installing the SIGTERM trap.
 func TestDefaultCommandRunner_CancelSendsSIGTERMNotSIGKILL(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
