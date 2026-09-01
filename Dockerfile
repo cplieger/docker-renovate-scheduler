@@ -77,7 +77,7 @@ ENV RENOVATE_BASE_DIR=/data
 # when a repo's go.mod requires a higher version. See README "Running as a
 # non-default user (rootless)".
 # renovate: datasource=golang-version depName=go
-ARG GOLANG_VERSION=1.27.0
+ARG GOLANG_VERSION=1.27.1
 RUN install-tool golang "${GOLANG_VERSION}"
 ENV GOTOOLCHAIN=auto
 
