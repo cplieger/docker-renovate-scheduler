@@ -91,9 +91,6 @@ func TestBaseDir(t *testing.T) {
 	})
 }
 
-// TestBaseDirForEnv pins the per-run base-dir resolution from a job's
-// forwarded environment: exec semantics (wholesale replacement, last value
-// wins for duplicates), the empty-value fallback, and the nil-env inherit.
 func TestBaseDirForEnv(t *testing.T) {
 	tests := []struct {
 		name string
@@ -140,10 +137,6 @@ func TestVerifyBaseDir(t *testing.T) {
 		}
 	})
 }
-
-// TestProbeBaseDirWrite pins the staged write probe at the helper boundary: a
-// directory that cannot take a new file reports the actionable "not writable"
-// error.
 func TestProbeBaseDirWrite(t *testing.T) {
 	t.Run("reports not writable when the probe cannot be created", func(t *testing.T) {
 		if os.Geteuid() == 0 {

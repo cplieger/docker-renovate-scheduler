@@ -8,23 +8,9 @@ import (
 	"github.com/cplieger/health"
 )
 
-// --- Main ---
-
-// main dispatches on the first argument: `health` runs the Docker probe,
-// `run` triggers one Renovate pass via the daemon's socket and exits with
-// that run's result (the external-trigger entry point; any further arguments
-// are passed through to Renovate as repository slugs), and `daemon` — the
-// default when no argument is given — runs the long-lived daemon that owns
-// all runs. Any other subcommand is rejected loudly with exit code 2.
 func main() {
-	// Logging is configured before anything can diagnose: the health probe's
-	// own config-parse warnings (an unparseable RUN_INTERVAL / RUN_TIMEOUT
-	// read by probeOptions) must come out as logfmt like every other line,
-	// and RunProbe calls os.Exit, so nothing after it runs.
 	setupLogger()
 
-	// CLI health probe for the Docker healthcheck. RunProbe calls os.Exit, so
-	// this is checked before the subcommand switch.
 	if len(os.Args) > 1 && os.Args[1] == "health" {
 		health.RunProbe(healthMarkerPath, probeOptions()...)
 	}

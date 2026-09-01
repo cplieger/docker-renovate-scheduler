@@ -9,15 +9,7 @@ import (
 	"github.com/cplieger/slogx/capture"
 )
 
-// TestRootlessCacheRisk pins the classification strategy tier by tier (see
-// rootless.go's section comment): UID gates, mechanism-not-engaged (loud),
-// engaged-without-a-cache-name (soft), and engaged (silent). The "engaged"
-// rows deliberately sweep every value shape — real path, empty string, null,
-// number, HOME:"/", a cache-control-style name — because value-blindness IS
-// the contract (h-f1, 2026-07-22): engagement is judged by NAMES only, and
-// value correctness stays the operator's responsibility. If one of those
-// rows ever fails, the engagement-only contract moved; that must be a
-// deliberate, user-approved decision, not a drive-by.
+// Cache forwarding is name-only; forwarded values are opaque.
 func TestRootlessCacheRisk(t *testing.T) {
 	const customUID = 568
 
@@ -154,16 +146,6 @@ func TestCacheLikeEnvVar(t *testing.T) {
 	}
 }
 
-// The TestWarnIfRootlessCacheUnwritable_* tests pin the wrapper's observable
-// contract on captured slog output. The pure decision matrix is
-// TestRootlessCacheRisk's; these pin the wiring (real euid + real env reach
-// the decision, and the right Warn actually fires). Skipped when the test
-// process runs as root or the image UID, where the warning branches are
-// unreachable by design. They capture the process-global slog default, so
-// they must stay serial (no t.Parallel).
-
-// requireCustomUID skips the test when the warning branch is unreachable for
-// this process and returns the effective UID otherwise.
 func requireCustomUID(t *testing.T) int {
 	t.Helper()
 	euid := os.Geteuid()

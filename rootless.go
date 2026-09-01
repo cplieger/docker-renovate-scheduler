@@ -8,40 +8,17 @@ import (
 	"strings"
 )
 
-// defaultImageUID is the non-root user baked into the renovate base image
-// (passwd entry `ubuntu:x:12021:0`). Running as this UID, or as root, gives
-// containerbase a writable home and tool directory, so Renovate installs
-// toolchains and regenerates lockfiles with no extra configuration.
+// defaultImageUID is Renovate's non-root image user.
 const defaultImageUID = 12021
 
-// --- Rootless cache-risk classification ---
-
-// A custom (non-root, non-12021) UID has no writable containerbase home, so
-// artifact/lockfile regeneration fails and renovate reports it on the PR hours
-// later; one advisory boot warning makes that signal local. The classifier
-// verifies MECHANISM ENGAGEMENT, never value correctness: a stricter guard would
-// have to cover its whole input class, have security impact, or prevent a crash.
-// Accepted error directions, one advisory line each: a cache-like name that
-// redirects nothing suppresses the warning; plain GOCACHE on the scheduler does
-// not (renovate forwards only an allowlist); a config.js redirection is invisible.
-
-// rootlessRisk is the classification result.
 type rootlessRisk int
 
 const (
-	// rootlessRiskNone: default/root UID, or the mitigation mechanism is
-	// engaged (a cache/path variable is named).
 	rootlessRiskNone rootlessRisk = iota
-	// rootlessRiskNoRedirection: custom UID, RENOVATE_CUSTOM_ENV_VARIABLES unset.
 	rootlessRiskNoRedirection
-	// rootlessRiskNoCacheVars: custom UID, variable set but naming no
-	// cache/path variable (proxy-only forwarding, `{}`, or undecodable input).
 	rootlessRiskNoCacheVars
 )
 
-// warnIfRootlessCacheUnwritable classifies at boot and emits the tier's
-// warning. Log lines carry key NAMES only — forwarded values can hold
-// credentials (an HTTP_PROXY with basic auth) and must never reach the log.
 func warnIfRootlessCacheUnwritable() {
 	switch rootlessCacheRisk(os.Geteuid(), os.Getenv) {
 	case rootlessRiskNone:
@@ -66,17 +43,10 @@ func warnIfRootlessCacheUnwritable() {
 	}
 }
 
-// rootlessCacheConsequence is the shared consequence clause of both warnings:
-// what actually breaks when the tool caches stay unredirected.
 const rootlessCacheConsequence = "a custom UID has no writable containerbase home, " +
 	"so artifact/lockfile regeneration (go.sum, package-lock.json) will likely fail " +
 	"and dependency PRs will be raised with stale lockfiles that renovate flags with a red renovate/artifacts check"
 
-// rootlessCacheRisk is the pure decision (see the section comment for what it
-// does and does not judge). getenv is injected so tests exercise
-// the matrix without changing the real UID or environment. No filesystem
-// probe: a write-probe of $HOME would be redundant with the UID check and a
-// needless side effect.
 func rootlessCacheRisk(euid int, getenv func(string) string) rootlessRisk {
 	if euid == defaultImageUID || euid == 0 {
 		return rootlessRiskNone
@@ -91,10 +61,7 @@ func rootlessCacheRisk(euid int, getenv func(string) string) rootlessRisk {
 	return rootlessRiskNoCacheVars
 }
 
-// customEnvVarNames is the single parse: the JSON object's key names, sorted
-// for deterministic logs. Undecodable or non-object input yields no names —
-// it redirects no cache, and Renovate itself fails loudly on it at startup.
-// Values are deliberately never decoded (see the section comment).
+// customEnvVarNames returns names only; values may contain credentials.
 func customEnvVarNames(raw string) []string {
 	var vars map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &vars); err != nil {
@@ -108,12 +75,7 @@ func customEnvVarNames(raw string) []string {
 	return names
 }
 
-// cacheLikeEnvVar reports whether a variable name plausibly redirects a tool
-// cache or toolchain home: any name containing "cache" (GOCACHE,
-// npm_config_cache, PIP_CACHE_DIR, YARN_CACHE_FOLDER, …) plus the well-known
-// path/home variables that don't. The namespace is unbounded across language
-// managers, so this stays an open-ended heuristic rather than a maintained
-// allowlist; its error directions are the accepted ones in the section comment.
+// cacheLikeEnvVar is intentionally open-ended for language-manager cache names.
 func cacheLikeEnvVar(name string) bool {
 	if strings.Contains(strings.ToUpper(name), "CACHE") {
 		return true
