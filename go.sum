@@ -6,8 +6,8 @@ github.com/cplieger/health v1.7.0 h1:GPKV//fmjsdpvP5as06wRvJ6MxqI7Y2mwiW/dyuOnoQ
 github.com/cplieger/health v1.7.0/go.mod h1:fGHTssNQpl2EjqRLxgs3n7bbj94gD5HDgi1KEk8cN0Q=
 github.com/cplieger/pathinside/v2 v2.0.0 h1:UZxSiu3UBCCs+Xe0+Of+oTLyzL+4wchKO2tShGxK8b8=
 github.com/cplieger/pathinside/v2 v2.0.0/go.mod h1:XuMYE6rO3te8Yf6Zcy35PLMgDcWaIz3RglJatWPhHnU=
-github.com/cplieger/scheduler/v4 v4.0.1 h1:Jr5SA+EPEAYuYqFEPLXq1AMZ7GLRoIwNREL+BhBpkeQ=
-github.com/cplieger/scheduler/v4 v4.0.1/go.mod h1:OZUt7EXSm8c6Ao+YM/CwVPEGrgYsihawSAPqqpTgwbw=
+github.com/cplieger/scheduler/v4 v4.0.2 h1:nioyA1cfEUIXbOzez2ey9o5LfvR/+4odrbUs2b48X7A=
+github.com/cplieger/scheduler/v4 v4.0.2/go.mod h1:OZUt7EXSm8c6Ao+YM/CwVPEGrgYsihawSAPqqpTgwbw=
 github.com/cplieger/slogx v1.6.3 h1:1W8DxUwovnfbL1wjthdELHhw2gFH1FXaUcG34KjefIw=
 github.com/cplieger/slogx v1.6.3/go.mod h1:KW/UCGyMK3grILRvcU4Zloawb27C13cLN5HQ7ZLNS5Q=
 pgregory.net/rapid v1.3.0 h1:vBvO0VSqti75J1jjYqpgPNBLKMd1+gxa9fYo7vk/Exc=
