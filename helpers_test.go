@@ -22,9 +22,11 @@ func newJob(trig string, repos, env []string) *trigger.Job[runPayload] {
 func newBareDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, string) {
 	t.Helper()
 	markerPath := filepath.Join(t.TempDir(), "marker")
+	marker := health.NewMarker(markerPath)
 	d := &daemon{
 		queue:    trigger.NewQueue[runPayload](queueCapacity),
-		marker:   health.NewMarker(markerPath),
+		marker:   marker,
+		health:   health.NewLatch(marker),
 		verifier: newBaseDirVerifier(),
 		newCmd:   runner,
 		timeout:  time.Minute,
