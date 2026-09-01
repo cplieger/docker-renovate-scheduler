@@ -188,10 +188,10 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 		t.Fatalf("submit(queued) = %v", err)
 	}
 
-	cancel()          // SIGTERM lands mid-run
-	d.beginShutdown() // runDaemon's immediate unhealthy transition
-	d.queue.Close()   // daemon stops admission
-	release()         // the in-flight run finishes its pass
+	cancel()              // SIGTERM lands mid-run
+	d.health.BeginDrain() // runDaemon's immediate unhealthy transition
+	d.queue.Close()       // daemon stops admission
+	release()             // the in-flight run finishes its pass
 
 	select {
 	case out := <-inflight.Result():
@@ -608,7 +608,7 @@ func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
 // be injected at the runOnce seam (the same reason
 // TestExecutor_HaltsAdmissionAfterSurvivingGroup uses it) and runDaemon
 // deliberately carries no test-only parameter. External mode, because the marker boots HEALTHY
-// there: beginShutdown — which runs only after the select resolved — flips
+// there: BeginDrain — which runs only after the select resolved — flips
 // it unhealthy, giving a deterministic post-select signal.
 // Not parallel: it uses the package-global healthMarkerPath.
 func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
@@ -629,9 +629,11 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("trigger.Listen(%q) = %v", sock, err)
 	}
+	marker := health.NewMarker(healthMarkerPath)
 	d := &daemon{
 		queue:    trigger.NewQueue[runPayload](queueCapacity),
-		marker:   health.NewMarker(healthMarkerPath),
+		marker:   marker,
+		health:   health.NewLatch(marker),
 		verifier: newBaseDirVerifier(),
 		newCmd:   recordingRunner("true", nil),
 		runOnce:  runOnce,
@@ -678,7 +680,7 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 	}
 
 	cancel() // ordinary shutdown wins the select while the run drains
-	// beginShutdown flips the marker unhealthy (file removed) and runs only
+	// BeginDrain flips the marker unhealthy (file removed) and runs only
 	// after the select resolved, so marker absence proves ctx.Done won (the
 	// fatal channel was still empty) and the survival report below exercises
 	// the post-drain fold-in, not the select's own fatal branch.
@@ -733,9 +735,11 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("trigger.Listen(%q) = %v", sock, err)
 	}
+	marker := health.NewMarker(healthMarkerPath)
 	d := &daemon{
 		queue:    trigger.NewQueue[runPayload](queueCapacity),
-		marker:   health.NewMarker(healthMarkerPath),
+		marker:   marker,
+		health:   health.NewLatch(marker),
 		verifier: newBaseDirVerifier(),
 		newCmd:   recordingRunner("true", nil),
 		runOnce:  runOnce,
@@ -779,7 +783,7 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 // execute's cancelled branch: when runRenovateOnce reports the post-Start
 // shutdown handshake reaped the child (runCancelled), the waiter must get
 // the explicit shutdown reason — not a bare failure — and the health marker
-// must be left alone (beginShutdown owns the shutdown health state; a
+// must be left alone (BeginDrain owns the shutdown health state; a
 // cancelled start is not a run failure). The cancelled report is injected at
 // the runOnce seam; the real handshake behavior is pinned process-level by
 // TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild.
@@ -808,6 +812,6 @@ func TestExecutor_CancelledRunDeliversShutdownReasonAndLeavesMarker(t *testing.T
 		t.Fatal("no result delivered for the cancelled run")
 	}
 	if !d.marker.CheckHealthy() {
-		t.Error("health marker flipped unhealthy by a cancelled run; the cancelled branch must leave the marker alone (beginShutdown owns the shutdown state)")
+		t.Error("health marker flipped unhealthy by a cancelled run; the cancelled branch must leave the marker alone (BeginDrain owns the shutdown state)")
 	}
 }

@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -28,31 +27,14 @@ type runOnceFunc func(ctx context.Context, stopping stopRequested, timeout time.
 type daemon struct {
 	queue    *trigger.Queue[runPayload]
 	marker   *health.Marker
+	health   *health.Latch
 	verifier *baseDirVerifier
 	newCmd   scheduler.CommandRunner
 	runOnce  runOnceFunc
 	fatal    chan error
 	timeout  time.Duration
-	// healthMu prevents a draining run from restoring health after shutdown.
-	healthMu sync.Mutex
-	stopping bool
 	// Only the executor accesses halted.
 	halted bool
-}
-
-func (d *daemon) beginShutdown() {
-	d.healthMu.Lock()
-	defer d.healthMu.Unlock()
-	d.stopping = true
-	d.marker.Set(false)
-}
-
-func (d *daemon) setRunHealth(ok bool) {
-	d.healthMu.Lock()
-	defer d.healthMu.Unlock()
-	if !d.stopping {
-		d.marker.Set(ok)
-	}
 }
 
 func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandRunner) error {
@@ -79,6 +61,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	d := &daemon{
 		queue:    trigger.NewQueue[runPayload](queueCapacity),
 		marker:   marker,
+		health:   health.NewLatch(marker),
 		verifier: verifier,
 		newCmd:   newCmd,
 		timeout:  timeout,
@@ -95,7 +78,7 @@ func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, in
 
 	defer func() { _ = os.Remove(socketPath) }()
 	defer d.marker.Cleanup()
-	d.marker.Set(!scheduleEnabled)
+	d.health.Set(!scheduleEnabled)
 
 	executorDone := make(chan struct{})
 	go func() {
@@ -131,7 +114,7 @@ func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, in
 		abort(fatalErr)
 	}
 	slog.Info("shutting down", "cause", context.Cause(ctx))
-	d.beginShutdown()
+	d.health.BeginDrain()
 
 	_ = ln.Close()
 	d.queue.Close()
@@ -212,7 +195,7 @@ func (d *daemon) execute(runCtx context.Context, stopping stopRequested, j *trig
 	dir := baseDirForEnv(j.Payload.Env)
 	if err := d.verifier.verifyAt(runCtx, dir); err != nil {
 		logBaseDirError(dir, err)
-		d.setRunHealth(false)
+		d.health.Set(false)
 		j.Finish(trigger.Outcome{OK: false, Duration: time.Since(start), Reason: "base directory preflight failed"})
 		return
 	}
@@ -233,7 +216,7 @@ func (d *daemon) execute(runCtx context.Context, stopping stopRequested, j *trig
 	}
 	if outcome == runContained {
 		d.halted = true
-		d.setRunHealth(false)
+		d.health.Set(false)
 		slog.Error("halting run admission: renovate run process group survived the kill sweep",
 			"trigger", j.Trigger)
 		j.Finish(trigger.Outcome{OK: false, Duration: time.Since(start), Reason: containmentLostReason})
@@ -241,6 +224,6 @@ func (d *daemon) execute(runCtx context.Context, stopping stopRequested, j *trig
 		return
 	}
 	ok := outcome == runComplete
-	d.setRunHealth(ok)
+	d.health.Set(ok)
 	j.Finish(trigger.Outcome{OK: ok, Duration: time.Since(start)})
 }
