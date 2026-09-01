@@ -51,6 +51,7 @@ func submitWait(t *testing.T, d *daemon, j *trigger.Job[runPayload]) trigger.Out
 		return trigger.Outcome{}
 	}
 }
+
 func TestExecutor_RunsJobsInOrderWithTheirScopes(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	var argsLog [][]string

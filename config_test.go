@@ -137,6 +137,7 @@ func TestVerifyBaseDir(t *testing.T) {
 		}
 	})
 }
+
 func TestProbeBaseDirWrite(t *testing.T) {
 	t.Run("reports not writable when the probe cannot be created", func(t *testing.T) {
 		if os.Geteuid() == 0 {

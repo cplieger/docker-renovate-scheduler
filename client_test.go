@@ -32,12 +32,14 @@ func TestRunClient_ExitCodesOverRealSocket(t *testing.T) {
 		})
 	}
 }
+
 func TestRunClient_DaemonUnreachableExitsOne(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "absent.sock")
 	if code := runClient(sock, nil); code != 1 {
 		t.Errorf("runClient() = %d with no daemon, want 1", code)
 	}
 }
+
 func TestRunClient_ForwardsItsEnvironment(t *testing.T) {
 	t.Setenv("RENOVATE_TEST_MARKER", "exec-override")
 	runner := shellAssertRunner(`[ "$RENOVATE_TEST_MARKER" = "exec-override" ]`)
