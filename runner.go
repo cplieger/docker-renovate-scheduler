@@ -106,13 +106,69 @@ func runRenovateOnce(ctx context.Context, stopping stopRequested,
 		slog.Error("renovate run timed out",
 			"trigger", trig, "duration_ms", durationMs, "timeout", timeout)
 	default:
-		slog.Error("renovate run failed",
-			"trigger", trig, "duration_ms", durationMs, "error", runErr)
+		logRunFailure(trig, durationMs, runErr)
 	}
 	if survived {
 		return runContained
 	}
 	return runFailed
+}
+
+// abortExitCode is what a shell reports when its child dies on SIGABRT.
+// Renovate's entrypoint is a shell, so node's fatal errors reach the daemon as
+// this exit code rather than as a signal on the daemon's own child.
+const abortExitCode = 128 + int(syscall.SIGABRT)
+
+// runDiagnosis carries a named cause for a run failure and its remedy.
+type runDiagnosis struct {
+	cause string
+	fix   string
+}
+
+// logRunFailure records a failed run, naming a likely cause when the exit
+// status identifies one so the operator reads a remedy instead of a number.
+// The message string is fixed because the README's alerting rules key on it.
+func logRunFailure(trig string, durationMs int64, runErr error) {
+	if diag, ok := abortDiagnosis(runErr); ok {
+		slog.Error("renovate run failed",
+			"trigger", trig, "duration_ms", durationMs, "error", runErr,
+			"likely_cause", diag.cause, "fix", diag.fix)
+		return
+	}
+	slog.Error("renovate run failed",
+		"trigger", trig, "duration_ms", durationMs, "error", runErr)
+}
+
+// abortDiagnosis names the likely cause of a SIGABRT-shaped run failure. Node
+// aborts on a V8 fatal error, and for Renovate that is dominated by heap
+// exhaustion. It needs saying because the bare status points away from the
+// cause: node sizes its heap from the container memory limit and dies at
+// roughly half of it, so the kernel OOM killer never fires and the cgroup's
+// own counters stay at zero.
+func abortDiagnosis(runErr error) (runDiagnosis, bool) {
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) {
+		return runDiagnosis{}, false
+	}
+	if !abortedOnSIGABRT(exitErr) {
+		return runDiagnosis{}, false
+	}
+	return runDiagnosis{
+		cause: "renovate aborted; for node this is usually a JavaScript heap exhaustion",
+		fix: "node sizes its heap from the container memory limit, so raise mem_limit; " +
+			"on a resident deployment also set RENOVATE_X_SQLITE_PACKAGE_CACHE=true, because " +
+			"the file package cache's end-of-run collection grows with the cache. " +
+			"See the README, 'Memory and the package cache'",
+	}, true
+}
+
+// abortedOnSIGABRT reports whether the run died on SIGABRT, either signalled
+// directly or reported by an intervening shell as 128+SIGABRT.
+func abortedOnSIGABRT(exitErr *exec.ExitError) bool {
+	if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return ws.Signal() == syscall.SIGABRT
+	}
+	return exitErr.ExitCode() == abortExitCode
 }
 
 func sweepRunGroupOrWarn(cmd *exec.Cmd, trig string) (survived bool) {
