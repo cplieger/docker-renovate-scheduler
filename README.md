@@ -26,7 +26,7 @@ One deliberate trim: the bundled `docker` CLI is removed. Renovate invokes it on
 
 ## What it does
 
-- Runs `renovate` on a **built-in interval** (`RUN_INTERVAL=6h`): one run at startup for immediate freshness, then every interval. Or set `RUN_INTERVAL=off` and trigger each run **externally** (`docker exec … run`).
+- Runs `renovate` on a **built-in interval** (`RUN_INTERVAL=6h`): one run at startup when no successful run completed within the interval (the last-run record on `/data` survives restarts), then every interval. Or set `RUN_INTERVAL=off` and trigger each run **externally** (`docker exec … run`).
 - **The daemon owns every run.** It executes Renovate as its own child process, whichever trigger asked. The `run` subcommand is a thin client that submits the request over an in-container unix socket, forwarding its repo arguments **and its environment** (a `docker exec -e RENOVATE_X=… … run` override reaches Renovate intact), and exits with that run's true result.
 - **One run at a time, every request served.** Requests queue in order behind an in-flight run; each gets its own run and its own exit code. See [One run at a time](#one-run-at-a-time-queueing).
 - File-marker healthcheck via [`github.com/cplieger/health`](https://github.com/cplieger/health): unhealthy when the last run failed, recovers on the next clean run.
@@ -39,7 +39,7 @@ Renovate reads **its entire configuration from its own** `RENOVATE_*` environmen
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `RUN_INTERVAL` | Built-in scheduler cadence as a Go duration (`6h`, `1h`, `30m`). First run at startup, then every interval. Set to `off` (aliases `disabled`, `0`) to disable the built-in scheduler and trigger runs externally (see [Scheduling modes](#scheduling-modes)). Falls back to `6h` on an unset, negative, or unparseable (non-sentinel) value. | `6h` |
+| `RUN_INTERVAL` | Built-in scheduler cadence as a Go duration (`6h`, `1h`, `30m`). A run at startup only when no successful run completed within the interval, then every interval. Set to `off` (aliases `disabled`, `0`) to disable the built-in scheduler and trigger runs externally (see [Scheduling modes](#scheduling-modes)). Falls back to `6h` on an unset, negative, or unparseable (non-sentinel) value. | `6h` |
 | `RUN_TIMEOUT` | Whole-run timeout for a single `renovate` invocation, as a Go duration. This is the outer bound on the process; Renovate's own `RENOVATE_EXECUTION_TIMEOUT` is a separate per-child limit. | `1h` |
 | `LOG_LEVEL` | `debug`, `info`, `warn`, and `error` are honoured by both the scheduler and Renovate. Renovate also accepts `trace` and `fatal`, which the scheduler reports as unrecognized and replaces with `info` for its own lines only. Any other value — including the long form `warning` and slog offset forms such as `warn+1` — makes Renovate refuse to start, which in built-in mode means the healthcheck never goes healthy. | `info` |
 
@@ -86,7 +86,9 @@ Add one cache entry per language manager Renovate updates (the pattern extends t
 
 ### Built-in scheduler (default)
 
-Set `RUN_INTERVAL` to a Go duration. The container runs once at startup and then every interval. Zero external dependencies.
+Set `RUN_INTERVAL` to a Go duration. The container runs once at startup when that run is due, and then every interval. Zero external dependencies.
+
+The startup run is due when no successful scheduled run completed within the interval. The daemon records each scheduled run and its outcome in a small file, `.docker-renovate-scheduler-last-run`, in `RENOVATE_BASE_DIR` (default `/data`); with `/data` persisted the record survives a container recreate (an image update, a config change), so recreates do not cause redundant back-to-back runs. Only scheduled runs write the record; triggered runs never do. A failed last run does not count: the startup run fires again, so a fixed configuration (a corrected `RENOVATE_TOKEN`, say) shows its effect at the next recreate instead of one interval later. Without a persisted `/data` the record never survives, and the container runs at every startup. To force a run at any time: `docker exec <container> docker-renovate-scheduler run`.
 
 ```yaml
 services:
@@ -181,7 +183,7 @@ The drain is internally capped at `RUN_TIMEOUT` (a run can't outlast its own tim
 
 | Mount | Description |
 | --- | --- |
-| `/data` | `RENOVATE_BASE_DIR`: repository clones, caches, and dynamically installed tools. Persist it. For an `./data` bind mount, create the directory first and run `chown 12021:0 ./data` (a fresh auto-created root-owned dir fails the non-root daemon's boot write check). |
+| `/data` | `RENOVATE_BASE_DIR`: repository clones, caches, dynamically installed tools, and the scheduler's last-run record (see [Scheduling modes](#scheduling-modes)). Persist it. For an `./data` bind mount, create the directory first and run `chown 12021:0 ./data` (a fresh auto-created root-owned dir fails the non-root daemon's boot write check). |
 | `/usr/src/app/config.js` | Optional: a Renovate `config.js` if you prefer it over `RENOVATE_*` env vars. |
 
 ## Alerting
@@ -218,31 +220,34 @@ groups:
             run and logs no error, so a redeploy does not trip this.
       - alert: RenovateNoRecentRun
         expr: |
-          absent_over_time({container="renovate"} |= `renovate run complete` [13h])
+          absent_over_time({container="renovate"} |= `renovate run complete` [15h])
         for: 30m
         labels:
           severity: warning
         annotations:
-          summary: "renovate has not completed a run in 13h"
+          summary: "renovate has not completed a run in 15h"
           description: >
             The scheduler logs `renovate run complete` after every run that
-            completes, in both modes (built-in: at startup and then every
-            RUN_INTERVAL, default 6h; external: per trigger). One case
+            completes, in both modes (built-in: at startup when due, then
+            every RUN_INTERVAL, default 6h; external: per trigger). One case
             suppresses it on purpose: a run that exits zero whose process
             tree cannot be confirmed dead halts admission and logs at ERROR,
-            which `RenovateRunFailed` catches. Otherwise, none in 13h while
+            which `RenovateRunFailed` catches. Otherwise, none in 15h while
             the container is up means the schedule is wedged or the triggers
             stopped arriving, and no dependency PRs are being raised.
-            Restart the container (or check the trigger source). The 13h
-            window spans two default 6h intervals plus margin; adjust it to
-            your cadence.
+            Restart the container (or check the trigger source). The 15h
+            window covers the longest legal quiet stretch plus margin: a
+            restart that skips its startup run can leave two default 6h
+            intervals plus the 1h RUN_TIMEOUT (13h) between completion
+            lines. Adjust it to your cadence; it must exceed
+            2*RUN_INTERVAL + RUN_TIMEOUT.
 ```
 
 Thresholds and the `severity` label are starting points; adjust the deadman window to your `RUN_INTERVAL` and the `container` selector (or `job` / `service`, depending on your log collector) to your deployment, and route by whatever labels your Alertmanager uses.
 
 ## Healthcheck
 
-`docker-renovate-scheduler health` checks a marker file the daemon sets after each run. In **built-in** mode the container starts unhealthy and flips to healthy after the first successful run (size `healthcheck.start_period` for the time a first run may take); a failed run flips it unhealthy, and it recovers on the next clean run. Built-in mode additionally treats a stale marker as unhealthy: if no run has refreshed it within `2*RUN_INTERVAL + RUN_TIMEOUT`, the probe fails, so a wedged interval loop surfaces as an unhealthy container instead of a silently idle one. In **external** mode the container starts healthy (idle, nothing has failed), each triggered run updates the marker, and no staleness deadline applies (an idle container between sparse triggers stays healthy).
+`docker-renovate-scheduler health` checks a marker file the daemon sets after each run. In **built-in** mode the container starts unhealthy and flips to healthy after the first successful run (size `healthcheck.start_period` for the time a first run may take); when a fresh successful run's record survives on `/data`, the startup run is skipped and the container starts healthy instead (see [Scheduling modes](#scheduling-modes)). A failed run flips it unhealthy, and it recovers on the next clean run. Built-in mode additionally treats a stale marker as unhealthy: if no run has refreshed it within `2*RUN_INTERVAL + RUN_TIMEOUT`, the probe fails, so a wedged interval loop surfaces as an unhealthy container instead of a silently idle one. In **external** mode the container starts healthy (idle, nothing has failed), each triggered run updates the marker, and no staleness deadline applies (an idle container between sparse triggers stays healthy).
 
 The image bakes a 10m `start_period`, sized to a cold first run that installs its toolchains on demand. Docker reports the container healthy as soon as a probe succeeds inside that window, so a warm `/data` is not penalised. The trade runs the other way: a boot that is genuinely broken reports `starting` for up to the start period before it turns unhealthy. To detect a dead boot sooner, set a timing-only `healthcheck:` block in your own compose file (`test`, `interval`, `timeout`, and `retries` are inherited from the image).
 

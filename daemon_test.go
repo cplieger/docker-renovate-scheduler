@@ -310,7 +310,7 @@ func TestStartTicker_FiresStartupThenInterval(t *testing.T) {
 	d, cancel, execDone := newTestDaemon(t, recordingRunner("true", nil))
 
 	ctx, stop := context.WithCancel(t.Context())
-	tickerDone := startTicker(ctx, d, 15*time.Millisecond, true)
+	tickerDone := startTicker(ctx, d, 15*time.Millisecond, true, true)
 
 	waitFor(t, 5*time.Second, func() bool {
 		return len(startTriggers(rec)) >= 2
@@ -335,7 +335,7 @@ func TestStartTicker_FiresStartupThenInterval(t *testing.T) {
 func TestStartTicker_DisabledInExternalMode(t *testing.T) {
 	t.Parallel()
 	d := &daemon{queue: trigger.NewQueue[runPayload](4)}
-	done := startTicker(t.Context(), d, time.Millisecond, false)
+	done := startTicker(t.Context(), d, time.Millisecond, false, true)
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -475,11 +475,13 @@ func TestRunDaemon_BootFailureClearsPreviousLifesHealthyMarker(t *testing.T) {
 
 // TestRunDaemon_BuiltinModeStartsUnhealthyThenFlipsHealthy is the built-in
 // half of the composition-root integration test (the external half is
-// TestRunDaemon_ExternalModeBootsHealthyServesAndShutsDownCleanly): built-in
-// mode boots UNHEALTHY until the startup run proves the setup, then flips
-// healthy — the documented healthcheck contract. The runner holds the startup
-// run open so the boot state is observable without a race. Not parallel: it
-// uses the package-global healthMarkerPath.
+// TestRunDaemon_ExternalModeBootsHealthyServesAndShutsDownCleanly): with no
+// last-run record surviving in the base dir the startup run is DUE, so
+// built-in mode boots UNHEALTHY until that run proves the setup, then flips
+// healthy — the documented healthcheck contract. The skip side of the
+// conditional startup is pinned by TestRunDaemon_ConditionalStartupRun. The
+// runner holds the startup run open so the boot state is observable without
+// a race. Not parallel: it uses the package-global healthMarkerPath.
 func TestRunDaemon_BuiltinModeStartsUnhealthyThenFlipsHealthy(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	t.Setenv("RUN_INTERVAL", "6h") // one startup run; no further tick within the test
@@ -631,21 +633,23 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 	}
 	marker := health.NewMarker(healthMarkerPath)
 	d := &daemon{
-		queue:    trigger.NewQueue[runPayload](queueCapacity),
-		marker:   marker,
-		health:   health.NewLatch(marker),
-		verifier: newBaseDirVerifier(),
-		newCmd:   recordingRunner("true", nil),
-		runOnce:  runOnce,
-		timeout:  time.Minute,
-		fatal:    make(chan error, 1),
+		queue:     trigger.NewQueue[runPayload](queueCapacity),
+		marker:    marker,
+		health:    health.NewLatch(marker),
+		verifier:  newBaseDirVerifier(),
+		stamp:     scheduler.NewStamp(stampPath()),
+		newCmd:    recordingRunner("true", nil),
+		runOnce:   runOnce,
+		stampPath: stampPath(),
+		timeout:   time.Minute,
+		fatal:     make(chan error, 1),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	var runErr error
 	go func() {
 		defer close(done)
-		runErr = d.run(ctx, ln, sock, time.Hour, false)
+		runErr = d.run(ctx, ln, sock, time.Hour, false, true)
 	}()
 	// A mid-test Fatal must not leak the daemon fixture: cancel, release the
 	// gated run, and wait for the daemon before later cleanups remove the
@@ -737,21 +741,23 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 	}
 	marker := health.NewMarker(healthMarkerPath)
 	d := &daemon{
-		queue:    trigger.NewQueue[runPayload](queueCapacity),
-		marker:   marker,
-		health:   health.NewLatch(marker),
-		verifier: newBaseDirVerifier(),
-		newCmd:   recordingRunner("true", nil),
-		runOnce:  runOnce,
-		timeout:  time.Minute,
-		fatal:    make(chan error, 1),
+		queue:     trigger.NewQueue[runPayload](queueCapacity),
+		marker:    marker,
+		health:    health.NewLatch(marker),
+		verifier:  newBaseDirVerifier(),
+		stamp:     scheduler.NewStamp(stampPath()),
+		newCmd:    recordingRunner("true", nil),
+		runOnce:   runOnce,
+		stampPath: stampPath(),
+		timeout:   time.Minute,
+		fatal:     make(chan error, 1),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	var runErr error
 	go func() {
 		defer close(done)
-		runErr = d.run(ctx, ln, sock, time.Hour, false)
+		runErr = d.run(ctx, ln, sock, time.Hour, false, true)
 	}()
 	t.Cleanup(func() {
 		cancel()

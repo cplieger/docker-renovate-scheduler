@@ -115,6 +115,21 @@ func TestBaseDirForEnv(t *testing.T) {
 	}
 }
 
+func TestStampPath(t *testing.T) {
+	t.Run("derives from the default base dir when unset", func(t *testing.T) {
+		t.Setenv("RENOVATE_BASE_DIR", "")
+		if got, want := stampPath(), filepath.Join(defaultBaseDir, stampName); got != want {
+			t.Errorf("stampPath() = %q, want %q", got, want)
+		}
+	})
+	t.Run("follows the daemon's RENOVATE_BASE_DIR", func(t *testing.T) {
+		t.Setenv("RENOVATE_BASE_DIR", "/data")
+		if got, want := stampPath(), filepath.Join("/data", stampName); got != want {
+			t.Errorf("stampPath() = %q, want %q", got, want)
+		}
+	})
+}
+
 func TestVerifyBaseDir(t *testing.T) {
 	t.Run("creates and verifies a writable dir", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "renovate-data")

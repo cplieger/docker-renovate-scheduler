@@ -18,4 +18,4 @@ services:
       RENOVATE_REPOSITORY_CACHE: "enabled"
 
     volumes:
-      - "./data:/data"  # persist clones + caches; create ./data owned by UID 12021 first (see README "Volumes")
+      - "./data:/data"  # persist clones, caches + the last-run record; create ./data owned by UID 12021 first (see README "Volumes")
