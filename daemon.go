@@ -25,14 +25,16 @@ const (
 type runOnceFunc func(ctx context.Context, stopping stopRequested, timeout time.Duration, trig string, p runPayload, newCmd scheduler.CommandRunner) runOutcome
 
 type daemon struct {
-	queue    *trigger.Queue[runPayload]
-	marker   *health.Marker
-	health   *health.Latch
-	verifier *baseDirVerifier
-	newCmd   scheduler.CommandRunner
-	runOnce  runOnceFunc
-	fatal    chan error
-	timeout  time.Duration
+	queue     *trigger.Queue[runPayload]
+	marker    *health.Marker
+	health    *health.Latch
+	verifier  *baseDirVerifier
+	stamp     *scheduler.Stamp
+	newCmd    scheduler.CommandRunner
+	runOnce   runOnceFunc
+	fatal     chan error
+	stampPath string
+	timeout   time.Duration
 	// Only the executor accesses halted.
 	halted bool
 }
@@ -52,6 +54,12 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	interval, scheduleEnabled := loadInterval()
 	timeout := loadRunTimeout()
 
+	stamp := scheduler.NewStamp(stampPath())
+	due := true
+	if scheduleEnabled {
+		due = stamp.Due(interval, time.Now(), scheduler.RetryFailed)
+	}
+
 	ln, err := trigger.Listen(socketPath)
 	if err != nil {
 		slog.Error("cannot bind trigger socket", "path", socketPath, "error", err)
@@ -59,18 +67,20 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	}
 
 	d := &daemon{
-		queue:    trigger.NewQueue[runPayload](queueCapacity),
-		marker:   marker,
-		health:   health.NewLatch(marker),
-		verifier: verifier,
-		newCmd:   newCmd,
-		timeout:  timeout,
-		fatal:    make(chan error, 1),
+		queue:     trigger.NewQueue[runPayload](queueCapacity),
+		marker:    marker,
+		health:    health.NewLatch(marker),
+		verifier:  verifier,
+		stamp:     stamp,
+		newCmd:    newCmd,
+		stampPath: stampPath(),
+		timeout:   timeout,
+		fatal:     make(chan error, 1),
 	}
-	return d.run(ctx, ln, socketPath, interval, scheduleEnabled)
+	return d.run(ctx, ln, socketPath, interval, scheduleEnabled, due)
 }
 
-func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, interval time.Duration, scheduleEnabled bool) error {
+func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, interval time.Duration, scheduleEnabled, due bool) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, abort := context.WithCancelCause(ctx)
@@ -78,7 +88,8 @@ func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, in
 
 	defer func() { _ = os.Remove(socketPath) }()
 	defer d.marker.Cleanup()
-	d.health.Set(!scheduleEnabled)
+	// Not due means a fresh successful run survived the restart, so booting healthy is honest.
+	d.health.Set(!scheduleEnabled || !due)
 
 	executorDone := make(chan struct{})
 	go func() {
@@ -97,11 +108,17 @@ func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, in
 	}
 	srv.Serve(ln)
 
-	tickerDone := startTicker(ctx, d, interval, scheduleEnabled)
+	tickerDone := startTicker(ctx, d, interval, scheduleEnabled, due)
 
 	if scheduleEnabled {
 		slog.Info("container started", "mode", "built-in", "interval", interval,
-			"timeout", d.timeout, "base_dir", baseDir(), "socket", socketPath)
+			"timeout", d.timeout, "base_dir", baseDir(), "socket", socketPath,
+			"startup_run", due)
+		if !due {
+			rec, _ := d.stamp.Last()
+			slog.Info("startup run skipped: the last scheduled run succeeded within the interval",
+				"last_success", rec.Time, "interval", interval)
+		}
 	} else {
 		slog.Info("container started", "mode", "external",
 			"timeout", d.timeout, "base_dir", baseDir(), "socket", socketPath)
@@ -131,7 +148,7 @@ func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, in
 	return fatalErr
 }
 
-func startTicker(ctx context.Context, d *daemon, interval time.Duration, enabled bool) <-chan struct{} {
+func startTicker(ctx context.Context, d *daemon, interval time.Duration, enabled, due bool) <-chan struct{} {
 	done := make(chan struct{})
 	if !enabled {
 		close(done)
@@ -139,14 +156,12 @@ func startTicker(ctx context.Context, d *daemon, interval time.Duration, enabled
 	}
 	go func() {
 		defer close(done)
-		startupDone := false
+		if due && ctx.Err() == nil {
+			d.tick("startup")
+		}
 		scheduler.RunLoop(ctx, func(context.Context) {
-			trig := "interval"
-			if !startupDone {
-				trig, startupDone = "startup", true
-			}
-			d.tick(trig)
-		}, scheduler.LoopOptions{Interval: interval, FireOnStart: true})
+			d.tick("interval")
+		}, scheduler.LoopOptions{Interval: interval, FireOnStart: false})
 	}()
 	return done
 }
@@ -217,6 +232,8 @@ func (d *daemon) execute(runCtx context.Context, stopping stopRequested, j *trig
 	if outcome == runContained {
 		d.halted = true
 		d.health.Set(false)
+		// After a halt the next boot must treat the schedule as due.
+		d.recordScheduled(j.Trigger, false)
 		slog.Error("halting run admission: renovate run process group survived the kill sweep",
 			"trigger", j.Trigger)
 		j.Finish(trigger.Outcome{OK: false, Duration: time.Since(start), Reason: containmentLostReason})
@@ -225,5 +242,19 @@ func (d *daemon) execute(runCtx context.Context, stopping stopRequested, j *trig
 	}
 	ok := outcome == runComplete
 	d.health.Set(ok)
+	d.recordScheduled(j.Trigger, ok)
 	j.Finish(trigger.Outcome{OK: ok, Duration: time.Since(start)})
+}
+
+// recordScheduled persists a scheduled run's outcome for the next boot's
+// startup-fire decision. Triggered runs are scoped to their own repos and
+// environment, so they never answer the full-pass freshness question.
+func (d *daemon) recordScheduled(trig string, ok bool) {
+	if trig != "startup" && trig != "interval" {
+		return
+	}
+	if err := d.stamp.Record(ok); err != nil {
+		slog.Warn("cannot record the run outcome; next boot fires a startup run",
+			"path", d.stampPath, "error", err)
+	}
 }

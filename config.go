@@ -25,6 +25,7 @@ const (
 	defaultBaseDir     = "/tmp/renovate"
 	// The owner-only socket limits trigger authority to the container user.
 	socketPath = "/tmp/docker-renovate-scheduler.sock"
+	stampName  = ".docker-renovate-scheduler-last-run"
 )
 
 func setupLogger() {
@@ -38,6 +39,12 @@ func setupLogger() {
 
 func baseDir() string {
 	return cmp.Or(envx.String("RENOVATE_BASE_DIR"), defaultBaseDir)
+}
+
+// stampPath derives from the daemon's boot-time base dir only; a per-run
+// RENOVATE_BASE_DIR forwarded with a trigger never moves the stamp.
+func stampPath() string {
+	return filepath.Join(baseDir(), stampName)
 }
 
 func baseDirForEnv(env []string) string {

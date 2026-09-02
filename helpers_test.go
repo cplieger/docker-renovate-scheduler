@@ -21,16 +21,20 @@ func newJob(trig string, repos, env []string) *trigger.Job[runPayload] {
 // The executor is deliberately not started; callers control its lifetime.
 func newBareDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, string) {
 	t.Helper()
-	markerPath := filepath.Join(t.TempDir(), "marker")
+	dir := t.TempDir()
+	markerPath := filepath.Join(dir, "marker")
 	marker := health.NewMarker(markerPath)
+	stampFile := filepath.Join(dir, stampName)
 	d := &daemon{
-		queue:    trigger.NewQueue[runPayload](queueCapacity),
-		marker:   marker,
-		health:   health.NewLatch(marker),
-		verifier: newBaseDirVerifier(),
-		newCmd:   runner,
-		timeout:  time.Minute,
-		fatal:    make(chan error, 1),
+		queue:     trigger.NewQueue[runPayload](queueCapacity),
+		marker:    marker,
+		health:    health.NewLatch(marker),
+		verifier:  newBaseDirVerifier(),
+		stamp:     scheduler.NewStamp(stampFile),
+		newCmd:    runner,
+		stampPath: stampFile,
+		timeout:   time.Minute,
+		fatal:     make(chan error, 1),
 	}
 	return d, markerPath
 }
@@ -125,4 +129,14 @@ func gatedRunOnce(t *testing.T) (runOnce runOnceFunc, awaitEntered, release func
 	}
 	var releaseOnce sync.Once
 	return runOnce, awaitEntered, func() { releaseOnce.Do(func() { close(proceed) }) }
+}
+
+// seedStamp writes a last-run record in the stamp's documented one-line
+// format, so tests control the recorded time (Record always stamps now).
+func seedStamp(t *testing.T, path string, ts time.Time, outcome string) {
+	t.Helper()
+	line := ts.UTC().Format(time.RFC3339Nano) + " " + outcome + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatalf("seed stamp file %s: %v", path, err)
+	}
 }
