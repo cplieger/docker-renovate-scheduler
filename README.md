@@ -41,7 +41,7 @@ Renovate reads **its entire configuration from its own** `RENOVATE_*` environmen
 | --- | --- | --- |
 | `RUN_INTERVAL` | Built-in scheduler cadence as a Go duration (`6h`, `1h`, `30m`). A run at startup only when no successful run completed within the interval, then every interval. Set to `off` (aliases `disabled`, `0`) to disable the built-in scheduler and trigger runs externally (see [Scheduling modes](#scheduling-modes)). Falls back to `6h` on an unset, negative, or unparseable (non-sentinel) value. | `6h` |
 | `RUN_TIMEOUT` | Whole-run timeout for a single `renovate` invocation, as a Go duration. This is the outer bound on the process; Renovate's own `RENOVATE_EXECUTION_TIMEOUT` is a separate per-child limit. | `1h` |
-| `LOG_LEVEL` | `debug`, `info`, `warn`, and `error` are honoured by both the scheduler and Renovate. Renovate also accepts `trace` and `fatal`, which the scheduler reports as unrecognized and replaces with `info` for its own lines only. Any other value — including the long form `warning` and slog offset forms such as `warn+1` — makes Renovate refuse to start, which in built-in mode means the healthcheck never goes healthy. | `info` |
+| `LOG_LEVEL` | `debug`, `info`, `warn`, and `error` are honoured by both the scheduler and Renovate. Renovate also accepts `trace` and `fatal`, which the scheduler reports as unrecognized and replaces with `info` for its own lines only. Any other value, including the long form `warning` and slog offset forms such as `warn+1`, makes Renovate refuse to start, which in built-in mode means the healthcheck never goes healthy. | `info` |
 
 Everything else is Renovate's own configuration. The essentials for a self-hosted bot:
 
@@ -81,6 +81,25 @@ If you must run as a custom UID, use the tools baked into the image and route ev
 ```
 
 Add one cache entry per language manager Renovate updates (the pattern extends to `pip`, `cargo`, etc.), and `chown` the `/data` volume to your UID. If that is more than you want to manage, run as the default `12021`.
+
+## Memory and the package cache
+
+> **Recommended for a resident container: set `RENOVATE_X_SQLITE_PACKAGE_CACHE=true`,** and size `mem_limit` at 3g or more.
+
+**Node sizes its heap from the container memory limit, not from host RAM.** It reads the cgroup limit and caps V8's old space at roughly half of it. So `mem_limit` is the effective heap knob, however much memory the host has. Measured inside the container:
+
+| `mem_limit` | V8 heap ceiling |
+| --- | --- |
+| 2 GiB | 1120 MB |
+| 3 GiB | 1728 MB |
+
+When a run crosses that ceiling, node aborts itself with `FATAL ERROR: Ineffective mark-compacts near heap limit`, and the scheduler reports `exit status 134`. The **kernel OOM killer never fires**. The cgroup's `memory.events` counters stay at zero and `docker inspect` reports `OOMKilled=false`, so every signal a memory limit usually leaves is absent. The scheduler names this cause on the failure line as `likely_cause` and `fix`, so the exit code is not your only evidence.
+
+**The default file package cache raises the cost of every run as it grows.** Renovate collects that cache after each run, and the collection reads the whole content directory into memory in one allocation. Its cost thus tracks accumulated cache size, not your repository count. Measured on a resident deployment scanning 55 repositories hourly: in three months the content directory reached 3.1 million files (44 GB) plus a 1.3 GB index, and the collection allocated 800 MB in one block. Past the heap ceiling it can no longer complete. Nothing is reclaimed after that point, so the cache only grows and the failure never recovers on its own.
+
+`RENOVATE_X_SQLITE_PACKAGE_CACHE=true` ([Renovate's experimental variables](https://docs.renovatebot.com/self-hosted-experimental/)) replaces that backend with SQLite. Its cleanup is one indexed `DELETE`, with no directory walk and no orphaned content. On the same deployment the cache went from 45 GB to 4.7 MB. Runs went from failing at 131-180 s to finishing in 52-77 s, faster than before the cache grew. A content directory of that size also keeps hundreds of MB of kernel directory-entry cache charged to the cgroup, which node cannot see when it picks its ceiling; that charge goes away with the directory walk.
+
+**The dependency work finishes before the crash.** The collection runs after every repository is processed, so Renovate raises its pull requests and then dies. Updates land while the run reports failure, so a non-zero exit here is not evidence that nothing happened.
 
 ## Scheduling modes
 
@@ -244,6 +263,8 @@ groups:
 ```
 
 Thresholds and the `severity` label are starting points; adjust the deadman window to your `RUN_INTERVAL` and the `container` selector (or `job` / `service`, depending on your log collector) to your deployment, and route by whatever labels your Alertmanager uses.
+
+One case makes `RenovateRunFailed` misleading on its own, so read the failure line before acting on it. A run that exhausts node's heap dies after its repositories are processed, so dependency updates are landing normally while the alert fires. The scheduler tags that failure with `likely_cause` and `fix` attributes; [Memory and the package cache](#memory-and-the-package-cache) has the remedy.
 
 ## Healthcheck
 

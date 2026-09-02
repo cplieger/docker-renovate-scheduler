@@ -1271,3 +1271,107 @@ func TestRunRenovateOnce_CleanUnconfirmableGroupDeathReportsContainment(t *testi
 		t.Errorf("INFO records matching %q = %d, want 0: a contained run must not log the completion line; captured: %v", "renovate run complete", got, rec.Messages())
 	}
 }
+
+// TestAbortDiagnosis pins which exit statuses earn a named cause. A V8 heap
+// exhaustion reaches the daemon as 128+SIGABRT through Renovate's shell
+// entrypoint, and the bare status points away from the cause because node
+// sizes its heap from the container limit and dies well below it, leaving the
+// cgroup's OOM counters at zero.
+func TestAbortDiagnosis(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		command []string
+		want    bool
+	}{
+		{name: "shell reports an aborted child", command: []string{"sh", "-c", "exit 134"}, want: true},
+		{name: "signalled with SIGABRT directly", command: []string{"sh", "-c", "kill -ABRT $$"}, want: true},
+		{name: "ordinary non-zero exit", command: []string{"false"}, want: false},
+		{name: "exit code adjacent to abort", command: []string{"sh", "-c", "exit 133"}, want: false},
+		{name: "clean exit", command: []string{"true"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			runErr := exec.CommandContext(t.Context(), tt.command[0], tt.command[1:]...).Run()
+			diag, got := abortDiagnosis(runErr)
+			if got != tt.want {
+				t.Fatalf("abortDiagnosis(%v) ok = %v, want %v (run error %v)", tt.command, got, tt.want, runErr)
+			}
+			if !tt.want {
+				return
+			}
+			if diag.cause == "" || diag.fix == "" {
+				t.Errorf("abortDiagnosis(%v) = %+v, want both a cause and a fix", tt.command, diag)
+			}
+		})
+	}
+}
+
+// TestAbortDiagnosis_IgnoresANonExitError keeps a start failure out of the
+// population: it carries no wait status, so claiming a heap exhaustion would
+// send the operator after the wrong thing.
+func TestAbortDiagnosis_IgnoresANonExitError(t *testing.T) {
+	t.Parallel()
+
+	if _, ok := abortDiagnosis(errors.New("fork/exec: no such file or directory")); ok {
+		t.Error("abortDiagnosis(non-ExitError) ok = true, want false")
+	}
+}
+
+// TestRunRenovateOnce_AbortedRunNamesTheHeapCause pins the operator-facing
+// half: the message string stays exactly "renovate run failed" because the
+// README's RenovateRunFailed rule keys on the ERROR level and that wording,
+// and the diagnosis rides as attributes. Serial: swaps slog.Default.
+func TestRunRenovateOnce_AbortedRunNamesTheHeapCause(t *testing.T) {
+	rec := capture.Default(t)
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "exit 134")
+	}
+
+	got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "external", runPayload{}, runner)
+
+	if got != runFailed {
+		t.Fatalf("runRenovateOnce() = %v, want runFailed", got)
+	}
+	if got := rec.CountLevel(slog.LevelError, "renovate run failed"); got != 1 {
+		t.Fatalf("ERROR records matching %q = %d, want 1; captured: %v",
+			"renovate run failed", got, rec.Messages())
+	}
+	if !rec.AttrContains("renovate run failed", "likely_cause", "heap") {
+		value, ok := rec.Attr("renovate run failed", "likely_cause")
+		t.Errorf("failure record likely_cause = (%v, %v), want a value naming the heap", value, ok)
+	}
+	if !rec.AttrContains("renovate run failed", "fix", "mem_limit") {
+		value, ok := rec.Attr("renovate run failed", "fix")
+		t.Errorf("failure record fix = (%v, %v), want a value naming mem_limit", value, ok)
+	}
+}
+
+// TestRunRenovateOnce_OrdinaryFailureCarriesNoDiagnosis stops the attributes
+// becoming decoration on every failure, which would make them worthless as a
+// signal.
+func TestRunRenovateOnce_OrdinaryFailureCarriesNoDiagnosis(t *testing.T) {
+	rec := capture.Default(t)
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "false")
+	}
+
+	got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "external", runPayload{}, runner)
+
+	if got != runFailed {
+		t.Fatalf("runRenovateOnce() = %v, want runFailed", got)
+	}
+	if got := rec.CountLevel(slog.LevelError, "renovate run failed"); got != 1 {
+		t.Fatalf("ERROR records matching %q = %d, want 1; captured: %v",
+			"renovate run failed", got, rec.Messages())
+	}
+	if value, ok := rec.Attr("renovate run failed", "likely_cause"); ok {
+		t.Errorf("failure record carries likely_cause = %v, want the attribute absent", value)
+	}
+	if value, ok := rec.Attr("renovate run failed", "fix"); ok {
+		t.Errorf("failure record carries fix = %v, want the attribute absent", value)
+	}
+}
