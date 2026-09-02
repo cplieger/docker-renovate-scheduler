@@ -88,7 +88,7 @@ Add one cache entry per language manager Renovate updates (the pattern extends t
 
 Set `RUN_INTERVAL` to a Go duration. The container runs once at startup when that run is due, and then every interval. Zero external dependencies.
 
-The startup run is due when no successful scheduled run completed within the interval. The daemon records each scheduled run and its outcome in a small file, `.docker-renovate-scheduler-last-run`, in `RENOVATE_BASE_DIR` (default `/data`); with `/data` persisted the record survives a container recreate (an image update, a config change), so recreates do not cause redundant back-to-back runs. Only scheduled runs write the record; triggered runs never do. A failed last run does not count: the startup run fires again, so a fixed configuration (a corrected `RENOVATE_TOKEN`, say) shows its effect at the next recreate instead of one interval later. Without a persisted `/data` the record never survives, and the container runs at every startup. To force a run at any time: `docker exec <container> docker-renovate-scheduler run`.
+The startup run is due when no successful scheduled run completed within the interval. The daemon records each scheduled run and its outcome in a small file, `.docker-renovate-scheduler-last-run`, in `RENOVATE_BASE_DIR` (default `/data`); with `/data` persisted the record survives a container recreate (an image update, a config change), so recreates do not cause redundant back-to-back runs. The record also carries the schedule's phase: the next run lands one `RUN_INTERVAL` after the previous run, not one interval after boot, so a restart neither adds a run nor delays the cadence. Only scheduled runs write the record; triggered runs never do. A failed last run does not count: the startup run fires again, so a fixed configuration (a corrected `RENOVATE_TOKEN`, say) shows its effect at the next recreate instead of one interval later. Without a persisted `/data` the record never survives, and the container runs at every startup. To force a run at any time: `docker exec <container> docker-renovate-scheduler run`.
 
 ```yaml
 services:
@@ -220,27 +220,27 @@ groups:
             run and logs no error, so a redeploy does not trip this.
       - alert: RenovateNoRecentRun
         expr: |
-          absent_over_time({container="renovate"} |= `renovate run complete` [15h])
+          absent_over_time({container="renovate"} |= `renovate run complete` [13h])
         for: 30m
         labels:
           severity: warning
         annotations:
-          summary: "renovate has not completed a run in 15h"
+          summary: "renovate has not completed a run in 13h"
           description: >
             The scheduler logs `renovate run complete` after every run that
             completes, in both modes (built-in: at startup when due, then
             every RUN_INTERVAL, default 6h; external: per trigger). One case
             suppresses it on purpose: a run that exits zero whose process
             tree cannot be confirmed dead halts admission and logs at ERROR,
-            which `RenovateRunFailed` catches. Otherwise, none in 15h while
+            which `RenovateRunFailed` catches. Otherwise, none in 13h while
             the container is up means the schedule is wedged or the triggers
             stopped arriving, and no dependency PRs are being raised.
-            Restart the container (or check the trigger source). The 15h
-            window covers the longest legal quiet stretch plus margin: a
-            restart that skips its startup run can leave two default 6h
-            intervals plus the 1h RUN_TIMEOUT (13h) between completion
-            lines. Adjust it to your cadence; it must exceed
-            2*RUN_INTERVAL + RUN_TIMEOUT.
+            Restart the container (or check the trigger source). The 13h
+            window covers the longest legal quiet stretch plus margin: the
+            schedule keeps its phase across restarts (the record on /data
+            carries it), so completion lines sit at most one RUN_INTERVAL
+            plus the 1h RUN_TIMEOUT apart (7h at the 6h default). Adjust it
+            to your cadence; it must exceed RUN_INTERVAL + RUN_TIMEOUT.
 ```
 
 Thresholds and the `severity` label are starting points; adjust the deadman window to your `RUN_INTERVAL` and the `container` selector (or `job` / `service`, depending on your log collector) to your deployment, and route by whatever labels your Alertmanager uses.
