@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # package managers, and its default binarySource=install installs those tools
 # at runtime via containerbase. The upstream image assembles all of that; we
 # add only the scheduler binary on top.
-FROM renovate/renovate:44.64.0@sha256:4912c3b8d0b09e157e6e8045fa7c45c3355b13ea717b0772fdca9eaa0fc422cf
+FROM renovate/renovate:44.65.2@sha256:b1a226090cb54ee3f93162c407a6b250a90c9cca2895c4ae7529135c159a0f5b
 
 # Become root for the image customizations below -- strip the bundled docker CLI,
 # install the scheduler binary, create /data, and pre-install Go. The final USER
@@ -50,6 +50,21 @@ RUN tsc_glob='*/@typescript/typescript-linux-*/lib/tsc' \
     && [ -n "$(find "$store" -type f -path "$tsc_glob")" ] \
     && find "$store" -type f -path "$tsc_glob" -delete \
     && [ -z "$(find "$store" -type f -path "$tsc_glob")" ]
+
+# Assert Renovate's module registries still LOAD, after both strips above.
+# Renovate 44.64.0 shipped an apk datasource that imports `tar` at module load
+# while `tar` was only a devDependency, so it was in the pnpm store but never
+# linked into node_modules: every run died on ERR_MODULE_NOT_FOUND before
+# touching a repository, and Renovate swallowed the unhandled rejection and
+# exited 0, so the scheduler logged a 0.7s "run complete" and nothing alerted
+# for 20 hours. Upstream fixed it in 44.64.1. `renovate --version` does NOT
+# catch this (it exits 0 on the broken release); importing the registries does,
+# and it also covers a strip above breaking module resolution.
+RUN node --input-type=module -e \
+    'const dir = "/usr/local/renovate/dist/modules"; \
+     for (const m of ["datasource", "manager", "platform", "versioning"]) { \
+       await import(dir + "/" + m + "/index.js"); \
+     }'
 
 # Apply the Ubuntu security updates the renovate base lags between upstream
 # rebuilds, so Trivy stops flagging stale OS packages against this image.
