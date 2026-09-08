@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"io"
+	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +16,52 @@ import (
 	"github.com/cplieger/scheduler/v4"
 	"github.com/cplieger/scheduler/v4/trigger"
 )
+
+// saveLogGlobals captures the three globals slog.SetDefault mutates and restores
+// them at test end; call it before the swap. The returned func restores on demand.
+//
+// SetDefault also aims the log package at the installed handler and skips that
+// redirect for slog's own default handler, so reinstalling the previous logger
+// cannot undo it; slog's default handler emits through log.Output, so a dead log
+// writer silences the package. slog restores first because a non-default previous
+// handler re-runs the redirect.
+func saveLogGlobals(t *testing.T) func() {
+	t.Helper()
+	prevLogger, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
+	restore := func() {
+		slog.SetDefault(prevLogger)
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	}
+	t.Cleanup(restore)
+	return restore
+}
+
+// TestSaveLogGlobals_RestoresTheLogPackageToo red-checks the two restores saveLogGlobals owns
+// beyond slog's own; drop either and this test fails.
+func TestSaveLogGlobals_RestoresTheLogPackageToo(t *testing.T) {
+	prevWriter, prevFlags := log.Writer(), log.Flags()
+	t.Cleanup(func() {
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	})
+	// Neither the process default nor what SetDefault installs (a slog
+	// handlerWriter and 0), so neither assertion can pass by coincidence.
+	log.SetOutput(io.Discard)
+	log.SetFlags(log.Lshortfile)
+
+	t.Run("swap", func(t *testing.T) {
+		_ = saveLogGlobals(t)
+		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	})
+
+	if got := log.Writer(); got != io.Discard {
+		t.Errorf("log.Writer() = %T, want the writer set before the swap: slog.SetDefault aimed log at its own handler and restoring slog alone leaves it there", got)
+	}
+	if got := log.Flags(); got != log.Lshortfile {
+		t.Errorf("log.Flags() = %d, want %d: slog.SetDefault zeroes them and restoring slog alone leaves them at zero", got, log.Lshortfile)
+	}
+}
 
 func newJob(trig string, repos, env []string) *trigger.Job[runPayload] {
 	return trigger.NewJob(trig, runPayload{Repos: repos, Env: env})

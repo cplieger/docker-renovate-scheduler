@@ -292,8 +292,7 @@ func TestSetupLogger_MapsLogLevelEnvToHandlerLevel(t *testing.T) {
 		{"empty falls back to info", "", slog.LevelInfo, slog.LevelDebug},
 		{"surrounding whitespace trimmed", "  warn  ", slog.LevelWarn, slog.LevelInfo},
 	}
-	prev := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	_ = saveLogGlobals(t)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -361,7 +360,7 @@ func TestVerifyBaseDirAt_DerivedDeadlineBoundsSlotWait(t *testing.T) {
 // is the one it installs.
 func captureSetupLoggerOutput(t *testing.T, level string) string {
 	t.Helper()
-	prevLogger := slog.Default()
+	restoreLogGlobals := saveLogGlobals(t)
 	prevStderr := os.Stderr
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -369,7 +368,6 @@ func captureSetupLoggerOutput(t *testing.T, level string) string {
 	}
 	t.Cleanup(func() {
 		os.Stderr = prevStderr
-		slog.SetDefault(prevLogger)
 		_ = r.Close()
 		_ = w.Close()
 	})
@@ -378,7 +376,7 @@ func captureSetupLoggerOutput(t *testing.T, level string) string {
 	os.Stderr = w
 	setupLogger()
 	os.Stderr = prevStderr
-	slog.SetDefault(prevLogger)
+	restoreLogGlobals()
 	if err := w.Close(); err != nil {
 		t.Fatalf("close captured stderr = %v", err)
 	}
