@@ -133,9 +133,14 @@ never parses or rewrites Renovate config.
 - Logs are slog logfmt to stderr (`key=value`) with UTC timestamps via `slogx` (its `UTCTime` `ReplaceAttr`, so the image needs no `TZ` and embeds no `time/tzdata`); always use key/value pairs,
   never a formatted string (the `sloglint` linter enforces it).
 - `main()` orchestration and the renovate subprocess exec are
-  intentionally not unit-tested (process-level I/O, validated by container logs
-  and Grafana alerting). New logic in `config.go` / `runner.go`
-  is expected to come with tests.
+  intentionally not unit-tested (process-level I/O). The image smoke test
+  (`tests/image-smoke.conf`, run by CI through the synced
+  `tests/image-smoke.sh`) covers the exec end to end: it boots the assembled
+  image, triggers a real offline Renovate run (`local` platform,
+  `dryRun=extract`, no network) against a generated one-file repository, and
+  then hides Renovate's global worker module and asserts that the crashed run
+  is reported as failed and flips health. New logic in `config.go` /
+  `runner.go` is expected to come with unit tests.
 - Tests are table-driven and live beside the code (`*_test.go`). They cover
   the daemon executor's policy as observed over a real unix socket (the
   broker mechanics of queue semantics, socket hygiene, and wire ordering are
@@ -160,10 +165,12 @@ GOWORK=off golangci-lint fmt          # gofumpt (extra-rules) + gci ordering
 ```
 
 `golangci-lint run` reports unformatted files as issues, so run
-`golangci-lint fmt` before pushing. Build the image with:
+`golangci-lint fmt` before pushing. Build the image and run the smoke test
+against it with:
 
 ```sh
 docker build -t docker-renovate-scheduler .
+sh tests/image-smoke.sh docker-renovate-scheduler
 ```
 
 ## Commits and PRs
