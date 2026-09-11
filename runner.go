@@ -45,12 +45,21 @@ var defaultCommandRunner scheduler.CommandRunner = func() scheduler.CommandRunne
 	}
 }()
 
-func withDumbInitInGroup(env []string) []string {
+// withChildOverrides appends the scheduler's fixed child-environment overrides
+// after env, where os/exec's last-duplicate-wins dedup lets them beat any forwarded value.
+func withChildOverrides(env []string) []string {
 	if env == nil {
 		env = os.Environ()
 	}
-	// Clone because env can be a job payload still read by the result path.
-	return append(slices.Clone(env), "DUMB_INIT_SETSID=0")
+	// Concat copies: env can be a job payload still read by the result path.
+	return slices.Concat(env, []string{
+		// Keeps the per-run dumb-init from detaching Renovate into a new
+		// session outside the Setpgid group the kill sweep addresses.
+		"DUMB_INIT_SETSID=0",
+		// Renovate's launcher passes this to node; strict turns a bootstrap
+		// import rejection Renovate only logs into exit 1 (#879).
+		"RENOVATE_NODE_ARGS=--unhandled-rejections=strict",
+	})
 }
 
 type stopRequested func() error
@@ -78,7 +87,7 @@ func runRenovateOnce(ctx context.Context, stopping stopRequested,
 	slog.Info("renovate run starting", "trigger", trig, "repos", p.Repos, "timeout", timeout)
 
 	cmd := newCmd(runCtx, name, args...)
-	cmd.Env = withDumbInitInGroup(p.Env)
+	cmd.Env = withChildOverrides(p.Env)
 	if startErr := cmd.Start(); startErr != nil {
 		slog.Error("renovate run failed",
 			"trigger", trig, "duration_ms", time.Since(start).Milliseconds(), "error", startErr)

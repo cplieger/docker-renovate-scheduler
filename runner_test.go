@@ -152,27 +152,31 @@ func TestDefaultCommandRunner_ChildRunsInOwnProcessGroup(t *testing.T) {
 	}
 }
 
-// TestRunRenovateOnce_EnvForcesDumbInitInGroup pins the one scheduler-
-// internal environment override: whatever env a run starts from (nil/ticker
-// or a forwarded client environ, even one that tries to re-enable setsid),
-// the child sees exactly DUMB_INIT_SETSID=0, so the nested per-run dumb-init
-// in the image entrypoint chain stays in signal-proxy mode instead of
-// detaching Renovate into a new session the group signals cannot reach.
-func TestRunRenovateOnce_EnvForcesDumbInitInGroup(t *testing.T) {
+// TestRunRenovateOnce_EnvCarriesChildOverrides pins the scheduler's fixed
+// child-environment overrides at the child: whatever env a run starts from
+// (nil/ticker or a forwarded client environ, even one carrying a conflicting
+// value), the child sees exactly DUMB_INIT_SETSID=0 and
+// RENOVATE_NODE_ARGS=--unhandled-rejections=strict.
+func TestRunRenovateOnce_EnvCarriesChildOverrides(t *testing.T) {
+	const script = `[ "$DUMB_INIT_SETSID" = "0" ] && [ "$RENOVATE_NODE_ARGS" = "--unhandled-rejections=strict" ]`
 	tests := []struct {
 		name string
 		env  []string
 	}{
 		{"ticker run (nil env inherits daemon environ)", nil},
-		{"forwarded env without the variable", []string{"RENOVATE_X=y", "PATH=" + os.Getenv("PATH")}},
+		{"forwarded env without the variables", []string{"RENOVATE_X=y", "PATH=" + os.Getenv("PATH")}},
 		{"forwarded env re-enabling setsid is overridden", []string{"DUMB_INIT_SETSID=1", "PATH=" + os.Getenv("PATH")}},
+		{"forwarded env with other node args is overridden", []string{"RENOVATE_NODE_ARGS=other", "PATH=" + os.Getenv("PATH")}},
+		{"forwarded env conflicting on both is overridden", []string{"RENOVATE_NODE_ARGS=other", "DUMB_INIT_SETSID=1", "PATH=" + os.Getenv("PATH")}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("DUMB_INIT_SETSID", "1") // daemon environ must be overridden too
-			runner := shellAssertRunner(`[ "$DUMB_INIT_SETSID" = "0" ]`)
+			// The daemon environ must be overridden too.
+			t.Setenv("DUMB_INIT_SETSID", "1")
+			t.Setenv("RENOVATE_NODE_ARGS", "other")
+			runner := shellAssertRunner(script)
 			if got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{Env: tt.env}, runner); got != runComplete {
-				t.Errorf("runRenovateOnce() = %v, want runComplete: child did not see DUMB_INIT_SETSID=0 (env=%v)", got, tt.env)
+				t.Errorf("runRenovateOnce() = %v, want runComplete: child did not see both overrides (env=%v)", got, tt.env)
 			}
 		})
 	}
@@ -951,62 +955,71 @@ func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
 	}
 }
 
-// TestWithDumbInitInGroup pins the override's POSITION at the slice level:
-// every forwarded entry survives in order and DUMB_INIT_SETSID=0 is appended
+// TestWithChildOverrides pins the overrides' POSITION at the slice level:
+// every forwarded entry survives in order and both overrides are appended
 // last, which is what makes os/exec's duplicate-key dedup (last value wins)
-// deliver exactly one entry to the child. A regression that appended the
-// override anywhere but last, or dropped a forwarded entry, goes red here.
-func TestWithDumbInitInGroup(t *testing.T) {
+// deliver exactly one entry per key to the child. A regression that appended
+// an override anywhere but last, or dropped a forwarded entry, goes red here.
+func TestWithChildOverrides(t *testing.T) {
 	t.Parallel()
+	const (
+		setsidOverride   = "DUMB_INIT_SETSID=0"
+		nodeArgsOverride = "RENOVATE_NODE_ARGS=--unhandled-rejections=strict"
+	)
 	tests := []struct {
 		name string
 		env  []string
 		want []string
 	}{
 		{
-			name: "appends the override to a forwarded env without the variable",
+			name: "appends the overrides to a forwarded env without the variables",
 			env:  []string{"PATH=/usr/bin", "RENOVATE_X=y"},
-			want: []string{"PATH=/usr/bin", "RENOVATE_X=y", "DUMB_INIT_SETSID=0"},
+			want: []string{"PATH=/usr/bin", "RENOVATE_X=y", setsidOverride, nodeArgsOverride},
 		},
 		{
-			name: "a pre-existing entry is outranked by the appended override",
+			name: "a pre-existing setsid entry is outranked by the appended override",
 			env:  []string{"DUMB_INIT_SETSID=1", "PATH=/usr/bin"},
-			want: []string{"DUMB_INIT_SETSID=1", "PATH=/usr/bin", "DUMB_INIT_SETSID=0"},
+			want: []string{"DUMB_INIT_SETSID=1", "PATH=/usr/bin", setsidOverride, nodeArgsOverride},
 		},
 		{
-			name: "empty non-nil env still gets the override",
+			name: "a pre-existing node args entry is outranked by the appended override",
+			env:  []string{"RENOVATE_NODE_ARGS=other", "PATH=/usr/bin"},
+			want: []string{"RENOVATE_NODE_ARGS=other", "PATH=/usr/bin", setsidOverride, nodeArgsOverride},
+		},
+		{
+			name: "empty non-nil env still gets the overrides",
 			env:  []string{},
-			want: []string{"DUMB_INIT_SETSID=0"},
+			want: []string{setsidOverride, nodeArgsOverride},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := withDumbInitInGroup(tt.env); !slices.Equal(got, tt.want) {
-				t.Errorf("withDumbInitInGroup(%v) = %v, want %v (os/exec keeps the LAST value for a duplicate key, so the override must be appended last)", tt.env, got, tt.want)
+			if got := withChildOverrides(tt.env); !slices.Equal(got, tt.want) {
+				t.Errorf("withChildOverrides(%v) = %v, want %v (os/exec keeps the LAST value for a duplicate key, so the overrides must be appended last)", tt.env, got, tt.want)
 			}
 		})
 	}
 }
 
-// TestWithDumbInitInGroup_LeavesTheCallersSliceAlone pins the copy: env is the
+// TestWithChildOverrides_LeavesTheCallersSliceAlone pins the copy: env is the
 // job payload's own slice and the result path still reads it, so appending the
-// override must not write into the caller's backing array. The fixture gives
-// the input spare capacity and watches the first spare cell, which is the only
+// overrides must not write into the caller's backing array. The fixture gives
+// the input spare capacity and watches the spare cells, which are the only
 // place a bare append could land.
-func TestWithDumbInitInGroup_LeavesTheCallersSliceAlone(t *testing.T) {
+func TestWithChildOverrides_LeavesTheCallersSliceAlone(t *testing.T) {
 	t.Parallel()
 	env := append(make([]string, 0, 4), "PATH=/usr/bin", "RENOVATE_X=y")
 	backing := env[:cap(env)]
 	before := slices.Clone(backing)
 
-	got := withDumbInitInGroup(env)
+	got := withChildOverrides(env)
 
 	if !slices.Equal(backing, before) {
-		t.Errorf("withDumbInitInGroup() wrote into the caller's backing array: %q, want %q", backing, before)
+		t.Errorf("withChildOverrides() wrote into the caller's backing array: %q, want %q", backing, before)
 	}
-	if len(got) != len(env)+1 {
-		t.Errorf("withDumbInitInGroup() = %v, want the %d forwarded entries plus the override", got, len(env))
+	if len(got) != len(env)+2 {
+		t.Errorf("withChildOverrides() = %v, want the %d forwarded entries plus the two overrides", got, len(env))
 	}
 }
 
