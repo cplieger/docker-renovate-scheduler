@@ -55,11 +55,9 @@ RUN tsc_glob='*/@typescript/typescript-linux-*/lib/tsc' \
 # Renovate 44.64.0 shipped an apk datasource that imports `tar` at module load
 # while `tar` was only a devDependency, so it was in the pnpm store but never
 # linked into node_modules: every run died on ERR_MODULE_NOT_FOUND before
-# touching a repository, and Renovate swallowed the unhandled rejection and
-# exited 0, so the scheduler logged a 0.7s "run complete" and nothing alerted
-# for 20 hours. Upstream fixed it in 44.64.1. `renovate --version` does NOT
-# catch this (it exits 0 on the broken release); importing the registries does,
-# and it also covers a strip above breaking module resolution.
+# touching a repository. Upstream fixed it in 44.64.1. `renovate --version`
+# does NOT catch this (it exits 0 on the broken release); importing the
+# registries does, and it also covers a strip above breaking module resolution.
 RUN node --input-type=module -e \
     'const dir = "/usr/local/renovate/dist/modules"; \
      for (const m of ["datasource", "manager", "platform", "versioning"]) { \

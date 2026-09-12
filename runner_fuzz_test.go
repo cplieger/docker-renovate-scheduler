@@ -9,15 +9,10 @@ import (
 // Append the overrides last because os/exec keeps the last duplicate key.
 func FuzzWithChildOverridesOverridesAreLast(f *testing.F) {
 	const (
-		setsidKey      = "DUMB_INIT_SETSID"
-		setsidPrefix   = setsidKey + "="
-		nodeArgsKey    = "RENOVATE_NODE_ARGS"
-		nodeArgsPrefix = nodeArgsKey + "="
+		setsidKey    = "DUMB_INIT_SETSID"
+		setsidPrefix = setsidKey + "="
 	)
-	overrides := []string{
-		setsidPrefix + "0",
-		nodeArgsPrefix + "--unhandled-rejections=strict",
-	}
+	overrides := []string{setsidPrefix + "0"}
 
 	seeds := []string{
 		"PATH=/usr/bin\x00RENOVATE_X=y",
@@ -25,18 +20,11 @@ func FuzzWithChildOverridesOverridesAreLast(f *testing.F) {
 		setsidPrefix + "1\x00PATH=/usr/bin\x00" + setsidPrefix,
 		setsidPrefix + "1\x00" + setsidPrefix + "1",
 		overrides[0],
-		overrides[1],
-		overrides[1] + "\x00" + overrides[0],
 		setsidKey,
-		nodeArgsKey,
 		setsidKey + "X=1",
-		nodeArgsKey + "X=1",
 		"dumb_init_setsid=1",
-		"renovate_node_args=other",
-		nodeArgsPrefix + "other\x00PATH=/usr/bin",
-		nodeArgsPrefix + "other\x00" + setsidPrefix + "1",
-		nodeArgsPrefix + "--unhandled-rejections=warn\x00" + nodeArgsPrefix,
 		"NODE_OPTIONS=--max-old-space-size=4096",
+		"RENOVATE_NODE_ARGS=--unhandled-rejections=warn",
 		setsidPrefix + "1\x00" + setsidKey + "X=1",
 		setsidPrefix + "\x00" + setsidPrefix + "00",
 		"PATH=/usr/bin\x00\x00PATH=/usr/bin",

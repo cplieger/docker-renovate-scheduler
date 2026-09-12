@@ -56,9 +56,6 @@ func withChildOverrides(env []string) []string {
 		// Keeps the per-run dumb-init from detaching Renovate into a new
 		// session outside the Setpgid group the kill sweep addresses.
 		"DUMB_INIT_SETSID=0",
-		// Renovate's launcher passes this to node; strict turns a bootstrap
-		// import rejection Renovate only logs into exit 1 (#879).
-		"RENOVATE_NODE_ARGS=--unhandled-rejections=strict",
 	})
 }
 
