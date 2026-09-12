@@ -155,28 +155,24 @@ func TestDefaultCommandRunner_ChildRunsInOwnProcessGroup(t *testing.T) {
 // TestRunRenovateOnce_EnvCarriesChildOverrides pins the scheduler's fixed
 // child-environment overrides at the child: whatever env a run starts from
 // (nil/ticker or a forwarded client environ, even one carrying a conflicting
-// value), the child sees exactly DUMB_INIT_SETSID=0 and
-// RENOVATE_NODE_ARGS=--unhandled-rejections=strict.
+// value), the child sees exactly DUMB_INIT_SETSID=0.
 func TestRunRenovateOnce_EnvCarriesChildOverrides(t *testing.T) {
-	const script = `[ "$DUMB_INIT_SETSID" = "0" ] && [ "$RENOVATE_NODE_ARGS" = "--unhandled-rejections=strict" ]`
+	const script = `[ "$DUMB_INIT_SETSID" = "0" ]`
 	tests := []struct {
 		name string
 		env  []string
 	}{
 		{"ticker run (nil env inherits daemon environ)", nil},
-		{"forwarded env without the variables", []string{"RENOVATE_X=y", "PATH=" + os.Getenv("PATH")}},
+		{"forwarded env without the variable", []string{"RENOVATE_X=y", "PATH=" + os.Getenv("PATH")}},
 		{"forwarded env re-enabling setsid is overridden", []string{"DUMB_INIT_SETSID=1", "PATH=" + os.Getenv("PATH")}},
-		{"forwarded env with other node args is overridden", []string{"RENOVATE_NODE_ARGS=other", "PATH=" + os.Getenv("PATH")}},
-		{"forwarded env conflicting on both is overridden", []string{"RENOVATE_NODE_ARGS=other", "DUMB_INIT_SETSID=1", "PATH=" + os.Getenv("PATH")}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// The daemon environ must be overridden too.
 			t.Setenv("DUMB_INIT_SETSID", "1")
-			t.Setenv("RENOVATE_NODE_ARGS", "other")
 			runner := shellAssertRunner(script)
 			if got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{Env: tt.env}, runner); got != runComplete {
-				t.Errorf("runRenovateOnce() = %v, want runComplete: child did not see both overrides (env=%v)", got, tt.env)
+				t.Errorf("runRenovateOnce() = %v, want runComplete: child did not see the override (env=%v)", got, tt.env)
 			}
 		})
 	}
@@ -955,48 +951,40 @@ func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
 	}
 }
 
-// TestWithChildOverrides pins the overrides' POSITION at the slice level:
-// every forwarded entry survives in order and both overrides are appended
+// TestWithChildOverrides pins the override's POSITION at the slice level:
+// every forwarded entry survives in order and the override is appended
 // last, which is what makes os/exec's duplicate-key dedup (last value wins)
 // deliver exactly one entry per key to the child. A regression that appended
-// an override anywhere but last, or dropped a forwarded entry, goes red here.
+// the override anywhere but last, or dropped a forwarded entry, goes red here.
 func TestWithChildOverrides(t *testing.T) {
 	t.Parallel()
-	const (
-		setsidOverride   = "DUMB_INIT_SETSID=0"
-		nodeArgsOverride = "RENOVATE_NODE_ARGS=--unhandled-rejections=strict"
-	)
+	const setsidOverride = "DUMB_INIT_SETSID=0"
 	tests := []struct {
 		name string
 		env  []string
 		want []string
 	}{
 		{
-			name: "appends the overrides to a forwarded env without the variables",
+			name: "appends the override to a forwarded env without the variable",
 			env:  []string{"PATH=/usr/bin", "RENOVATE_X=y"},
-			want: []string{"PATH=/usr/bin", "RENOVATE_X=y", setsidOverride, nodeArgsOverride},
+			want: []string{"PATH=/usr/bin", "RENOVATE_X=y", setsidOverride},
 		},
 		{
 			name: "a pre-existing setsid entry is outranked by the appended override",
 			env:  []string{"DUMB_INIT_SETSID=1", "PATH=/usr/bin"},
-			want: []string{"DUMB_INIT_SETSID=1", "PATH=/usr/bin", setsidOverride, nodeArgsOverride},
+			want: []string{"DUMB_INIT_SETSID=1", "PATH=/usr/bin", setsidOverride},
 		},
 		{
-			name: "a pre-existing node args entry is outranked by the appended override",
-			env:  []string{"RENOVATE_NODE_ARGS=other", "PATH=/usr/bin"},
-			want: []string{"RENOVATE_NODE_ARGS=other", "PATH=/usr/bin", setsidOverride, nodeArgsOverride},
-		},
-		{
-			name: "empty non-nil env still gets the overrides",
+			name: "empty non-nil env still gets the override",
 			env:  []string{},
-			want: []string{setsidOverride, nodeArgsOverride},
+			want: []string{setsidOverride},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			if got := withChildOverrides(tt.env); !slices.Equal(got, tt.want) {
-				t.Errorf("withChildOverrides(%v) = %v, want %v (os/exec keeps the LAST value for a duplicate key, so the overrides must be appended last)", tt.env, got, tt.want)
+				t.Errorf("withChildOverrides(%v) = %v, want %v (os/exec keeps the LAST value for a duplicate key, so the override must be appended last)", tt.env, got, tt.want)
 			}
 		})
 	}
@@ -1004,7 +992,7 @@ func TestWithChildOverrides(t *testing.T) {
 
 // TestWithChildOverrides_LeavesTheCallersSliceAlone pins the copy: env is the
 // job payload's own slice and the result path still reads it, so appending the
-// overrides must not write into the caller's backing array. The fixture gives
+// override must not write into the caller's backing array. The fixture gives
 // the input spare capacity and watches the spare cells, which are the only
 // place a bare append could land.
 func TestWithChildOverrides_LeavesTheCallersSliceAlone(t *testing.T) {
@@ -1018,8 +1006,8 @@ func TestWithChildOverrides_LeavesTheCallersSliceAlone(t *testing.T) {
 	if !slices.Equal(backing, before) {
 		t.Errorf("withChildOverrides() wrote into the caller's backing array: %q, want %q", backing, before)
 	}
-	if len(got) != len(env)+2 {
-		t.Errorf("withChildOverrides() = %v, want the %d forwarded entries plus the two overrides", got, len(env))
+	if len(got) != len(env)+1 {
+		t.Errorf("withChildOverrides() = %v, want the %d forwarded entries plus the override", got, len(env))
 	}
 }
 
