@@ -31,6 +31,22 @@ func TestProbe_WedgedBuiltinLoopFailsFreshness(t *testing.T) {
 	}
 }
 
+func TestProbe_OverflowingIntervalStillArmsTheDeadman(t *testing.T) {
+	// RUN_INTERVAL has no ceiling, so an operator can set a cadence whose
+	// doubled nanosecond count exceeds int64. A wrapped negative deadline is
+	// indistinguishable from "no deadline" at WithMaxAge, which would disarm
+	// the wedged-loop check on the very configuration that most needs it.
+	t.Setenv("RUN_INTERVAL", "1500000h")
+	t.Setenv("RUN_TIMEOUT", "1s")
+	marker := filepath.Join(t.TempDir(), "marker")
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatalf("setup marker: %v", err)
+	}
+	if got := health.Inspect(marker, probeOptions()...).MaxAge; got <= 0 {
+		t.Errorf("probeOptions() with RUN_INTERVAL=1500000h armed MaxAge = %v, want a positive deadline", got)
+	}
+}
+
 func TestProbe_BuiltinFreshnessUsesPublishedBoundary(t *testing.T) {
 	t.Setenv("RUN_INTERVAL", "1m")
 	t.Setenv("RUN_TIMEOUT", "10s")

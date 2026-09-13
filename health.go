@@ -10,5 +10,6 @@ func probeOptions() []health.ProbeOption {
 		return nil
 	}
 	timeout := loadRunTimeout()
-	return []health.ProbeOption{health.WithMaxAge(2*interval + timeout)}
+	lease := health.Lease{Interval: interval, Cycles: 2, Timeout: timeout, Attempts: 1}
+	return []health.ProbeOption{health.WithMaxAge(lease.Duration())}
 }
