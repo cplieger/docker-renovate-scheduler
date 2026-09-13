@@ -161,7 +161,7 @@ func TestFinishResult_FailedRunLogsTheReasonOrItsFallback(t *testing.T) {
 		{
 			name:       "missing_reason_fallback",
 			reason:     "",
-			wantReason: "the daemon reported no cause (see the container log stream)",
+			wantReason: "renovate exited non-zero (see the container log stream)",
 		},
 	}
 	for _, tt := range tests {

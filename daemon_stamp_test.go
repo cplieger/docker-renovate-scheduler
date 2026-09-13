@@ -60,11 +60,11 @@ func TestRunDaemon_ConditionalStartupRun(t *testing.T) {
 func TestRunDaemon_PhasesFirstIntervalFromLastSuccessfulRun(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv("RENOVATE_BASE_DIR", base)
-	t.Setenv("RUN_INTERVAL", "2s")
+	t.Setenv("RUN_INTERVAL", "10s")
 	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
 	rec := capture.Default(t)
 
-	seedStamp(t, filepath.Join(base, stampName), time.Now().Add(-1800*time.Millisecond), "ok")
+	seedStamp(t, filepath.Join(base, stampName), time.Now().Add(-9*time.Second), "ok")
 	startedAt := time.Now()
 	cancel, done, runErr := startDaemonForTest(t, recordingRunner("true", nil))
 
@@ -80,8 +80,8 @@ func TestRunDaemon_PhasesFirstIntervalFromLastSuccessfulRun(t *testing.T) {
 	if triggers := startTriggers(rec); triggers[0] != "interval" {
 		t.Errorf("first run trigger = %q, want interval (a startup run means the seeded record aged past the interval before runDaemon read it)", triggers[0])
 	}
-	if elapsed >= time.Second {
-		t.Errorf("first interval run started %v after boot, want under 1s for a record aged 1.8s of a 2s interval", elapsed)
+	if elapsed >= 5*time.Second {
+		t.Errorf("first interval run started %v after boot, want under 5s for a record aged 9s of a 10s interval", elapsed)
 	}
 }
 

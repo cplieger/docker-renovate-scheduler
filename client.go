@@ -55,7 +55,7 @@ func finishResult(ev trigger.Event, repos []string) int {
 		slog.Info("triggered run complete", "repos", repos, "duration_ms", ev.DurationMs)
 		return 0
 	}
-	reason := cmp.Or(ev.Reason, "the daemon reported no cause (see the container log stream)")
+	reason := cmp.Or(ev.Reason, "renovate exited non-zero (see the container log stream)")
 	slog.Error("triggered run failed", "repos", repos, "duration_ms", ev.DurationMs, "reason", reason)
 	return 1
 }
