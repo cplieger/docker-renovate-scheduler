@@ -38,8 +38,8 @@ child; triggers only submit requests.
 
 - `main.go`: subcommand dispatch (`daemon` / `run` / `health`), and the one
   place the logger is installed.
-- `daemon.go`: the composition root (`runDaemon`: boot, meaning marker
-  clear, base-dir check, config, socket bind, then compose and delegate)
+- `daemon.go`: the composition root (`runDaemon`: boot, meaning socket bind,
+  marker clear, base-dir check, config, then compose and delegate)
   and the orchestration (`daemon.run`: the executor goroutine (`runJobs`,
   the ONLY code that starts Renovate), the built-in ticker (`startTicker`,
   a `scheduler.RunLoop` that submits tick jobs like any other trigger), and
