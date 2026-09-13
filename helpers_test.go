@@ -51,6 +51,7 @@ func newBareDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, strin
 		queue:     trigger.NewQueue[runPayload](queueCapacity),
 		marker:    marker,
 		health:    health.NewLatch(marker),
+		verifier:  newBaseDirVerifier(),
 		stamp:     scheduler.NewStamp(stampFile),
 		newCmd:    runner,
 		runOnce:   runRenovateOnce,

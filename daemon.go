@@ -27,6 +27,7 @@ type daemon struct {
 	queue     *trigger.Queue[runPayload]
 	marker    *health.Marker
 	health    *health.Latch
+	verifier  *baseDirVerifier
 	stamp     *scheduler.Stamp
 	newCmd    scheduler.CommandRunner
 	runOnce   func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome
@@ -49,7 +50,8 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	marker := health.NewMarker(healthMarkerPath)
 	marker.Set(false)
 
-	if err = verifyBaseDir(ctx); err != nil {
+	verifier := newBaseDirVerifier()
+	if err = verifier.verify(ctx); err != nil {
 		logBaseDirError(baseDir(), err)
 		_ = ln.Close()
 		return err
@@ -68,6 +70,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		queue:     trigger.NewQueue[runPayload](queueCapacity),
 		marker:    marker,
 		health:    health.NewLatch(marker),
+		verifier:  verifier,
 		stamp:     stamp,
 		newCmd:    newCmd,
 		runOnce:   runRenovateOnce,
@@ -208,10 +211,13 @@ func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigg
 	start := time.Now()
 
 	dir := baseDirForEnv(j.Payload.Env)
-	if err := verifyBaseDirAt(runCtx, dir); err != nil {
+	if err := d.verifier.verifyAt(runCtx, dir); err != nil {
 		logBaseDirError(dir, err)
 		d.health.Set(false)
-		d.recordScheduled(j.Trigger, false)
+		// The stamp shares the probed directory, so a timeout cannot safely write it.
+		if !errors.Is(err, context.DeadlineExceeded) {
+			d.recordScheduled(j.Trigger, false)
+		}
 		j.Finish(trigger.Outcome{OK: false, Duration: time.Since(start), Reason: "base directory preflight failed"})
 		return
 	}

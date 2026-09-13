@@ -272,6 +272,25 @@ func TestExecutor_ScheduledPreflightFailureRecordsFailure(t *testing.T) {
 	}
 }
 
+// TestExecutor_PreflightTimeoutLeavesStampUntouched pins that a timed-out probe
+// cannot write a stamp into the same unresponsive directory.
+func TestExecutor_PreflightTimeoutLeavesStampUntouched(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	runCtx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	d, _ := newBareDaemon(t, recordingRunner("true", nil))
+
+	j := newJob("interval", nil, nil)
+	d.execute(runCtx, t.Context().Err, j)
+
+	if out := <-j.Result(); out.OK {
+		t.Error("preflight timeout outcome ok = true, want false")
+	}
+	if _, err := os.Stat(d.stampPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stamp written after a preflight timeout; stat err = %v, want not-exist", err)
+	}
+}
+
 // TestExecutor_ContainmentRecordsFailure pins the halt path: a run whose
 // process group survived the kill sweep overwrites even a fresh success with
 // a failed record, so the boot after the halt treats the schedule as due.

@@ -26,6 +26,8 @@ func FuzzCustomEnvVarNamesMatchesDecodedKeys(f *testing.F) {
 		`null`,
 		`5`,
 		`not json`,
+		`{"a":1e999}`,
+		`{"GOCACHE":"/g","OTHER":-1e999}`,
 		``,
 	}
 	for _, s := range seeds {
@@ -36,25 +38,24 @@ func FuzzCustomEnvVarNamesMatchesDecodedKeys(f *testing.F) {
 		got := customEnvVarNames(raw)
 
 		var decoded map[string]any
-		if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
-			// The oracle refused the input, so the parser must have too.
+		// A decode error with nothing decoded means the oracle refused the
+		// input outright (bad syntax, or a non-object), so the parser must
+		// have too. An error with keys present means the input IS an object
+		// the `any` oracle cannot REPRESENT - a number outside float64 -
+		// which the value-blind parser accepts by design, so the key set
+		// below still applies.
+		if err := json.Unmarshal([]byte(raw), &decoded); err != nil && len(decoded) == 0 {
 			if len(got) != 0 {
 				t.Fatalf("customEnvVarNames(%q) = %q, want no names: an independent decode rejected the input (%v)", raw, got, err)
 			}
 			return
 		}
 
+		// want is sorted and duplicate-free by construction, so the comparison pins both:
+		// the names are joined into one log attribute and map order is randomized.
 		want := slices.Sorted(maps.Keys(decoded))
 		if !slices.Equal(got, want) {
 			t.Fatalf("customEnvVarNames(%q) = %q, want %q (exactly the decoded object's key set; anything else means a value reached the log attribute)", raw, got, want)
-		}
-		if !slices.IsSorted(got) {
-			t.Fatalf("customEnvVarNames(%q) = %q, want sorted: the warning joins these into one log attribute and map iteration order is randomized", raw, got)
-		}
-		for i := 1; i < len(got); i++ {
-			if got[i] == got[i-1] {
-				t.Fatalf("customEnvVarNames(%q) = %q, want no duplicate name (%q repeats)", raw, got, got[i])
-			}
 		}
 	})
 }

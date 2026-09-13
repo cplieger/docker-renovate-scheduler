@@ -91,18 +91,34 @@ func logBaseDirError(dir string, err error) {
 	slog.Error("base directory preflight failed", "path", dir, "error", err, "hint", hint)
 }
 
-func verifyBaseDir(ctx context.Context) error {
-	return verifyBaseDirAt(ctx, baseDir())
+type baseDirVerifier struct {
+	// Keep the slot until an uninterruptible filesystem probe returns.
+	slot chan struct{}
 }
 
-// A filesystem call wedged on a hung mount cannot be cancelled, so the
-// probe outlives a caller that reaches the verification budget.
-func verifyBaseDirAt(ctx context.Context, dir string) error {
+func newBaseDirVerifier() *baseDirVerifier {
+	return &baseDirVerifier{slot: make(chan struct{}, 1)}
+}
+
+func (v *baseDirVerifier) verify(ctx context.Context) error {
+	return v.verifyAt(ctx, baseDir())
+}
+
+func (v *baseDirVerifier) verifyAt(ctx context.Context, dir string) error {
 	ctx, cancel := context.WithTimeout(ctx, baseDirProbeBudget)
 	defer cancel()
 
+	select {
+	case v.slot <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("base dir verification timed out waiting for an earlier probe to finish: %w", ctx.Err())
+	}
+
 	done := make(chan error, 1)
-	go func() { done <- probeBaseDirWrite(ctx, dir) }()
+	go func() {
+		defer func() { <-v.slot }()
+		done <- probeBaseDirWrite(ctx, dir)
+	}()
 
 	select {
 	case <-ctx.Done():
@@ -117,10 +133,17 @@ func probeBaseDirWrite(ctx context.Context, dir string) error {
 	if err != nil {
 		return fmt.Errorf("base dir %q write probe not attempted: %w", dir, err)
 	}
+	return baseDirProbeResultError(dir, res)
+}
+
+func baseDirProbeResultError(dir string, res atomicfile.ProbeResult) error {
 	if res.OK() {
 		return nil
 	}
 	if res.Writable() {
+		if res.Leaked {
+			return fmt.Errorf("base dir %q probe %q failed to %s and leaked its file: %w", dir, res.Name, res.Stage, res.Err)
+		}
 		slog.Warn("base dir probe wrote and flushed but could not clean up",
 			"path", dir, "stage", res.Stage, "name", res.Name,
 			"leaked", res.Leaked, "error", res.Err)

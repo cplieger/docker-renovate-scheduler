@@ -107,6 +107,9 @@ func TestDefaultCommandRunner(t *testing.T) {
 	if cmd.Stderr != os.Stderr {
 		t.Error("Stderr not wired to os.Stderr")
 	}
+	if cmd.WaitDelay != 5*time.Second {
+		t.Errorf("WaitDelay = %v, want 5s: os/exec's escalation past the cancellation SIGTERM is what bounds the run, so without it a child that ignores SIGTERM blocks cmd.Wait forever and the run outlasts RUN_TIMEOUT", cmd.WaitDelay)
+	}
 }
 
 // TestDefaultCommandRunner_ChildRunsInOwnProcessGroup proves a spawned child
@@ -205,9 +208,10 @@ exec setsid -w sh -c 'echo $$ > "$0"; exec sleep 30' "$1"`
 }
 
 // TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly pins the distinct
-// ERROR messages for a timed-out run vs a genuine non-zero exit. Both report
-// the same outcome, so the outcome alone can't tell them apart; alerting keys on
-// the message, so a mutation that swaps or downgrades either must fail here.
+// ERROR messages for a timed-out run vs a genuine non-zero exit. The outcomes
+// differ too (runTimedOut vs runFailed) and their own tests pin those; alerting
+// keys on the message, so a mutation that swaps or downgrades either must fail
+// here even where the outcome is still right.
 func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	tests := []struct {
 		name    string

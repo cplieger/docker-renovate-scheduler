@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/cplieger/atomicfile/v3"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -133,8 +135,8 @@ func TestVerifyBaseDir(t *testing.T) {
 	t.Run("creates and verifies a writable dir", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "renovate-data")
 		t.Setenv("RENOVATE_BASE_DIR", dir)
-		if err := verifyBaseDir(t.Context()); err != nil {
-			t.Fatalf("verifyBaseDir() = %v, want nil", err)
+		if err := newBaseDirVerifier().verify(t.Context()); err != nil {
+			t.Fatalf("verify() = %v, want nil", err)
 		}
 		if _, err := os.Stat(dir); err != nil {
 			t.Errorf("base dir not created: %v", err)
@@ -146,8 +148,44 @@ func TestVerifyBaseDir(t *testing.T) {
 			t.Fatalf("setup: %v", err)
 		}
 		t.Setenv("RENOVATE_BASE_DIR", file)
-		if err := verifyBaseDir(t.Context()); err == nil {
-			t.Error("verifyBaseDir() = nil, want error when base dir is a file")
+		if err := newBaseDirVerifier().verify(t.Context()); err == nil {
+			t.Error("verify() = nil, want error when base dir is a file")
+		}
+	})
+}
+
+func TestBaseDirVerifier_TimesOutWhileProbeSlotHeld(t *testing.T) {
+	verifier := newBaseDirVerifier()
+	verifier.slot <- struct{}{}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := verifier.verifyAt(ctx, t.TempDir())
+
+	<-verifier.slot
+	if err == nil {
+		t.Fatal("verifyAt() = nil with the probe slot held and context done, want a timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out waiting for an earlier probe") {
+		t.Errorf("verifyAt() error = %v, want it to mention the earlier probe", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("verifyAt() error = %v, want it to wrap context.Canceled", err)
+	}
+	if err := verifier.verifyAt(t.Context(), t.TempDir()); err != nil {
+		t.Errorf("verifyAt() = %v after the slot was released, want nil", err)
+	}
+}
+
+func TestBaseDirVerifier_DerivedDeadlineBoundsSlotWait(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		verifier := newBaseDirVerifier()
+		verifier.slot <- struct{}{}
+
+		err := verifier.verifyAt(t.Context(), t.TempDir())
+
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("verifyAt() with a live parent and held slot = %v, want context.DeadlineExceeded", err)
 		}
 	})
 }
@@ -168,7 +206,7 @@ func TestLogBaseDirError_HintFollowsTheVerdict(t *testing.T) {
 			err: func(t *testing.T) error {
 				ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 				defer cancel()
-				return verifyBaseDirAt(ctx, t.TempDir())
+				return newBaseDirVerifier().verifyAt(ctx, t.TempDir())
 			},
 			wantHint: "mounted and responding",
 			notHint:  "mount a writable volume",
@@ -247,6 +285,33 @@ func TestProbeBaseDirWrite(t *testing.T) {
 		}
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("probeBaseDirWrite() error = %v, want it to wrap context.Canceled", err)
+		}
+	})
+	t.Run("reports a leaked probe file as a cleanup failure", func(t *testing.T) {
+		cause := errors.New("delete child denied")
+		res := atomicfile.ProbeResult{
+			Name:   ".probe",
+			Stage:  atomicfile.ProbeStageRemove,
+			Leaked: true,
+			Err:    cause,
+		}
+
+		err := baseDirProbeResultError("/data", res)
+
+		if err == nil {
+			t.Fatal("baseDirProbeResultError(remove-stage leak) = nil, want a cleanup error")
+		}
+		if !strings.Contains(err.Error(), "/data") {
+			t.Errorf("baseDirProbeResultError(remove-stage leak) = %v, want base directory %q", err, "/data")
+		}
+		if !strings.Contains(err.Error(), ".probe") {
+			t.Errorf("baseDirProbeResultError(remove-stage leak) = %v, want probe name %q", err, ".probe")
+		}
+		if !strings.Contains(err.Error(), "remove probe file") {
+			t.Errorf("baseDirProbeResultError(remove-stage leak) = %v, want remove stage", err)
+		}
+		if !errors.Is(err, cause) {
+			t.Errorf("baseDirProbeResultError(remove-stage leak) = %v, want it to wrap the cleanup failure", err)
 		}
 	})
 }
