@@ -57,6 +57,34 @@ func TestRunDaemon_ConditionalStartupRun(t *testing.T) {
 	}
 }
 
+func TestRunDaemon_PhasesFirstIntervalFromLastSuccessfulRun(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("RENOVATE_BASE_DIR", base)
+	t.Setenv("RUN_INTERVAL", "2s")
+	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
+	rec := capture.Default(t)
+
+	seedStamp(t, filepath.Join(base, stampName), time.Now().Add(-1800*time.Millisecond), "ok")
+	startedAt := time.Now()
+	cancel, done, runErr := startDaemonForTest(t, recordingRunner("true", nil))
+
+	waitFor(t, 5*time.Second, func() bool { return len(startTriggers(rec)) >= 1 },
+		"the phased first interval run never started")
+	elapsed := time.Since(startedAt)
+
+	cancel()
+	awaitDaemonStopped(t, done)
+	if err := *runErr; err != nil {
+		t.Errorf("runDaemon() = %v, want nil", err)
+	}
+	if triggers := startTriggers(rec); triggers[0] != "interval" {
+		t.Errorf("first run trigger = %q, want interval (a startup run means the seeded record aged past the interval before runDaemon read it)", triggers[0])
+	}
+	if elapsed >= time.Second {
+		t.Errorf("first interval run started %v after boot, want under 1s for a record aged 1.8s of a 2s interval", elapsed)
+	}
+}
+
 // assertStartupRunFires boots the daemon and requires a due boot: unhealthy
 // while the startup run is in flight, healthy after it completes, and the
 // run labelled trigger=startup.
