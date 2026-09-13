@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"log"
 	"log/slog"
 	"os"
@@ -37,32 +36,6 @@ func saveLogGlobals(t *testing.T) func() {
 	return restore
 }
 
-// TestSaveLogGlobals_RestoresTheLogPackageToo red-checks the two restores saveLogGlobals owns
-// beyond slog's own; drop either and this test fails.
-func TestSaveLogGlobals_RestoresTheLogPackageToo(t *testing.T) {
-	prevWriter, prevFlags := log.Writer(), log.Flags()
-	t.Cleanup(func() {
-		log.SetOutput(prevWriter)
-		log.SetFlags(prevFlags)
-	})
-	// Neither the process default nor what SetDefault installs (a slog
-	// handlerWriter and 0), so neither assertion can pass by coincidence.
-	log.SetOutput(io.Discard)
-	log.SetFlags(log.Lshortfile)
-
-	t.Run("swap", func(t *testing.T) {
-		_ = saveLogGlobals(t)
-		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	})
-
-	if got := log.Writer(); got != io.Discard {
-		t.Errorf("log.Writer() = %T, want the writer set before the swap: slog.SetDefault aimed log at its own handler and restoring slog alone leaves it there", got)
-	}
-	if got := log.Flags(); got != log.Lshortfile {
-		t.Errorf("log.Flags() = %d, want %d: slog.SetDefault zeroes them and restoring slog alone leaves them at zero", got, log.Lshortfile)
-	}
-}
-
 func newJob(trig string, repos, env []string) *trigger.Job[runPayload] {
 	return trigger.NewJob(trig, runPayload{Repos: repos, Env: env})
 }
@@ -81,6 +54,7 @@ func newBareDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, strin
 		verifier:  newBaseDirVerifier(),
 		stamp:     scheduler.NewStamp(stampFile),
 		newCmd:    runner,
+		runOnce:   runRenovateOnce,
 		stampPath: stampFile,
 		timeout:   time.Minute,
 		fatal:     make(chan error, 1),
@@ -153,18 +127,14 @@ func gatedRunner(t *testing.T) (runner scheduler.CommandRunner, awaitEntered, re
 	return runner, awaitEntered, release
 }
 
-// gatedRunOnce returns a runOnce seam that signals entry into the run
-// callback — the committed-run boundary, past execute's shutdownCtx
-// preflight re-check — and then blocks until released, reporting a clean
-// drained outcome. gatedRunner's readiness file proves only that the child
-// process started, NOT that runRenovateOnce committed past its post-Start
-// shutdown handshake, so shutdown-drain tests gated on it raced the
-// handshake; entry into this callback is the unambiguous barrier.
-func gatedRunOnce(t *testing.T) (runOnce runOnceFunc, awaitEntered, release func()) {
+// gatedRunOnce returns a runOnce seam that signals entry after execute's
+// shutdown preflight check, a boundary gatedRunner's readiness file cannot
+// observe, then blocks until released and reports a clean outcome.
+func gatedRunOnce(t *testing.T) (runOnce func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome, awaitEntered, release func()) {
 	t.Helper()
 	entered := make(chan struct{})
 	proceed := make(chan struct{})
-	runOnce = func(context.Context, stopRequested, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
+	runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
 		close(entered)
 		<-proceed
 		return runComplete

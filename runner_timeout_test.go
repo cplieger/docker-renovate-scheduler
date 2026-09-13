@@ -21,9 +21,12 @@ func TestRunRenovateOnce_DeadlineCrossedDuringSweepStillLogsFailure(t *testing.T
 	const timeout = 2 * time.Second
 	dir := t.TempDir()
 	leaderPath, releasePath := dir+"/leader.pid", dir+"/release"
+	deadlineCh := make(chan time.Time, 1)
 	// The leader publishes its own pid (its pgid, via Setpgid) so the test can
 	// join a member to that group, then blocks until released and exits 23.
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		deadline, _ := ctx.Deadline()
+		deadlineCh <- deadline
 		cmd := defaultCommandRunner(ctx, "sh", "-c",
 			`echo $$ > "$1"; until [ -e "$2" ]; do sleep 0.05; done; exit 23`, "sh", leaderPath, releasePath)
 		cmd.Stdout, cmd.Stderr = nil, nil // a group member must not hold the test's stdout pipe
@@ -31,13 +34,13 @@ func TestRunRenovateOnce_DeadlineCrossedDuringSweepStillLogsFailure(t *testing.T
 	}
 
 	resultCh := make(chan runOutcome, 1)
-	started := time.Now()
 	go func() {
-		resultCh <- runRenovateOnce(t.Context(), t.Context().Err, timeout, "test", runPayload{}, runner)
+		resultCh <- runRenovateOnce(t.Context(), timeout, "test", runPayload{}, runner)
 	}()
-	// runRenovateOnce arms its own deadline microseconds after this, so any
-	// instant before deadline is certainly inside the run's real window.
-	deadline := started.Add(timeout)
+	deadline := <-deadlineCh
+	if deadline.IsZero() {
+		t.Fatal("runRenovateOnce() runner context has no deadline, want the run timeout deadline")
+	}
 
 	waitFor(t, 5*time.Second, func() bool {
 		raw, err := os.ReadFile(leaderPath)

@@ -3,7 +3,7 @@
 // This is RENOVATE's own config, NOT the scheduler's: its own settings
 // are RUN_INTERVAL / RUN_TIMEOUT / LOG_LEVEL. It also reads
 // RENOVATE_BASE_DIR (to verify that directory is writable before each
-// run — a `baseDir` set HERE is invisible to that check) and HOME plus
+// run; a `baseDir` set HERE is invisible to that check) and HOME plus
 // RENOVATE_CUSTOM_ENV_VARIABLES (for the non-default-UID cache
 // warning). Mount this at
 // /usr/src/app/config.js (or point RENOVATE_CONFIG_FILE at it) if you prefer
@@ -33,7 +33,7 @@ module.exports = {
 
   // Resident-container performance: keep repo data and the extraction cache
   // between runs so each run does a git fetch rather than a fresh clone. The
-  // scheduler image sets RENOVATE_BASE_DIR=/data — persist that volume.
+  // scheduler image sets RENOVATE_BASE_DIR=/data; persist that volume.
   persistRepoData: true,
   repositoryCache: 'enabled',
 };

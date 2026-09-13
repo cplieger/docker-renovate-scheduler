@@ -28,7 +28,7 @@ func runClient(socketPath string, repos []string) int {
 		}
 	})
 	switch {
-	case err != nil && ctx.Err() != nil:
+	case errors.Is(err, context.Canceled):
 		if accepted {
 			slog.Warn("interrupted while waiting for the run; the run the daemon accepted continues there")
 		} else {

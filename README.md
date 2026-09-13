@@ -124,6 +124,7 @@ services:
       RENOVATE_TOKEN: "<bot-token>"
       RENOVATE_PERSIST_REPO_DATA: "true"
       RENOVATE_REPOSITORY_CACHE: "enabled"
+      RENOVATE_X_SQLITE_PACKAGE_CACHE: "true"   # bounded package cache for a resident container; see "Memory and the package cache"
     volumes:
       - ./data:/data            # persist clones + caches (see "Volumes" for chown)
 ```
@@ -137,7 +138,7 @@ docker exec renovate docker-renovate-scheduler run            # all configured r
 docker exec renovate docker-renovate-scheduler run owner/repo # just one (positional args go straight to Renovate)
 ```
 
-The `run` command submits the request to the daemon and blocks until that run completes, exiting 0 on success and 1 on failure (the run's own result, even when it waited its turn behind an in-flight pass). If you interrupt that wait, a run the daemon already accepted continues there; an interrupt before acceptance leaves the outcome unknown to the client. Either way the client exits 1 with a warning. Exit 1 there means the outcome is unknown to the client, not that the run failed. Because the daemon executes the run, its full Renovate output lands on the **container's** log stream in this mode too; the trigger's log (an Ofelia job log, a webhook action's output) shows only the `run` command's lifecycle lines (`triggered run accepted` / `started` / `complete`). Read per-run detail from `docker logs` / Loki; read the outcome from the exit code.
+The `run` command submits the request to the daemon and blocks until that run completes, exiting 0 on success and 1 on failure (the run's own result, even when it waited its turn behind an in-flight pass). If you interrupt that wait, a run the daemon already accepted continues there; an interrupt before acceptance leaves the outcome unknown to the client. Either way the client exits 1 with a warning. Exit 1 there means the outcome is unknown to the client, not that the run failed. Because the daemon executes the run, its full Renovate output lands on the **container's** log stream in this mode too; the trigger's log (an Ofelia job log, a webhook action's output) shows only the `run` command's lifecycle lines (`triggered run accepted` / `started` / `complete`, or `failed` with a `reason` naming the cause). Read per-run detail from `docker logs` / Loki; read the outcome from the exit code.
 
 Environment overrides ride along: `docker exec -e RENOVATE_AUTODISCOVER=false renovate docker-renovate-scheduler run owner/repo` forwards the exec's environment with the request, and the daemon starts that run's Renovate child with that environment.
 
@@ -236,7 +237,9 @@ groups:
             the surviving tree). No dependency PRs are raised until the
             next clean run. Check the container logs, RENOVATE_TOKEN, and
             platform reachability. A graceful shutdown drains the in-flight
-            run and logs no error, so a redeploy does not trip this.
+            run rather than cancelling it, so an ordinary redeploy does not
+            trip this; it still fires if that draining run then fails or its
+            process tree cannot be confirmed dead.
       - alert: RenovateNoRecentRun
         expr: |
           absent_over_time({container="renovate"} |= `renovate run complete` [13h])
@@ -268,7 +271,7 @@ One case makes `RenovateRunFailed` misleading on its own, so read the failure li
 
 ## Healthcheck
 
-`docker-renovate-scheduler health` checks a marker file the daemon sets after each run. In **built-in** mode the container starts unhealthy and flips to healthy after the first successful run (size `healthcheck.start_period` for the time a first run may take); when a fresh successful run's record survives on `/data`, the startup run is skipped and the container starts healthy instead (see [Scheduling modes](#scheduling-modes)). A failed run flips it unhealthy, and it recovers on the next clean run. Built-in mode additionally treats a stale marker as unhealthy: if no run has refreshed it within `2*RUN_INTERVAL + RUN_TIMEOUT`, the probe fails, so a wedged interval loop surfaces as an unhealthy container instead of a silently idle one. In **external** mode the container starts healthy (idle, nothing has failed), each triggered run updates the marker, and no staleness deadline applies (an idle container between sparse triggers stays healthy).
+`docker-renovate-scheduler health` checks a marker file the daemon sets after each run. In **built-in** mode the container starts unhealthy and flips to healthy after the first successful run; when a fresh successful run's record survives on `/data`, the startup run is skipped and the container starts healthy instead (see [Scheduling modes](#scheduling-modes)). A failed run flips it unhealthy, and it recovers on the next clean run. Built-in mode additionally treats a stale marker as unhealthy: if no run has refreshed it within `2*RUN_INTERVAL + RUN_TIMEOUT`, the probe fails, so a wedged interval loop surfaces as an unhealthy container instead of a silently idle one. In **external** mode the container starts healthy (idle, nothing has failed), each triggered run updates the marker, and no staleness deadline applies (an idle container between sparse triggers stays healthy).
 
 A Renovate process that fails before it reaches its first repository (a broken install, a missing module in the base image) counts as a failed run: the scheduler logs `renovate run failed`, the `run` command exits 1, and health flips. The same holds for a failure part-way through a pass, so a run that reaches some repositories and not others is reported as failed too.
 

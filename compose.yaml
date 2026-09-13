@@ -16,6 +16,7 @@ services:
       RENOVATE_GITHUB_COM_TOKEN: "${RENOVATE_GITHUB_COM_TOKEN}"  # changelogs + dodge rate limits
       RENOVATE_PERSIST_REPO_DATA: "true"  # persist /data so runs git fetch, not clone
       RENOVATE_REPOSITORY_CACHE: "enabled"
+      RENOVATE_X_SQLITE_PACKAGE_CACHE: "true"  # bounded package cache for an always-on container; see README "Memory and the package cache"
 
     volumes:
       - "./data:/data"  # persist clones, caches + the last-run record; create ./data owned by UID 12021 first (see README "Volumes")

@@ -12,6 +12,7 @@ import (
 
 	"github.com/cplieger/scheduler/v4"
 	"github.com/cplieger/scheduler/v4/trigger"
+	"github.com/cplieger/slogx/capture"
 )
 
 // startTestServer wires a queue + executor + trigger server on a temp socket
@@ -118,7 +119,12 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
-	d.runOnce = runOnce
+	// Read inflightCtx only after execDone closes.
+	var inflightCtx context.Context
+	d.runOnce = func(runCtx context.Context, timeout time.Duration, trig string, p runPayload, newCmd scheduler.CommandRunner) runOutcome {
+		inflightCtx = runCtx
+		return runOnce(runCtx, timeout, trig, p, newCmd)
+	}
 	ln, err := trigger.Listen(sock)
 	if err != nil {
 		t.Fatalf("trigger.Listen() = %v", err)
@@ -186,6 +192,10 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 
 	<-execDone
 	srv.Wait()
+	// A drained run's context must outlive shutdown.
+	if err := inflightCtx.Err(); err != nil {
+		t.Errorf("in-flight run context Err() = %v, want nil: the executor must hand the run a context shutdown cannot cancel", err)
+	}
 }
 
 // TestRunDaemon_FullQueueRejectsTriggerImmediately pins the documented
@@ -200,6 +210,8 @@ func TestRunDaemon_FullQueueRejectsTriggerImmediately(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	t.Setenv("RUN_INTERVAL", "off")
 	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
+	// Restore the handler only after the daemon's later cleanup has joined it.
+	rec := capture.Default(t)
 
 	runner, awaitEntered, release := gatedRunner(t)
 
@@ -247,5 +259,11 @@ func TestRunDaemon_FullQueueRejectsTriggerImmediately(t *testing.T) {
 	}
 	if ev.Reason == "" {
 		t.Error("overflow rejection carries no reason; the trigger would report a bare failure")
+	}
+
+	// Only the hook's warning carries the rejected repository scope.
+	warning := requireSingleWarning(t, rec, "trigger request rejected")
+	if got := requireRecordAttr(t, warning, "repos").String(); !strings.Contains(got, "owner/overflow") {
+		t.Errorf("rejection warning repos = %q, want the rejected request's scope", got)
 	}
 }

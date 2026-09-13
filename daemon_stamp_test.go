@@ -57,6 +57,34 @@ func TestRunDaemon_ConditionalStartupRun(t *testing.T) {
 	}
 }
 
+func TestRunDaemon_PhasesFirstIntervalFromLastSuccessfulRun(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("RENOVATE_BASE_DIR", base)
+	t.Setenv("RUN_INTERVAL", "10s")
+	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
+	rec := capture.Default(t)
+
+	seedStamp(t, filepath.Join(base, stampName), time.Now().Add(-9*time.Second), "ok")
+	startedAt := time.Now()
+	cancel, done, runErr := startDaemonForTest(t, recordingRunner("true", nil))
+
+	waitFor(t, 5*time.Second, func() bool { return len(startTriggers(rec)) >= 1 },
+		"the phased first interval run never started")
+	elapsed := time.Since(startedAt)
+
+	cancel()
+	awaitDaemonStopped(t, done)
+	if err := *runErr; err != nil {
+		t.Errorf("runDaemon() = %v, want nil", err)
+	}
+	if triggers := startTriggers(rec); triggers[0] != "interval" {
+		t.Errorf("first run trigger = %q, want interval (a startup run means the seeded record aged past the interval before runDaemon read it)", triggers[0])
+	}
+	if elapsed >= 5*time.Second {
+		t.Errorf("first interval run started %v after boot, want under 5s for a record aged 9s of a 10s interval", elapsed)
+	}
+}
+
 // assertStartupRunFires boots the daemon and requires a due boot: unhealthy
 // while the startup run is in flight, healthy after it completes, and the
 // run labelled trigger=startup.
@@ -219,27 +247,47 @@ func TestExecutor_RecordsScheduledRunOutcomes(t *testing.T) {
 	}
 }
 
-// TestExecutor_CancelledRunRecordsNothing pins the cancellation path: a run
-// reaped by the shutdown handshake is not a completed run, so it must leave
-// the last-run record untouched — the next boot fires the startup run.
-func TestExecutor_CancelledRunRecordsNothing(t *testing.T) {
-	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	ctx := t.Context()
-	d, _ := newBareDaemon(t, recordingRunner("true", nil))
-	d.runOnce = func(context.Context, stopRequested, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
-		return runCancelled
+// TestExecutor_ScheduledPreflightFailureRecordsFailure pins the scheduled-run
+// record when base-directory validation fails before Renovate starts.
+func TestExecutor_ScheduledPreflightFailureRecordsFailure(t *testing.T) {
+	badBaseDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(badBaseDir, []byte("x"), 0o600); err != nil {
+		t.Fatalf("setup base-dir file: %v", err)
 	}
+
+	d, _ := newBareDaemon(t, recordingRunner("true", nil))
+	j := newJob("interval", nil, []string{"RENOVATE_BASE_DIR=" + badBaseDir})
+	d.execute(t.Context(), t.Context().Err, j)
+
+	out := <-j.Result()
+	if out.OK {
+		t.Error("preflight outcome ok = true, want false")
+	}
+	rec, known := scheduler.NewStamp(d.stampPath).Last()
+	if !known {
+		t.Fatal("stamp record unreadable after a scheduled preflight failure, want a failed record")
+	}
+	if rec.OK {
+		t.Error("stamp record ok = true after a scheduled preflight failure, want false")
+	}
+}
+
+// TestExecutor_PreflightTimeoutLeavesStampUntouched pins that a timed-out probe
+// cannot write a stamp into the same unresponsive directory.
+func TestExecutor_PreflightTimeoutLeavesStampUntouched(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	runCtx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	d, _ := newBareDaemon(t, recordingRunner("true", nil))
 
 	j := newJob("interval", nil, nil)
-	d.execute(context.WithoutCancel(ctx), ctx.Err, j)
+	d.execute(runCtx, t.Context().Err, j)
 
-	select {
-	case <-j.Result():
-	default:
-		t.Fatal("no result delivered for the cancelled run")
+	if out := <-j.Result(); out.OK {
+		t.Error("preflight timeout outcome ok = true, want false")
 	}
-	if _, known := scheduler.NewStamp(d.stampPath).Last(); known {
-		t.Error("cancelled run wrote a last-run record, want none (a cancelled run is not a completed run)")
+	if _, err := os.Stat(d.stampPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stamp written after a preflight timeout; stat err = %v, want not-exist", err)
 	}
 }
 
@@ -251,7 +299,7 @@ func TestExecutor_ContainmentRecordsFailure(t *testing.T) {
 	ctx := t.Context()
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
 	seedStamp(t, d.stampPath, time.Now(), "ok") // a fresh success the halt must displace
-	d.runOnce = func(context.Context, stopRequested, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
+	d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
 		return runContained
 	}
 
