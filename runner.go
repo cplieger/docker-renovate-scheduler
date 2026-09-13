@@ -20,10 +20,7 @@ const (
 )
 
 func renovateInvocation(repos []string) (name string, args []string) {
-	args = make([]string, 0, len(repos)+1)
-	args = append(args, renovateCmd)
-	args = append(args, repos...)
-	return renovateEntrypoint, args
+	return renovateEntrypoint, append([]string{renovateCmd}, repos...)
 }
 
 var defaultCommandRunner scheduler.CommandRunner = func() scheduler.CommandRunner {
@@ -51,7 +48,8 @@ func withChildOverrides(env []string) []string {
 	if env == nil {
 		env = os.Environ()
 	}
-	// Concat copies: env can be a job payload still read by the result path.
+	// Concat copies: env is the caller's slice, so a bare append could write
+	// into its spare capacity.
 	return slices.Concat(env, []string{
 		// Keeps the per-run dumb-init from detaching Renovate into a new
 		// session outside the Setpgid group the kill sweep addresses.
@@ -59,22 +57,19 @@ func withChildOverrides(env []string) []string {
 	})
 }
 
-type stopRequested func() error
-
 type runOutcome int
 
 const (
 	runComplete runOutcome = iota
+	// Renovate's own output carries the cause of a non-zero exit.
 	runFailed
-	runCancelled
+	runStartFailed
+	runTimedOut
 	// A surviving group can still write the base directory.
 	runContained
 )
 
-func runRenovateOnce(ctx context.Context, stopping stopRequested,
-	timeout time.Duration, trig string, p runPayload,
-	newCmd scheduler.CommandRunner,
-) runOutcome {
+func runRenovateOnce(ctx context.Context, timeout time.Duration, trig string, p runPayload, newCmd scheduler.CommandRunner) runOutcome {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -86,21 +81,16 @@ func runRenovateOnce(ctx context.Context, stopping stopRequested,
 	cmd := newCmd(runCtx, name, args...)
 	cmd.Env = withChildOverrides(p.Env)
 	if startErr := cmd.Start(); startErr != nil {
-		slog.Error("renovate run failed",
-			"trigger", trig, "duration_ms", time.Since(start).Milliseconds(), "error", startErr)
-		return runFailed
-	}
-	if stopping() != nil {
-		stopUncommittedRun(cmd)
-		slog.Warn("renovate run cancelled by shutdown at start", "trigger", trig, "repos", p.Repos)
-		return runCancelled
+		logRunFailure(trig, time.Since(start).Milliseconds(), startErr)
+		return runStartFailed
 	}
 	runErr := cmd.Wait()
 	durationMs := time.Since(start).Milliseconds()
 	// Read the deadline before the containment sweep consumes more time.
 	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
-	survived := sweepRunGroupOrWarn(cmd, trig)
+	survived := !sweepRunProcessGroup(cmd)
 
+	failure := runFailed
 	switch {
 	case runErr == nil:
 		if survived {
@@ -109,6 +99,7 @@ func runRenovateOnce(ctx context.Context, stopping stopRequested,
 		slog.Info("renovate run complete", "trigger", trig, "duration_ms", durationMs)
 		return runComplete
 	case timedOut:
+		failure = runTimedOut
 		slog.Error("renovate run timed out",
 			"trigger", trig, "duration_ms", durationMs, "timeout", timeout)
 	default:
@@ -117,12 +108,11 @@ func runRenovateOnce(ctx context.Context, stopping stopRequested,
 	if survived {
 		return runContained
 	}
-	return runFailed
+	return failure
 }
 
-// abortExitCode is what a shell reports when its child dies on SIGABRT.
-// Renovate's entrypoint is a shell, so node's fatal errors reach the daemon as
-// this exit code rather than as a signal on the daemon's own child.
+// abortExitCode is how node's SIGABRT reaches the daemon: the entrypoint chain
+// execs into dumb-init, which reports a signal-killed child as 128+signal.
 const abortExitCode = 128 + int(syscall.SIGABRT)
 
 // runDiagnosis carries a named cause for a run failure and its remedy.
@@ -153,10 +143,7 @@ func logRunFailure(trig string, durationMs int64, runErr error) {
 // own counters stay at zero.
 func abortDiagnosis(runErr error) (runDiagnosis, bool) {
 	var exitErr *exec.ExitError
-	if !errors.As(runErr, &exitErr) {
-		return runDiagnosis{}, false
-	}
-	if !abortedOnSIGABRT(exitErr) {
+	if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != abortExitCode {
 		return runDiagnosis{}, false
 	}
 	return runDiagnosis{
@@ -168,62 +155,7 @@ func abortDiagnosis(runErr error) (runDiagnosis, bool) {
 	}, true
 }
 
-// abortedOnSIGABRT reports whether the run died on SIGABRT, either signalled
-// directly or reported by an intervening shell as 128+SIGABRT.
-func abortedOnSIGABRT(exitErr *exec.ExitError) bool {
-	if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-		return ws.Signal() == syscall.SIGABRT
-	}
-	return exitErr.ExitCode() == abortExitCode
-}
-
-func sweepRunGroupOrWarn(cmd *exec.Cmd, trig string) (survived bool) {
-	if !sweepRunProcessGroup(cmd) {
-		slog.Warn("renovate run process group survived the kill sweep; halting run admission to prevent an overlapping run",
-			"trigger", trig, "pid", cmd.Process.Pid)
-		return true
-	}
-	return false
-}
-
 const runGroupPollInterval = 50 * time.Millisecond
-
-func stopUncommittedRun(cmd *exec.Cmd) {
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() { defer close(done); _ = cmd.Wait() }()
-
-	if waitForRunProcessGroup(cmd, done, scheduler.DefaultGrace) {
-		return
-	}
-	if !sweepRunProcessGroup(cmd) {
-		slog.Warn("uncommitted run process group survived the grace-expiry kill sweep; shutdown may leave it running",
-			"pid", cmd.Process.Pid)
-	}
-	<-done
-}
-
-func waitForRunProcessGroup(cmd *exec.Cmd, waitDone <-chan struct{}, timeout time.Duration) bool {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	poll := time.NewTicker(runGroupPollInterval)
-	defer poll.Stop()
-
-	reaped := false
-	for {
-		if reaped && runProcessGroupGone(cmd) {
-			return true
-		}
-		select {
-		case <-waitDone:
-			reaped = true
-			waitDone = nil
-		case <-poll.C:
-		case <-deadline.C:
-			return false
-		}
-	}
-}
 
 func runProcessGroupGone(cmd *exec.Cmd) bool {
 	return errors.Is(syscall.Kill(-cmd.Process.Pid, 0), syscall.ESRCH)

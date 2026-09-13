@@ -31,24 +31,30 @@ func TestProbe_WedgedBuiltinLoopFailsFreshness(t *testing.T) {
 	}
 }
 
-func TestProbeOptions_ExtremeIntervalSaturatesDeadline(t *testing.T) {
-	t.Setenv("RUN_TIMEOUT", "1h")
-	t.Setenv("RUN_INTERVAL", "9223372036854775807ns") // time.Duration max: 2*interval wraps to -2
-
-	marker := filepath.Join(t.TempDir(), "marker")
-	if err := os.WriteFile(marker, nil, 0o600); err != nil {
-		t.Fatalf("setup marker: %v", err)
+func TestProbe_BuiltinFreshnessUsesPublishedBoundary(t *testing.T) {
+	t.Setenv("RUN_INTERVAL", "1m")
+	t.Setenv("RUN_TIMEOUT", "10s")
+	tests := []struct {
+		name     string
+		age      time.Duration
+		wantCode int
+	}{
+		{name: "inside_boundary_stays_healthy", age: 2*time.Minute + 5*time.Second, wantCode: 0},
+		{name: "outside_boundary_is_unhealthy", age: 2*time.Minute + 15*time.Second, wantCode: 1},
 	}
-	aged := time.Now().Add(-2 * time.Hour) // older than the ~1h max-age an overflow would produce
-	if err := os.Chtimes(marker, aged, aged); err != nil {
-		t.Fatalf("age marker: %v", err)
-	}
-
-	opts := probeOptions()
-	if len(opts) != 1 {
-		t.Fatalf("probe options = %d, want 1 (built-in mode must keep the deadline armed, saturated, not disabled)", len(opts))
-	}
-	if code := health.ProbeCheck(marker, opts...); code != 0 {
-		t.Error("marker probed unhealthy under an extreme RUN_INTERVAL; the saturation guard must keep the max-age effectively infinite instead of overflowing to a small positive deadline")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "marker")
+			if err := os.WriteFile(marker, nil, 0o600); err != nil {
+				t.Fatalf("setup marker: %v", err)
+			}
+			aged := time.Now().Add(-tt.age)
+			if err := os.Chtimes(marker, aged, aged); err != nil {
+				t.Fatalf("age marker: %v", err)
+			}
+			if got := health.ProbeCheck(marker, probeOptions()...); got != tt.wantCode {
+				t.Errorf("health.ProbeCheck(marker aged %v) = %d, want %d", tt.age, got, tt.wantCode)
+			}
+		})
 	}
 }

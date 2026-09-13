@@ -236,7 +236,9 @@ groups:
             the surviving tree). No dependency PRs are raised until the
             next clean run. Check the container logs, RENOVATE_TOKEN, and
             platform reachability. A graceful shutdown drains the in-flight
-            run and logs no error, so a redeploy does not trip this.
+            run rather than cancelling it, so an ordinary redeploy does not
+            trip this; it still fires if that draining run then fails or its
+            process tree cannot be confirmed dead.
       - alert: RenovateNoRecentRun
         expr: |
           absent_over_time({container="renovate"} |= `renovate run complete` [13h])
@@ -268,7 +270,7 @@ One case makes `RenovateRunFailed` misleading on its own, so read the failure li
 
 ## Healthcheck
 
-`docker-renovate-scheduler health` checks a marker file the daemon sets after each run. In **built-in** mode the container starts unhealthy and flips to healthy after the first successful run (size `healthcheck.start_period` for the time a first run may take); when a fresh successful run's record survives on `/data`, the startup run is skipped and the container starts healthy instead (see [Scheduling modes](#scheduling-modes)). A failed run flips it unhealthy, and it recovers on the next clean run. Built-in mode additionally treats a stale marker as unhealthy: if no run has refreshed it within `2*RUN_INTERVAL + RUN_TIMEOUT`, the probe fails, so a wedged interval loop surfaces as an unhealthy container instead of a silently idle one. In **external** mode the container starts healthy (idle, nothing has failed), each triggered run updates the marker, and no staleness deadline applies (an idle container between sparse triggers stays healthy).
+`docker-renovate-scheduler health` checks a marker file the daemon sets after each run. In **built-in** mode the container starts unhealthy and flips to healthy after the first successful run; when a fresh successful run's record survives on `/data`, the startup run is skipped and the container starts healthy instead (see [Scheduling modes](#scheduling-modes)). A failed run flips it unhealthy, and it recovers on the next clean run. Built-in mode additionally treats a stale marker as unhealthy: if no run has refreshed it within `2*RUN_INTERVAL + RUN_TIMEOUT`, the probe fails, so a wedged interval loop surfaces as an unhealthy container instead of a silently idle one. In **external** mode the container starts healthy (idle, nothing has failed), each triggered run updates the marker, and no staleness deadline applies (an idle container between sparse triggers stays healthy).
 
 A Renovate process that fails before it reaches its first repository (a broken install, a missing module in the base image) counts as a failed run: the scheduler logs `renovate run failed`, the `run` command exits 1, and health flips. The same holds for a failure part-way through a pass, so a run that reaches some repositories and not others is reported as failed too.
 

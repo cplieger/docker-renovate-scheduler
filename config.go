@@ -4,6 +4,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -80,38 +81,28 @@ func loadRunTimeout() time.Duration {
 }
 
 func logBaseDirError(dir string, err error) {
-	slog.Error("base directory preflight failed", "path", dir, "error", err,
-		"hint", "mount a writable volume at RENOVATE_BASE_DIR (the image default is /data); a read_only container needs a /data volume or tmpfs")
+	// A deadline means the probe never returned a verdict, so the volume is
+	// not the thing to change.
+	hint := "mount a writable volume at RENOVATE_BASE_DIR (the image default is /data); a read_only container needs a /data volume or tmpfs"
+	if errors.Is(err, context.DeadlineExceeded) {
+		hint = "the base directory did not answer within " + baseDirProbeBudget.String() +
+			"; check that the volume backing RENOVATE_BASE_DIR is mounted and responding"
+	}
+	slog.Error("base directory preflight failed", "path", dir, "error", err, "hint", hint)
 }
 
-type baseDirVerifier struct {
-	// Keep the slot until an uninterruptible filesystem probe returns.
-	slot chan struct{}
+func verifyBaseDir(ctx context.Context) error {
+	return verifyBaseDirAt(ctx, baseDir())
 }
 
-func newBaseDirVerifier() *baseDirVerifier {
-	return &baseDirVerifier{slot: make(chan struct{}, 1)}
-}
-
-func (v *baseDirVerifier) verify(ctx context.Context) error {
-	return v.verifyAt(ctx, baseDir())
-}
-
-func (v *baseDirVerifier) verifyAt(ctx context.Context, dir string) error {
+// A filesystem call wedged on a hung mount cannot be cancelled, so the
+// probe outlives a caller that reaches the verification budget.
+func verifyBaseDirAt(ctx context.Context, dir string) error {
 	ctx, cancel := context.WithTimeout(ctx, baseDirProbeBudget)
 	defer cancel()
 
-	select {
-	case v.slot <- struct{}{}:
-	case <-ctx.Done():
-		return fmt.Errorf("base dir verification timed out waiting for an earlier probe to finish: %w", ctx.Err())
-	}
-
 	done := make(chan error, 1)
-	go func() {
-		defer func() { <-v.slot }()
-		done <- probeBaseDirWrite(ctx, dir)
-	}()
+	go func() { done <- probeBaseDirWrite(ctx, dir) }()
 
 	select {
 	case <-ctx.Done():
@@ -126,23 +117,14 @@ func probeBaseDirWrite(ctx context.Context, dir string) error {
 	if err != nil {
 		return fmt.Errorf("base dir %q write probe not attempted: %w", dir, err)
 	}
-	return baseDirProbeStageError(dir, res)
-}
-
-func baseDirProbeStageError(dir string, res atomicfile.ProbeResult) error {
 	if res.OK() {
 		return nil
 	}
-	switch res.Stage {
-	case atomicfile.ProbeStageMkdir:
-		return fmt.Errorf("mkdir base dir %q: %w", dir, res.Err)
-	case atomicfile.ProbeStageCreate:
-		return fmt.Errorf("base dir %q not writable: %w", dir, res.Err)
-	default:
-		if res.Name == "" {
-			return fmt.Errorf("base dir %q write probe failed at %s: %w", dir, res.Stage, res.Err)
-		}
-		return fmt.Errorf("base-dir probe %q failed at %s: %w",
-			filepath.Join(res.Dir, res.Name), res.Stage, res.Err)
+	if res.Writable() {
+		slog.Warn("base dir probe wrote and flushed but could not clean up",
+			"path", dir, "stage", res.Stage, "name", res.Name,
+			"leaked", res.Leaked, "error", res.Err)
+		return nil
 	}
+	return fmt.Errorf("base dir %q not writable, failed to %s: %w", dir, res.Stage, res.Err)
 }

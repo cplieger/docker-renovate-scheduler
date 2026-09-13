@@ -33,7 +33,7 @@ func TestRunRenovateOnce_DeadlineCrossedDuringSweepStillLogsFailure(t *testing.T
 	resultCh := make(chan runOutcome, 1)
 	started := time.Now()
 	go func() {
-		resultCh <- runRenovateOnce(t.Context(), t.Context().Err, timeout, "test", runPayload{}, runner)
+		resultCh <- runRenovateOnce(t.Context(), timeout, "test", runPayload{}, runner)
 	}()
 	// runRenovateOnce arms its own deadline microseconds after this, so any
 	// instant before deadline is certainly inside the run's real window.

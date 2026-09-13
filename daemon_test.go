@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cplieger/health"
@@ -105,6 +107,120 @@ func TestExecutor_MarkerFollowsRunOutcome(t *testing.T) {
 	}
 }
 
+func TestExecutor_CarriesRunFailureReason(t *testing.T) {
+	tests := []struct {
+		name       string
+		outcome    runOutcome
+		wantReason string
+	}{
+		{name: "nonzero_exit", outcome: runFailed, wantReason: ""},
+		{name: "start_failure", outcome: runStartFailed, wantReason: "failed: renovate could not be started (see the container log stream)"},
+		{name: "timeout", outcome: runTimedOut, wantReason: "failed: run exceeded RUN_TIMEOUT (1h0m0s)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+			d, _ := newBareDaemon(t, recordingRunner("true", nil))
+			d.timeout = time.Hour
+			d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
+				return tt.outcome
+			}
+
+			j := newJob("external", nil, nil)
+			d.execute(t.Context(), t.Context().Err, j)
+			out := <-j.Result()
+
+			if out.OK {
+				t.Errorf("execute() outcome ok = true for %v, want false", tt.outcome)
+			}
+			if out.Reason != tt.wantReason {
+				t.Errorf("execute() outcome reason = %q for %v, want %q", out.Reason, tt.outcome, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestRunPayload_EnvironmentValuesNeverReachDaemonLogs(t *testing.T) {
+	const secret = "test-only-daemon-token-4b87d1"
+	rec := capture.Default(t)
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	t.Setenv("RUN_INTERVAL", "off")
+	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
+
+	runner, awaitEntered, release := gatedRunner(t)
+	sock := testSocketPath(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = runDaemon(ctx, sock, runner)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		release()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("runDaemon did not stop during test cleanup")
+		}
+	})
+
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(sock)
+		return err == nil
+	}, "daemon did not bind the trigger socket")
+	base := t.TempDir()
+	payload := runPayload{Env: []string{
+		"RENOVATE_TOKEN=" + secret,
+		"RENOVATE_BASE_DIR=" + base,
+		"PATH=" + os.Getenv("PATH"),
+	}}
+
+	_ = rawRequest(t, sock, payload)
+	awaitEntered()
+	for i := range queueCapacity {
+		dec := rawRequest(t, sock, payload)
+		if event := nextEvent(t, dec); event.Kind != trigger.EventQueued {
+			t.Fatalf("queued request %d first event = %q, want queued", i, event.Kind)
+		}
+	}
+	overflow := nextEvent(t, rawRequest(t, sock, payload))
+	if overflow.Kind != trigger.EventDone || overflow.OK {
+		t.Fatalf("overflow event = %+v, want an immediate failed done", overflow)
+	}
+
+	cancel()
+	release()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runDaemon did not stop after cancellation")
+	}
+
+	halted, _ := newBareDaemon(t, recordingRunner("true", nil))
+	halted.halted = true
+	if err := halted.queue.Submit(newJob("external", nil, payload.Env)); err != nil {
+		t.Fatalf("submit to the halted daemon: %v", err)
+	}
+	halted.queue.Close()
+	halted.runJobs(t.Context())
+	notDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(notDir, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write preflight fixture: %v", err)
+	}
+	d, _ := newBareDaemon(t, recordingRunner("true", nil))
+	job := newJob("external", nil, []string{
+		"RENOVATE_TOKEN=" + secret,
+		"RENOVATE_BASE_DIR=" + notDir,
+	})
+	d.execute(t.Context(), t.Context().Err, job)
+	<-job.Result()
+
+	if key, value, found := leakedRecord(rec, secret); found {
+		t.Errorf("daemon leaked a forwarded environment value in %s = %q", key, value)
+	}
+}
+
 // TestExecutor_BaseDirFailureFailsRunAndMarker pins the per-run base-dir
 // re-verification: a volume that degrades after boot fails the run with an
 // actionable reason, flips the marker unhealthy, and never invokes Renovate.
@@ -160,12 +276,9 @@ func TestExecutor_PreflightValidatesForwardedBaseDir(t *testing.T) {
 // TestExecutor_ShutdownCancelsQueuedButFinishesInFlight pins the drain
 // contract: SIGTERM never abandons the in-flight run (it completes with its
 // real outcome) and never starts queued work (it is cancelled with an
-// explicit reason). The in-flight run pauses INSIDE the runOnce seam — the
-// committed-run boundary — and blocks until released, so the SIGTERM lands
-// on a run that has unambiguously committed (a child-start readiness marker
-// would race runRenovateOnce's post-Start shutdown handshake; the real
-// post-Start cancellation path is pinned process-level by
-// TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild).
+// explicit reason). Entry into the runOnce seam is past execute's shutdown
+// preflight check, so cancellation after awaitEntered observes an in-flight
+// run.
 func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 
@@ -212,6 +325,9 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 		if out.Reason == "" {
 			t.Error("cancelled job carries no reason")
 		}
+		if out.Duration != 0 {
+			t.Errorf("queued job duration = %v, want 0 because the job never ran", out.Duration)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("queued job's cancellation result not delivered")
 	}
@@ -244,26 +360,23 @@ func TestExecutor_ShutdownDuringPreflightNeverStartsRenovate(t *testing.T) {
 		if out.Reason != shutdownCancelReason {
 			t.Errorf("outcome reason = %q, want %q", out.Reason, shutdownCancelReason)
 		}
+		if out.Duration <= 0 {
+			t.Errorf("outcome duration = %v, want elapsed time for a job that reached execution", out.Duration)
+		}
 	default:
 		t.Fatal("no result delivered for the job cancelled at the launch boundary")
 	}
 }
 
 // TestExecutor_PreflightTimeoutDoesNotClaimBaseDirUnwritable pins what an
-// operator reads when the preflight times out instead of failing a write: a
-// wedged mount holds the verifier's slot, so the probe never runs and the
-// outcome carries no writability verdict. Both surfaces an operator sees — the
-// waiter's reason and the log record — must say the preflight failed, not that
-// a perfectly good volume is unwritable. Serial: swaps slog.Default.
+// operator reads when the preflight reaches the same deadline error as an
+// elapsed probe budget. The hint must not prescribe a writability remedy.
+// Serial: swaps slog.Default.
 func TestExecutor_PreflightTimeoutDoesNotClaimBaseDirUnwritable(t *testing.T) {
 	rec := capture.Default(t)
-	runCtx, cancel := context.WithCancel(t.Context())
-	cancel()
+	runCtx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
-	// The slot is held, so the probe is never attempted: the wait expires in
-	// the slot-acquire select without any filesystem call being made.
-	d.verifier = newBaseDirVerifier()
-	d.verifier.slot <- struct{}{}
 	j := newJob("external", nil, nil)
 
 	d.execute(runCtx, t.Context().Err, j)
@@ -278,10 +391,15 @@ func TestExecutor_PreflightTimeoutDoesNotClaimBaseDirUnwritable(t *testing.T) {
 	if strings.Contains(out.Reason, "not writable") {
 		t.Errorf("preflight timeout outcome reason = %q, must not claim a writability verdict", out.Reason)
 	}
-	for _, record := range rec.Records() {
-		if strings.Contains(record.Message, "base directory not writable") {
-			t.Errorf("preflight timeout log message = %q, must not claim a writability verdict", record.Message)
-		}
+	hint, ok := rec.AttrValueExact("base directory preflight failed", "hint")
+	if !ok {
+		t.Fatal("no \"base directory preflight failed\" record carried a hint attribute")
+	}
+	if strings.Contains(hint, "mount a writable volume") {
+		t.Errorf("preflight timeout hint = %q, must not prescribe mounting a volume: no writability verdict was reached", hint)
+	}
+	if !strings.Contains(hint, "responding") {
+		t.Errorf("preflight timeout hint = %q, want it to point at whether the mount is responding", hint)
 	}
 }
 
@@ -310,7 +428,7 @@ func TestStartTicker_FiresStartupThenInterval(t *testing.T) {
 	d, cancel, execDone := newTestDaemon(t, recordingRunner("true", nil))
 
 	ctx, stop := context.WithCancel(t.Context())
-	tickerDone := startTicker(ctx, d, 15*time.Millisecond, true, true)
+	tickerDone := startTicker(ctx, d, 15*time.Millisecond, true, 0)
 
 	waitFor(t, 5*time.Second, func() bool {
 		return len(startTriggers(rec)) >= 2
@@ -330,12 +448,48 @@ func TestStartTicker_FiresStartupThenInterval(t *testing.T) {
 	}
 }
 
+func TestStartTicker_StampBecomingDueBeforeSetupFiresStartup(t *testing.T) {
+	const interval = time.Hour
+	tests := []struct {
+		name        string
+		remaining   time.Duration
+		wantWait    time.Duration
+		wantTrigger string
+	}{
+		{name: "read_just_before_boundary", remaining: time.Millisecond, wantWait: time.Millisecond, wantTrigger: "interval"},
+		{name: "read_at_or_after_boundary", remaining: 0, wantWait: 0, wantTrigger: "startup"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				d, _ := newBareDaemon(t, nil)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				start := time.Now()
+
+				done := startTicker(ctx, d, interval, true, tt.remaining)
+
+				j := <-d.queue.Jobs()
+				if waited := time.Since(start); waited != tt.wantWait {
+					t.Errorf("startTicker(remaining=%v) fired the first run after %v, want %v", tt.remaining, waited, tt.wantWait)
+				}
+				if j.Trigger != tt.wantTrigger {
+					t.Errorf("startTicker(remaining=%v) first trigger = %q, want %q", tt.remaining, j.Trigger, tt.wantTrigger)
+				}
+				j.Finish(trigger.Outcome{OK: true})
+				cancel()
+				<-done
+			})
+		})
+	}
+}
+
 // TestStartTicker_DisabledInExternalMode pins that external mode runs no
 // ticker: the returned channel is already closed and nothing is submitted.
 func TestStartTicker_DisabledInExternalMode(t *testing.T) {
 	t.Parallel()
 	d := &daemon{queue: trigger.NewQueue[runPayload](4)}
-	done := startTicker(t.Context(), d, time.Millisecond, false, true)
+	done := startTicker(t.Context(), d, time.Millisecond, false, 0)
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -429,15 +583,11 @@ func startTriggers(rec *capture.Recorder) []string {
 	return out
 }
 
-// TestRunDaemon_BootFailureClearsPreviousLifesHealthyMarker pins the
-// crash-loop contract documented at runDaemon's marker setup: a docker
-// restart preserves /tmp, so a healthy marker left by a previous life must
-// be overwritten by every boot-failure path -- a crash-looping boot must
-// never probe healthy, and a failed boot leaves the unhealthy marker in
-// place (Cleanup is deferred only after boot succeeds). Both boot-failure
-// branches are exercised: an unwritable base dir and an unbindable trigger
-// socket. Not parallel: it uses the package-global healthMarkerPath.
-func TestRunDaemon_BootFailureClearsPreviousLifesHealthyMarker(t *testing.T) {
+// TestRunDaemon_BootFailureUpdatesMarkerOnlyAfterAcquiringSocket pins the
+// owner-state boundary: a boot that acquires the socket clears stale health
+// before a later failure, while a refused second daemon leaves the live
+// daemon's marker untouched. Not parallel: it uses healthMarkerPath.
+func TestRunDaemon_BootFailureUpdatesMarkerOnlyAfterAcquiringSocket(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
 
 	t.Run("unwritable base dir", func(t *testing.T) {
@@ -458,17 +608,23 @@ func TestRunDaemon_BootFailureClearsPreviousLifesHealthyMarker(t *testing.T) {
 			t.Errorf("healthy marker survived a failed boot; stat err = %v, want not-exist (a crash-looping boot must never probe healthy)", err)
 		}
 	})
-	t.Run("unbindable socket", func(t *testing.T) {
+	t.Run("live_socket_owner", func(t *testing.T) {
 		if err := os.WriteFile(healthMarkerPath, nil, 0o600); err != nil {
 			t.Fatalf("setup previous life's marker: %v", err)
 		}
 		t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-		sock := filepath.Join(t.TempDir(), "missing-parent", "trigger.sock")
+		sock := filepath.Join(t.TempDir(), "trigger.sock")
+		ln, err := net.Listen("unix", sock)
+		if err != nil {
+			t.Fatalf("listen on trigger socket: %v", err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+
 		if err := runDaemon(t.Context(), sock, recordingRunner("true", nil)); err == nil {
 			t.Fatal("runDaemon() = nil, want error")
 		}
-		if _, err := os.Stat(healthMarkerPath); !errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("healthy marker survived a failed boot; stat err = %v, want not-exist", err)
+		if _, err := os.Stat(healthMarkerPath); err != nil {
+			t.Errorf("live daemon's healthy marker was changed by a refused boot; stat err = %v, want present", err)
 		}
 	})
 }
@@ -549,7 +705,7 @@ func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
 	invocations := 0
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
 	d.marker.Set(true) // a healthy pre-containment state the halt must clear
-	d.runOnce = func(context.Context, stopRequested, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
+	d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
 		invocations++
 		return runContained // the group survived the sweep
 	}
@@ -620,7 +776,7 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 	entered := make(chan struct{})
 	proceed := make(chan struct{})
 	var release sync.Once
-	runOnce := func(context.Context, stopRequested, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
+	runOnce := func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
 		close(entered)
 		<-proceed
 		return runContained // the sweep could not confirm group death — reported after shutdown began
@@ -636,7 +792,6 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 		queue:     trigger.NewQueue[runPayload](queueCapacity),
 		marker:    marker,
 		health:    health.NewLatch(marker),
-		verifier:  newBaseDirVerifier(),
 		stamp:     scheduler.NewStamp(stampPath()),
 		newCmd:    recordingRunner("true", nil),
 		runOnce:   runOnce,
@@ -649,7 +804,7 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 	var runErr error
 	go func() {
 		defer close(done)
-		runErr = d.run(ctx, ln, sock, time.Hour, false, true)
+		runErr = d.run(ctx, ln, sock, time.Hour, false, 0)
 	}()
 	// A mid-test Fatal must not leak the daemon fixture: cancel, release the
 	// gated run, and wait for the daemon before later cleanups remove the
@@ -730,7 +885,7 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
 
-	runOnce := func(context.Context, stopRequested, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
+	runOnce := func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
 		return runContained // the group survived the sweep mid-operation
 	}
 
@@ -744,7 +899,6 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 		queue:     trigger.NewQueue[runPayload](queueCapacity),
 		marker:    marker,
 		health:    health.NewLatch(marker),
-		verifier:  newBaseDirVerifier(),
 		stamp:     scheduler.NewStamp(stampPath()),
 		newCmd:    recordingRunner("true", nil),
 		runOnce:   runOnce,
@@ -757,7 +911,7 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 	var runErr error
 	go func() {
 		defer close(done)
-		runErr = d.run(ctx, ln, sock, time.Hour, false, true)
+		runErr = d.run(ctx, ln, sock, time.Hour, false, 0)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -782,42 +936,5 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 	}
 	if !errors.Is(runErr, errContainmentLost) {
 		t.Errorf("daemon.run() = %v, want errContainmentLost (a mid-operation containment loss must exit non-zero without an external stop)", runErr)
-	}
-}
-
-// TestExecutor_CancelledRunDeliversShutdownReasonAndLeavesMarker pins
-// execute's cancelled branch: when runRenovateOnce reports the post-Start
-// shutdown handshake reaped the child (runCancelled), the waiter must get
-// the explicit shutdown reason — not a bare failure — and the health marker
-// must be left alone (BeginDrain owns the shutdown health state; a
-// cancelled start is not a run failure). The cancelled report is injected at
-// the runOnce seam; the real handshake behavior is pinned process-level by
-// TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild.
-func TestExecutor_CancelledRunDeliversShutdownReasonAndLeavesMarker(t *testing.T) {
-	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-
-	ctx := t.Context()
-	d, _ := newBareDaemon(t, recordingRunner("true", nil))
-	d.marker.Set(true) // the pre-shutdown health state must survive the cancellation
-	d.runOnce = func(context.Context, stopRequested, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
-		return runCancelled // the post-Start handshake reaped the child
-	}
-
-	j := newJob("external", nil, nil)
-	d.execute(context.WithoutCancel(ctx), ctx.Err, j)
-
-	select {
-	case out := <-j.Result():
-		if out.OK {
-			t.Error("outcome ok=true for a shutdown-cancelled run, want false")
-		}
-		if out.Reason != shutdownCancelReason {
-			t.Errorf("outcome reason = %q, want %q", out.Reason, shutdownCancelReason)
-		}
-	default:
-		t.Fatal("no result delivered for the cancelled run")
-	}
-	if !d.marker.CheckHealthy() {
-		t.Error("health marker flipped unhealthy by a cancelled run; the cancelled branch must leave the marker alone (BeginDrain owns the shutdown state)")
 	}
 }

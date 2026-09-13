@@ -11,16 +11,14 @@ import (
 func main() {
 	setupLogger()
 
-	if len(os.Args) > 1 && os.Args[1] == "health" {
-		health.RunProbe(healthMarkerPath, probeOptions()...)
-	}
-
 	cmd := "daemon"
 	if len(os.Args) > 1 {
 		cmd = os.Args[1]
 	}
 
 	switch cmd {
+	case "health":
+		health.RunProbe(healthMarkerPath, probeOptions()...)
 	case "daemon":
 		if err := runDaemon(context.Background(), socketPath, defaultCommandRunner); err != nil {
 			os.Exit(1)

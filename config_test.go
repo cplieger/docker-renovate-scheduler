@@ -9,10 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"testing/synctest"
 	"time"
 
-	"github.com/cplieger/atomicfile/v3"
+	"github.com/cplieger/slogx/capture"
 )
 
 func TestLoadInterval(t *testing.T) {
@@ -134,8 +133,8 @@ func TestVerifyBaseDir(t *testing.T) {
 	t.Run("creates and verifies a writable dir", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "renovate-data")
 		t.Setenv("RENOVATE_BASE_DIR", dir)
-		if err := newBaseDirVerifier().verify(t.Context()); err != nil {
-			t.Fatalf("verify() = %v, want nil", err)
+		if err := verifyBaseDir(t.Context()); err != nil {
+			t.Fatalf("verifyBaseDir() = %v, want nil", err)
 		}
 		if _, err := os.Stat(dir); err != nil {
 			t.Errorf("base dir not created: %v", err)
@@ -147,10 +146,64 @@ func TestVerifyBaseDir(t *testing.T) {
 			t.Fatalf("setup: %v", err)
 		}
 		t.Setenv("RENOVATE_BASE_DIR", file)
-		if err := newBaseDirVerifier().verify(t.Context()); err == nil {
-			t.Error("verify() = nil, want error when base dir is a file")
+		if err := verifyBaseDir(t.Context()); err == nil {
+			t.Error("verifyBaseDir() = nil, want error when base dir is a file")
 		}
 	})
+}
+
+func TestLogBaseDirError_HintFollowsTheVerdict(t *testing.T) {
+	occupied := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(occupied, []byte("x"), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	tests := []struct {
+		name     string
+		err      func(*testing.T) error
+		wantHint string
+		notHint  string
+	}{
+		{
+			name: "the budget expired before any verdict",
+			err: func(t *testing.T) error {
+				ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				defer cancel()
+				return verifyBaseDirAt(ctx, t.TempDir())
+			},
+			wantHint: "mounted and responding",
+			notHint:  "mount a writable volume",
+		},
+		{
+			name: "the directory refused the write",
+			err: func(t *testing.T) error {
+				return probeBaseDirWrite(t.Context(), filepath.Join(occupied, "child"))
+			},
+			wantHint: "mount a writable volume",
+			notHint:  "mounted and responding",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := capture.Default(t)
+			err := tt.err(t)
+			if err == nil {
+				t.Fatal("setup: the arm under test returned nil")
+			}
+
+			logBaseDirError("/data", err)
+
+			hint, ok := rec.AttrValueExact("base directory preflight failed", "hint")
+			if !ok {
+				t.Fatalf("logBaseDirError(%v) logged no hint attribute on the preflight record", err)
+			}
+			if !strings.Contains(hint, tt.wantHint) {
+				t.Errorf("logBaseDirError(%v) hint = %q, want it to mention %q", err, hint, tt.wantHint)
+			}
+			if strings.Contains(hint, tt.notHint) {
+				t.Errorf("logBaseDirError(%v) hint = %q, must not mention %q", err, hint, tt.notHint)
+			}
+		})
+	}
 }
 
 func TestProbeBaseDirWrite(t *testing.T) {
@@ -196,59 +249,6 @@ func TestProbeBaseDirWrite(t *testing.T) {
 			t.Errorf("probeBaseDirWrite() error = %v, want it to wrap context.Canceled", err)
 		}
 	})
-}
-
-// TestBaseDirProbeStageError pins that every stage of the probe ladder stays
-// DISTINGUISHABLE after delegating the ladder to atomicfile: the six stages
-// this app's hand-rolled probe reported separately must still produce six
-// distinct, stage-naming errors wrapping the filesystem cause, and a passing
-// probe must still produce no error. This is the regression guard for the
-// adoption itself — a mapping that collapsed two stages onto one message, or
-// swallowed a teardown failure the way the hand-rolled predecessor did,
-// did, would leave the preflight silently weaker while every other test passed.
-func TestBaseDirProbeStageError(t *testing.T) {
-	cause := errors.New("boom")
-	stages := []struct {
-		stage    atomicfile.ProbeStage
-		wantText string
-	}{
-		{atomicfile.ProbeStageMkdir, "mkdir base dir"},
-		{atomicfile.ProbeStageCreate, "not writable"},
-		{atomicfile.ProbeStageWrite, "write probe file"},
-		{atomicfile.ProbeStageSync, "sync probe file"},
-		{atomicfile.ProbeStageClose, "close probe file"},
-		{atomicfile.ProbeStageRemove, "remove probe file"},
-	}
-
-	if err := baseDirProbeStageError("/data", atomicfile.ProbeResult{}); err != nil {
-		t.Errorf("baseDirProbeStageError(passing probe) = %v, want nil", err)
-	}
-
-	seen := make(map[string]atomicfile.ProbeStage, len(stages))
-	for _, s := range stages {
-		res := atomicfile.ProbeResult{
-			Dir:   "/data",
-			Name:  atomicfile.TempName(),
-			Stage: s.stage,
-			Err:   cause,
-		}
-		err := baseDirProbeStageError("/data", res)
-		if err == nil {
-			t.Errorf("baseDirProbeStageError(%s) = nil, want an error", s.stage)
-			continue
-		}
-		if !strings.Contains(err.Error(), s.wantText) {
-			t.Errorf("baseDirProbeStageError(%s) = %v, want it to mention %q", s.stage, err, s.wantText)
-		}
-		if !errors.Is(err, cause) {
-			t.Errorf("baseDirProbeStageError(%s) = %v, want it to wrap the filesystem cause", s.stage, err)
-		}
-		if prev, dup := seen[err.Error()]; dup {
-			t.Errorf("stages %s and %s produce the same error %q; each stage must stay distinguishable",
-				prev, s.stage, err)
-		}
-		seen[err.Error()] = s.stage
-	}
 }
 
 // TestLoadRunTimeout_ZeroIsNonPositiveAndUsesDefault pins the non-positive
@@ -307,51 +307,6 @@ func TestSetupLogger_MapsLogLevelEnvToHandlerLevel(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestVerifyBaseDirAt_TimesOutWhileProbeSlotHeld pins the hung-filesystem
-// containment: when a previous probe goroutine is still wedged (the slot is
-// held) and the caller's budget expires, verifyAt reports a timeout
-// instead of blocking — and once the wedged probe releases the slot, later
-// verifications succeed again.
-func TestVerifyBaseDirAt_TimesOutWhileProbeSlotHeld(t *testing.T) {
-	t.Parallel()
-	verifier := newBaseDirVerifier()
-	verifier.slot <- struct{}{} // a prior probe is wedged on a hung filesystem
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // the caller's verification budget is already exhausted
-
-	err := verifier.verifyAt(ctx, t.TempDir())
-
-	<-verifier.slot // the wedged probe finally finishes
-	if err == nil {
-		t.Fatal("verifyAt() = nil with the probe slot held and the context done, want a timeout error")
-	}
-	if !strings.Contains(err.Error(), "timed out") {
-		t.Errorf("verifyAt() error = %v, want it to mention %q", err, "timed out")
-	}
-
-	if err := verifier.verifyAt(t.Context(), t.TempDir()); err != nil {
-		t.Errorf("verifyAt() = %v after the slot was released, want nil (the slot must be reusable)", err)
-	}
-}
-
-// TestVerifyBaseDirAt_DerivedDeadlineBoundsSlotWait pins the derived deadline
-// itself: with the slot held and a LIVE parent context, the wait must expire on
-// the probe budget rather than block forever. Under synctest the budget elapses
-// on virtual time, so removing the deadline deadlocks the bubble and fails here
-// instead of costing ten wall-clock seconds.
-func TestVerifyBaseDirAt_DerivedDeadlineBoundsSlotWait(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		verifier := newBaseDirVerifier()
-		verifier.slot <- struct{}{}
-
-		err := verifier.verifyAt(t.Context(), t.TempDir())
-
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("verifyAt() with a live parent and held slot = %v, want context.DeadlineExceeded", err)
-		}
-	})
 }
 
 // captureSetupLoggerOutput installs the real handler over a pipe and returns

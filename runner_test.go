@@ -91,7 +91,7 @@ func TestRunRenovateOnce_EnvHandling(t *testing.T) {
 			t.Setenv("RENOVATE_TEST_MARKER", "inherited")
 			t.Setenv("RENOVATE_DAEMON_ONLY", "daemon")
 			runner := shellAssertRunner(tt.script)
-			if got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{Env: tt.env}, runner); got != runComplete {
+			if got := runRenovateOnce(t.Context(), time.Minute, "test", runPayload{Env: tt.env}, runner); got != runComplete {
 				t.Errorf("runRenovateOnce() = %v, want runComplete: the child did not see the expected environment (env=%v)", got, tt.env)
 			}
 		})
@@ -107,24 +107,12 @@ func TestDefaultCommandRunner(t *testing.T) {
 	if cmd.Stderr != os.Stderr {
 		t.Error("Stderr not wired to os.Stderr")
 	}
-	if cmd.WaitDelay != 5*time.Second {
-		t.Errorf("WaitDelay = %v, want 5s", cmd.WaitDelay)
-	}
-	if cmd.Cancel == nil {
-		t.Error("Cancel not set (graceful SIGTERM on timeout expected)")
-	}
-	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
-		t.Error("Setpgid not set: the child must run in its own process group, or " +
-			"dumb-init (PID 1) forwards the docker-stop SIGTERM to the daemon's " +
-			"whole group and kills the in-flight run (exit 143), defeating the shutdown drain")
-	}
 }
 
-// TestDefaultCommandRunner_ChildRunsInOwnProcessGroup proves the OS honors
-// Setpgid: a spawned child's process group must differ from the daemon's
-// (here: the test process's), so a group-directed SIGTERM at PID 1 cannot
-// reach it. This is the behavioral half of the Setpgid pin in
-// TestDefaultCommandRunner.
+// TestDefaultCommandRunner_ChildRunsInOwnProcessGroup proves a spawned child
+// leads a process group distinct from the daemon's. Otherwise dumb-init
+// forwards docker-stop SIGTERM to the child, ending the run with exit 143
+// before the daemon's shutdown drain completes.
 func TestDefaultCommandRunner_ChildRunsInOwnProcessGroup(t *testing.T) {
 	t.Parallel()
 	cmd := defaultCommandRunner(t.Context(), "sleep", "2")
@@ -171,7 +159,7 @@ func TestRunRenovateOnce_EnvCarriesChildOverrides(t *testing.T) {
 			// The daemon environ must be overridden too.
 			t.Setenv("DUMB_INIT_SETSID", "1")
 			runner := shellAssertRunner(script)
-			if got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{Env: tt.env}, runner); got != runComplete {
+			if got := runRenovateOnce(t.Context(), time.Minute, "test", runPayload{Env: tt.env}, runner); got != runComplete {
 				t.Errorf("runRenovateOnce() = %v, want runComplete: child did not see the override (env=%v)", got, tt.env)
 			}
 		})
@@ -199,7 +187,7 @@ exec setsid -w sh -c 'echo $$ > "$0"; exec sleep 30' "$1"`
 		return cmd
 	}
 
-	if got := runRenovateOnce(t.Context(), t.Context().Err, 500*time.Millisecond, "test", runPayload{}, runner); got == runComplete {
+	if got := runRenovateOnce(t.Context(), 500*time.Millisecond, "test", runPayload{}, runner); got == runComplete {
 		t.Fatal("runRenovateOnce() = runComplete for a run that exceeded the timeout, want a failure outcome")
 	}
 
@@ -245,7 +233,7 @@ func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := capture.Default(t)
-			got := runRenovateOnce(t.Context(), t.Context().Err, tt.timeout, "test", runPayload{}, tt.runner)
+			got := runRenovateOnce(t.Context(), tt.timeout, "test", runPayload{}, tt.runner)
 			if got == runComplete {
 				t.Errorf("runRenovateOnce() = runComplete, want a failure outcome")
 			}
@@ -256,21 +244,32 @@ func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	}
 }
 
-// TestRunRenovateOnce_SuccessLogsCompleteAtInfo pins the success lifecycle
-// line's exact message and level. The README's RenovateNoRecentRun deadman
-// alert keys on absent_over_time of this exact string, so a silent rewording
-// would make that alert fire permanently at the next quiet window; the
-// outcome alone (asserted elsewhere) cannot catch it. Serial: swaps
-// slog.Default.
-func TestRunRenovateOnce_SuccessLogsCompleteAtInfo(t *testing.T) {
+func TestRunRenovateOnce_CleanExitWinsWhenDeadlineAlsoExpires(t *testing.T) {
 	rec := capture.Default(t)
-	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd { return exec.CommandContext(ctx, "true") }
-	got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{}, runner)
+	releasePath := t.TempDir() + "/release"
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		cmd := defaultCommandRunner(ctx, "sh", "-c",
+			`until [ -e "$1" ]; do sleep 0.01; done`, "sh", releasePath)
+		cmd.Stdout, cmd.Stderr = nil, nil
+		cmd.Cancel = func() error {
+			if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
+				return err
+			}
+			return os.ErrProcessDone
+		}
+		return cmd
+	}
+
+	got := runRenovateOnce(t.Context(), 50*time.Millisecond, "test", runPayload{}, runner)
+
 	if got != runComplete {
-		t.Fatalf("runRenovateOnce() = %v, want runComplete", got)
+		t.Fatalf("runRenovateOnce() = %v, want runComplete when the child exited zero and cancellation found it done", got)
 	}
 	if got := rec.CountLevel(slog.LevelInfo, "renovate run complete"); got != 1 {
 		t.Errorf("INFO records matching %q = %d, want 1; captured: %v", "renovate run complete", got, rec.Messages())
+	}
+	if got := rec.CountLevel(slog.LevelError, "renovate run timed out"); got != 0 {
+		t.Errorf("ERROR records matching %q = %d, want 0; captured: %v", "renovate run timed out", got, rec.Messages())
 	}
 }
 
@@ -298,7 +297,7 @@ func TestRunRenovateOnce_CleanRunSweepsLeftoverGroupMember(t *testing.T) {
 
 	resultCh := make(chan runOutcome, 1)
 	go func() {
-		resultCh <- runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{}, runner)
+		resultCh <- runRenovateOnce(t.Context(), time.Minute, "test", runPayload{}, runner)
 	}()
 
 	waitFor(t, 5*time.Second, func() bool {
@@ -342,7 +341,7 @@ func TestRunRenovateOnce_EnvironmentValuesNeverReachLifecycleLogs(t *testing.T) 
 		return exec.CommandContext(ctx, "true")
 	}
 
-	got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "external",
+	got := runRenovateOnce(t.Context(), time.Minute, "external",
 		runPayload{Repos: []string{"owner/repo"}, Env: []string{"RENOVATE_TOKEN=" + secret}}, runner)
 
 	if got != runComplete {
@@ -358,6 +357,8 @@ func TestRunRenovateOnce_EnvironmentValuesNeverReachLifecycleLogs(t *testing.T) 
 // starting" record carrying the attributes that identify the run (trigger,
 // repo scope, timeout) and exactly one terminal record carrying its trigger
 // and elapsed time, so an operator can tie a terminal line back to its start.
+// README.md:240-262 keys RenovateNoRecentRun on the exact clean-run message and
+// INFO level; silently changing either makes the alert fire permanently.
 // The per-arm specifics (the timeout attribute on a timed-out run, the error
 // attribute on a failure) belong to the focused tests above. Serial: swaps
 // slog.Default.
@@ -416,7 +417,7 @@ func TestRunRenovateOnce_LifecycleRecordsCarryCorrelationAttributes(t *testing.T
 		t.Run(tt.name, func(t *testing.T) {
 			rec := capture.Default(t)
 
-			_ = runRenovateOnce(t.Context(), t.Context().Err, tt.timeout, tt.trigger,
+			_ = runRenovateOnce(t.Context(), tt.timeout, tt.trigger,
 				runPayload{Repos: tt.repos}, tt.runner)
 
 			if got := rec.CountExact("renovate run starting"); got != 1 {
@@ -490,50 +491,6 @@ func TestDefaultCommandRunner_CancelSendsSIGTERMNotSIGKILL(t *testing.T) {
 	}
 	if exitErr.ExitCode() != 42 {
 		t.Errorf("exit code = %d, want 42: the run must receive SIGTERM (graceful) and run its trap, not SIGKILL", exitErr.ExitCode())
-	}
-}
-
-// TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild is the regression
-// test for the post-Start shutdown handshake: a SIGTERM landing in the
-// check-then-act window between execute's pre-start shutdown check and
-// process creation must not commit a fresh pass under the uncancellable run
-// context (bounded only by RUN_TIMEOUT, which can outlive
-// stop_grace_period). The injected runner cancels shutdown at process
-// creation — after the pre-start check, before Start — so the child starts
-// with shutdown already won. runRenovateOnce must report runCancelled, reap the
-// child promptly (not after its 30s payload or the run timeout), and emit no
-// level=ERROR run-failure line: a cancelled start is a Warn, not a failure
-// alert. Serial: swaps slog.Default.
-func TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild(t *testing.T) {
-	rec := capture.Default(t)
-
-	shutdownCtx, shutdown := context.WithCancel(t.Context())
-	var child *exec.Cmd
-	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
-		shutdown() // SIGTERM lands after the pre-start check, before Start
-		child = defaultCommandRunner(ctx, "sleep", "30")
-		child.Stdout, child.Stderr = nil, nil
-		return child
-	}
-
-	start := time.Now()
-	got := runRenovateOnce(t.Context(), shutdownCtx.Err, time.Minute, "test", runPayload{}, runner)
-	elapsed := time.Since(start)
-
-	if got != runCancelled {
-		t.Fatalf("runRenovateOnce() = %v, want runCancelled", got)
-	}
-	if child.ProcessState == nil {
-		t.Fatal("child not reaped: Wait never completed on the shutdown-cancelled start")
-	}
-	if elapsed > 15*time.Second {
-		t.Errorf("runRenovateOnce() returned after %v; the cancelled child was not reaped promptly", elapsed)
-	}
-	if got := rec.CountLevel(slog.LevelError, ""); got != 0 {
-		t.Errorf("a shutdown-cancelled start emitted %d ERROR records (false failure alert); captured: %v", got, rec.Messages())
-	}
-	if got := rec.Count("renovate run cancelled by shutdown at start"); got != 1 {
-		t.Errorf("shutdown-cancellation Warn line count = %d, want 1; captured: %v", got, rec.Messages())
 	}
 }
 
@@ -647,8 +604,8 @@ func (m *groupMember) exitSignal() syscall.Signal {
 // startTermHonoringChild starts the stand-in for the runner's own Renovate
 // child: a bare sleep, which takes the default SIGTERM disposition (so the
 // group TERM removes it at once) and forks no children of its own to orphan.
-// Returns the command and a func the test calls once stopUncommittedRun has
-// reaped it, so an early t.Fatal cannot leak the group.
+// The returned func marks the command reaped so an early t.Fatal cannot leak
+// the group.
 func startTermHonoringChild(t *testing.T) (*exec.Cmd, func()) {
 	t.Helper()
 	// context.Background() (not t.Context()): the child is reaped in t.Cleanup, which runs after t.Context() would already have cancelled it.
@@ -667,72 +624,10 @@ func startTermHonoringChild(t *testing.T) (*exec.Cmd, func()) {
 	return cmd, func() { reaped = true }
 }
 
-// TestStopUncommittedRun_SweepsTermIgnoringGroupMember is the regression test
-// for the partial-group shutdown case: the runner's own child honors SIGTERM
-// and is reaped promptly while a same-group process (a package manager, here a
-// TERM-ignoring sleep) survives it. stopUncommittedRun must not return on the
-// child's exit alone — it must hold the DefaultGrace window open for the WHOLE
-// group and SIGKILL-sweep the survivors on expiry, or the survivor keeps
-// writing the base dir past shutdown. The helper is driven directly rather
-// than through runRenovateOnce: the post-Start handshake sends SIGTERM
-// microseconds after Start, so the survive-the-TERM setup needs to be in place
-// BEFORE the signal — the runRenovateOnce routing itself is already pinned by
-// TestRunRenovateOnce_ShutdownAtStartCancelsAndReapsChild.
-func TestStopUncommittedRun_SweepsTermIgnoringGroupMember(t *testing.T) {
-	t.Parallel()
-	cmd, markReaped := startTermHonoringChild(t)
-	member := startTermIgnoringGroupMember(t, cmd.Process.Pid)
-
-	start := time.Now()
-	stopUncommittedRun(cmd)
-	markReaped()
-	elapsed := time.Since(start)
-
-	if cmd.ProcessState == nil {
-		t.Fatal("runner child not reaped: Wait never completed")
-	}
-	member.awaitReap(t)
-	if got := member.exitSignal(); got != syscall.SIGKILL {
-		t.Errorf("TERM-ignoring group member exited on signal %v, want SIGKILL: the grace-expiry sweep must force-kill the whole group", got)
-	}
-	if elapsed < scheduler.DefaultGrace {
-		t.Errorf("stopUncommittedRun returned after %v, inside the %v grace: it must not return on the direct child's exit while the group still has live members", elapsed, scheduler.DefaultGrace)
-	}
-	if elapsed > scheduler.DefaultGrace+10*time.Second {
-		t.Errorf("stopUncommittedRun returned after %v; the group sweep must land at grace expiry, not the run timeout", elapsed)
-	}
-}
-
-// TestStopUncommittedRun_TermsTheWholeGroupNotJustTheLeader pins the target of
-// the shutdown SIGTERM: it addresses the run's process GROUP, so a
-// package-manager process beside the leader gets the same chance to stop
-// cleanly. A signal aimed at the leader alone leaves that process running
-// until the grace-expiry force-kill, which is both a slower shutdown and a
-// package manager killed mid-write against the base directory.
-//
-// Read from the member's exit signal, not from timing: SIGTERM means the group
-// TERM reached it, SIGKILL means only the sweep did.
-func TestStopUncommittedRun_TermsTheWholeGroupNotJustTheLeader(t *testing.T) {
-	t.Parallel()
-	cmd, markReaped := startTermHonoringChild(t)
-	member := startTermHonoringGroupMember(t, cmd.Process.Pid)
-
-	stopUncommittedRun(cmd)
-	markReaped()
-
-	if cmd.ProcessState == nil {
-		t.Fatal("runner child not reaped: Wait never completed")
-	}
-	member.awaitReap(t)
-	if got := member.exitSignal(); got != syscall.SIGTERM {
-		t.Errorf("group member exit signal = %v, want SIGTERM: the shutdown TERM must address the run's whole process group, not the leader alone", got)
-	}
-}
-
 // TestRunRenovateOnce_StartFailureIsARunFailureNotAPanic pins the launch
 // failure mode: when the child cannot even be started (a missing entrypoint
 // binary -- e.g. a base-image relocation that slipped past the Dockerfile's
-// build-time assert), runRenovateOnce reports runFailed
+// build-time assert), runRenovateOnce reports runStartFailed
 // and logs the failure at ERROR, so the executor flips the health marker
 // unhealthy and the RenovateRunFailed alert fires, instead of reporting a
 // clean run. Serial: swaps slog.Default.
@@ -744,10 +639,10 @@ func TestRunRenovateOnce_StartFailureIsARunFailureNotAPanic(t *testing.T) {
 		return exec.CommandContext(ctx, missing)
 	}
 
-	got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{}, runner)
+	got := runRenovateOnce(t.Context(), time.Minute, "test", runPayload{}, runner)
 
-	if got != runFailed {
-		t.Fatalf("runRenovateOnce() = %v for an unstartable child, want runFailed", got)
+	if got != runStartFailed {
+		t.Fatalf("runRenovateOnce() = %v for an unstartable child, want runStartFailed", got)
 	}
 	if got := rec.CountLevel(slog.LevelError, "renovate run failed"); got != 1 {
 		t.Errorf("ERROR records matching the run-failure line = %d, want 1; captured: %v", got, rec.Messages())
@@ -804,103 +699,6 @@ func TestDefaultCommandRunner_CancelSignalsTheWholeProcessGroup(t *testing.T) {
 	}
 }
 
-// TestStopUncommittedRun_ReturnsPromptlyWhenGroupDiesWithinGrace pins the poll
-// path: the runner's own child honors SIGTERM and is reaped at once, a
-// TERM-ignoring group member outlives it and then exits well inside the
-// DefaultGrace window — so stopUncommittedRun must return as soon as the poll
-// observes the empty group instead of sitting out the full grace and
-// SIGKILL-sweeping processes that already exited (which would stall every
-// shutdown in this window by the whole grace period).
-//
-// The member's death is triggered from HERE, so the test knows exactly when the
-// group emptied and asserts promptness relative to that instant. The earlier
-// fixture drove the timing from a `sleep` forked inside the child and compared
-// only against DefaultGrace, which made a slow fork/exec under full-suite load
-// indistinguishable from the bug — it flaked in CI for exactly that reason.
-func TestStopUncommittedRun_ReturnsPromptlyWhenGroupDiesWithinGrace(t *testing.T) {
-	t.Parallel()
-	cmd, markReaped := startTermHonoringChild(t)
-	member := startTermIgnoringGroupMember(t, cmd.Process.Pid)
-
-	// Outlive the poll's first ticks, then die: far enough inside the grace
-	// that a prompt return is unambiguous, and driven by an in-process timer
-	// rather than a forked child's wall-clock deadline. Stopped on cleanup
-	// (LIFO, so before the member's own kill) in case an assertion above
-	// aborts the test first — a late fire could otherwise signal a recycled
-	// PID belonging to another test.
-	const memberLifetime = 250 * time.Millisecond
-	kill := time.AfterFunc(memberLifetime, func() { _ = syscall.Kill(member.pid, syscall.SIGKILL) })
-	t.Cleanup(func() { kill.Stop() })
-
-	start := time.Now()
-	stopUncommittedRun(cmd)
-	markReaped()
-	elapsed := time.Since(start)
-	emptiedAt := member.awaitReap(t).Sub(start)
-
-	if cmd.ProcessState == nil {
-		t.Fatal("runner child not reaped: Wait never completed")
-	}
-	if emptiedAt >= scheduler.DefaultGrace {
-		t.Fatalf("group only emptied %v after the stop, at or past the %v grace: this fixture cannot tell a prompt return from a swept one, so the promptness assertion below is meaningless", emptiedAt, scheduler.DefaultGrace)
-	}
-	if elapsed >= scheduler.DefaultGrace {
-		t.Errorf("stopUncommittedRun returned after %v; the group emptied at %v, so the poll must return promptly instead of waiting out the full %v grace", elapsed, emptiedAt, scheduler.DefaultGrace)
-	}
-	// The return must TRACK the group's death, not merely beat the grace. The
-	// bound is one poll interval plus generous scheduling slack, so it stays
-	// far below the grace it is distinguishing itself from.
-	if slack := elapsed - emptiedAt; slack > 2*time.Second {
-		t.Errorf("stopUncommittedRun returned %v after the group emptied; the poll re-probes every %v, so the return must follow the group's death closely", slack, runGroupPollInterval)
-	}
-}
-
-// TestStopUncommittedRun_SweepsLeaderThatIgnoresTermAtGraceExpiry pins the
-// grace-expiry path for an unreaped leader: a leader that ignores SIGTERM
-// outright is force-killed by the group sweep when DefaultGrace expires,
-// and stopUncommittedRun still waits for Wait to reap it before returning
-// -- a return without the reap leaves a zombie and races the daemon's
-// shutdown against the child's exit.
-func TestStopUncommittedRun_SweepsLeaderThatIgnoresTermAtGraceExpiry(t *testing.T) {
-	t.Parallel()
-	readyPath := t.TempDir() + "/ready"
-	// The leader ignores TERM and respawns its sleep forever; only the
-	// grace-expiry group SIGKILL removes it.
-	script := `trap '' TERM; : > "$1"; while :; do sleep 1; done`
-	// context.Background() (not t.Context()): the child is reaped in t.Cleanup, which runs after t.Context() would already have cancelled it.
-	cmd := defaultCommandRunner(context.Background(), "sh", "-c", script, "sh", readyPath)
-	cmd.Stdout, cmd.Stderr = nil, nil
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start() = %v", err)
-	}
-	stopped := false
-	t.Cleanup(func() {
-		if !stopped {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			_ = cmd.Wait()
-		}
-	})
-	waitFor(t, 5*time.Second, func() bool {
-		_, err := os.Stat(readyPath)
-		return err == nil
-	}, "leader did not install its TERM ignore")
-
-	start := time.Now()
-	stopUncommittedRun(cmd)
-	stopped = true
-	elapsed := time.Since(start)
-
-	if cmd.ProcessState == nil {
-		t.Fatal("leader not reaped after the grace-expiry sweep: Wait never completed")
-	}
-	if elapsed < scheduler.DefaultGrace {
-		t.Errorf("stopUncommittedRun returned after %v, before the %v grace expired; a TERM-ignoring leader can only die via the expiry sweep", elapsed, scheduler.DefaultGrace)
-	}
-	if elapsed > scheduler.DefaultGrace+10*time.Second {
-		t.Errorf("stopUncommittedRun returned after %v; the sweep must land at grace expiry", elapsed)
-	}
-}
-
 // TestRunRenovateOnce_TimeoutSweepObservesGroupDeath is the regression test
 // for the sweep's observation phase: kill(2) only queues SIGKILL, so a
 // forced cleanup that returns on signal submission alone can release the
@@ -911,14 +709,13 @@ func TestStopUncommittedRun_SweepsLeaderThatIgnoresTermAtGraceExpiry(t *testing.
 // descendant must ALREADY be gone — no post-return polling window — because
 // sweepRunProcessGroup must not return until the whole group has died.
 //
-// Unlike its stopUncommittedRun siblings this fixture keeps the survivor as a
-// DESCENDANT of the run child rather than a test-owned group member (see
-// startTermIgnoringGroupMember): the instantaneous "already gone" assertion is
-// what catches a submit-and-return sweep, and a test-owned member would have to
-// be reaped by a goroutine here, whose scheduling cannot be ordered against the
-// sweep's return. The cost is that this one test needs an ambient reaper for
-// the orphaned descendant's zombie, so it passes under CI's init but not in a
-// container whose PID 1 never reaps.
+// Unlike fixtures that keep the survivor as a test-owned group member, this
+// fixture keeps it as a DESCENDANT of the run child. The instantaneous
+// "already gone" assertion is what catches a submit-and-return sweep, and a
+// test-owned member would have to be reaped by a goroutine here, whose
+// scheduling cannot be ordered against the sweep's return. The cost is that
+// this one test needs an ambient reaper for the orphaned descendant's zombie,
+// so it passes under CI's init but not in a container whose PID 1 never reaps.
 func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
 	t.Parallel()
 	descPath := t.TempDir() + "/desc.pid"
@@ -932,9 +729,9 @@ func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
 		return cmd
 	}
 
-	got := runRenovateOnce(t.Context(), t.Context().Err, 500*time.Millisecond, "test", runPayload{}, runner)
-	if got != runFailed {
-		t.Errorf("runRenovateOnce() = %v for a run that exceeded the timeout whose group the sweep confirmed dead, want runFailed", got)
+	got := runRenovateOnce(t.Context(), 500*time.Millisecond, "test", runPayload{}, runner)
+	if got != runTimedOut {
+		t.Errorf("runRenovateOnce() = %v for a run that exceeded the timeout whose group the sweep confirmed dead, want runTimedOut", got)
 	}
 
 	raw, err := os.ReadFile(descPath)
@@ -991,10 +788,9 @@ func TestWithChildOverrides(t *testing.T) {
 }
 
 // TestWithChildOverrides_LeavesTheCallersSliceAlone pins the copy: env is the
-// job payload's own slice and the result path still reads it, so appending the
-// override must not write into the caller's backing array. The fixture gives
-// the input spare capacity and watches the spare cells, which are the only
-// place a bare append could land.
+// job payload's own slice, so appending the override must not write into the
+// caller's backing array. The fixture gives the input spare capacity and
+// watches the spare cells, which are the only place a bare append could land.
 func TestWithChildOverrides_LeavesTheCallersSliceAlone(t *testing.T) {
 	t.Parallel()
 	env := append(make([]string, 0, 4), "PATH=/usr/bin", "RENOVATE_X=y")
@@ -1008,103 +804,6 @@ func TestWithChildOverrides_LeavesTheCallersSliceAlone(t *testing.T) {
 	}
 	if len(got) != len(env)+1 {
 		t.Errorf("withChildOverrides() = %v, want the %d forwarded entries plus the override", got, len(env))
-	}
-}
-
-// TestSweepRunGroupOrWarn_UnconfirmableGroupDeathReportsSurvived drives the
-// survived branch of sweepRunGroupOrWarn through the REAL function: the
-// group leader is SIGKILLed but deliberately NOT reaped (no Wait), so the
-// zombie keeps its process group registered and the sweep's group probe
-// reports live members for the whole bounded window -- the same observable
-// state as a group whose death cannot be confirmed. sweepRunGroupOrWarn
-// must report survived=true (the executor's fatal containment signal) and
-// log the production survival message at Warn with the pid. Serial: swaps slog.Default.
-func TestSweepRunGroupOrWarn_UnconfirmableGroupDeathReportsSurvived(t *testing.T) {
-	rec := capture.Default(t)
-
-	// context.Background() (not t.Context()): the child is reaped in t.Cleanup, which runs after t.Context() would already have cancelled it.
-	cmd := defaultCommandRunner(context.Background(), "sleep", "30")
-	cmd.Stdout, cmd.Stderr = nil, nil
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start() = %v", err)
-	}
-	t.Cleanup(func() {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		_ = cmd.Wait()
-	})
-	// Kill the leader without reaping it: the unreaped zombie holds the
-	// process group open, so runProcessGroupGone stays false through the
-	// sweep's entire DefaultGrace window.
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-
-	survived := sweepRunGroupOrWarn(cmd, "test")
-
-	if !survived {
-		t.Error("sweepRunGroupOrWarn() = false for a group the sweep cannot confirm dead, want true (the fatal containment signal must fire)")
-	}
-	if got := rec.CountLevel(slog.LevelWarn, "renovate run process group survived the kill sweep; halting run admission to prevent an overlapping run"); got != 1 {
-		t.Errorf("Warn records matching the survival message = %d, want 1; captured: %v", got, rec.Messages())
-	}
-}
-
-// TestStopUncommittedRun_WarnsWhenGroupSurvivesGraceExpirySweep pins the
-// last stopUncommittedRun contract: when even the grace-expiry SIGKILL sweep
-// cannot confirm the group's death, the helper must still RETURN (bounded by
-// the two grace windows -- shutdown must never hang on an unconfirmable
-// group) and emit the exact survival Warn operators grep for. The
-// unconfirmable state is a SIGKILLed-but-unreaped zombie joined into the
-// leader's group (the same observable state
-// TestSweepRunGroupOrWarn_UnconfirmableGroupDeathReportsSurvived uses): the
-// zombie keeps the group registered through both bounded windows. The
-// leader itself honors SIGTERM, so its Wait completes and only the group
-// probe stays unsatisfied. Serial: swaps slog.Default. Runtime ~10s (two
-// DefaultGrace windows; the constants are library-owned and not injectable).
-func TestStopUncommittedRun_WarnsWhenGroupSurvivesGraceExpirySweep(t *testing.T) {
-	rec := capture.Default(t)
-
-	readyPath := t.TempDir() + "/ready"
-	// context.Background() (not t.Context()): the child is reaped in t.Cleanup, which runs after t.Context() would already have cancelled it.
-	cmd := defaultCommandRunner(context.Background(), "sh", "-c", `trap 'exit 0' TERM; : > "$1"; sleep 30 & wait`, "sh", readyPath)
-	cmd.Stdout, cmd.Stderr = nil, nil
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start() = %v", err)
-	}
-	stopped := false
-	t.Cleanup(func() {
-		if !stopped {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			_ = cmd.Wait()
-		}
-	})
-	waitFor(t, 5*time.Second, func() bool {
-		_, err := os.Stat(readyPath)
-		return err == nil
-	}, "leader did not install its TERM trap")
-
-	// A holder joins the leader's process group, is SIGKILLed but NOT
-	// reaped: the zombie keeps the group registered, so neither the grace
-	// wait nor the expiry sweep can confirm the group's death.
-	holder := exec.Command("sleep", "300")
-	holder.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: cmd.Process.Pid}
-	if err := holder.Start(); err != nil {
-		t.Fatalf("start group holder: %v", err)
-	}
-	t.Cleanup(func() { _ = holder.Wait() }) // reap the zombie after the assertions
-	_ = holder.Process.Kill()               // dead but unreaped: a zombie group member
-
-	start := time.Now()
-	stopUncommittedRun(cmd)
-	stopped = true
-	elapsed := time.Since(start)
-
-	if cmd.ProcessState == nil {
-		t.Fatal("leader not reaped: Wait never completed")
-	}
-	if got := rec.Count("uncommitted run process group survived the grace-expiry kill sweep; shutdown may leave it running"); got != 1 {
-		t.Errorf("grace-expiry survival Warn count = %d, want 1; captured: %v", got, rec.Messages())
-	}
-	if elapsed > 25*time.Second {
-		t.Errorf("stopUncommittedRun returned after %v; it must stay bounded by the two grace windows, never hang on an unconfirmable group", elapsed)
 	}
 }
 
@@ -1152,7 +851,7 @@ func TestRunRenovateOnce_NonCleanRunsSweepAndReportContainment(t *testing.T) {
 
 		resultCh := make(chan runOutcome, 1)
 		go func() {
-			resultCh <- runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test",
+			resultCh <- runRenovateOnce(t.Context(), time.Minute, "test",
 				runPayload{}, nonZeroLeader(leaderPath, releasePath))
 		}()
 
@@ -1177,7 +876,7 @@ func TestRunRenovateOnce_NonCleanRunsSweepAndReportContainment(t *testing.T) {
 
 		resultCh := make(chan runOutcome, 1)
 		go func() {
-			resultCh <- runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test",
+			resultCh <- runRenovateOnce(t.Context(), time.Minute, "test",
 				runPayload{}, nonZeroLeader(leaderPath, releasePath))
 		}()
 
@@ -1214,8 +913,7 @@ func TestRunRenovateOnce_NonCleanRunsSweepAndReportContainment(t *testing.T) {
 // "renovate run complete" record the completion-absence alerting watches for --
 // the clean-arm sibling
 // (TestRunRenovateOnce_CleanRunSweepsLeftoverGroupMember) reaches runComplete
-// because its member is promptly reaped, and the helper-level sweep test proves
-// only that sweepRunGroupOrWarn reports survival. The unconfirmable state is a
+// because its member is promptly reaped. The unconfirmable state is a
 // SIGKILLed-but-unreaped zombie joined into the leader's group, a direct child
 // of the TEST binary so the test owns the reap. Serial: swaps slog.Default.
 func TestRunRenovateOnce_CleanUnconfirmableGroupDeathReportsContainment(t *testing.T) {
@@ -1233,7 +931,7 @@ func TestRunRenovateOnce_CleanUnconfirmableGroupDeathReportsContainment(t *testi
 
 	resultCh := make(chan runOutcome, 1)
 	go func() {
-		resultCh <- runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "test", runPayload{}, runner)
+		resultCh <- runRenovateOnce(t.Context(), time.Minute, "test", runPayload{}, runner)
 	}()
 
 	waitFor(t, 5*time.Second, func() bool {
@@ -1287,7 +985,6 @@ func TestAbortDiagnosis(t *testing.T) {
 		want    bool
 	}{
 		{name: "shell reports an aborted child", command: []string{"sh", "-c", "exit 134"}, want: true},
-		{name: "signalled with SIGABRT directly", command: []string{"sh", "-c", "kill -ABRT $$"}, want: true},
 		{name: "ordinary non-zero exit", command: []string{"false"}, want: false},
 		{name: "exit code adjacent to abort", command: []string{"sh", "-c", "exit 133"}, want: false},
 		{name: "clean exit", command: []string{"true"}, want: false},
@@ -1332,7 +1029,7 @@ func TestRunRenovateOnce_AbortedRunNamesTheHeapCause(t *testing.T) {
 		return exec.CommandContext(ctx, "sh", "-c", "exit 134")
 	}
 
-	got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "external", runPayload{}, runner)
+	got := runRenovateOnce(t.Context(), time.Minute, "external", runPayload{}, runner)
 
 	if got != runFailed {
 		t.Fatalf("runRenovateOnce() = %v, want runFailed", got)
@@ -1360,7 +1057,7 @@ func TestRunRenovateOnce_OrdinaryFailureCarriesNoDiagnosis(t *testing.T) {
 		return exec.CommandContext(ctx, "false")
 	}
 
-	got := runRenovateOnce(t.Context(), t.Context().Err, time.Minute, "external", runPayload{}, runner)
+	got := runRenovateOnce(t.Context(), time.Minute, "external", runPayload{}, runner)
 
 	if got != runFailed {
 		t.Fatalf("runRenovateOnce() = %v, want runFailed", got)

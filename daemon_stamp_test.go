@@ -219,27 +219,28 @@ func TestExecutor_RecordsScheduledRunOutcomes(t *testing.T) {
 	}
 }
 
-// TestExecutor_CancelledRunRecordsNothing pins the cancellation path: a run
-// reaped by the shutdown handshake is not a completed run, so it must leave
-// the last-run record untouched — the next boot fires the startup run.
-func TestExecutor_CancelledRunRecordsNothing(t *testing.T) {
-	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	ctx := t.Context()
+// TestExecutor_ScheduledPreflightFailureRecordsFailure pins the scheduled-run
+// record when base-directory validation fails before Renovate starts.
+func TestExecutor_ScheduledPreflightFailureRecordsFailure(t *testing.T) {
+	badBaseDir := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(badBaseDir, []byte("x"), 0o600); err != nil {
+		t.Fatalf("setup base-dir file: %v", err)
+	}
+
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
-	d.runOnce = func(context.Context, stopRequested, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
-		return runCancelled
-	}
+	j := newJob("interval", nil, []string{"RENOVATE_BASE_DIR=" + badBaseDir})
+	d.execute(t.Context(), t.Context().Err, j)
 
-	j := newJob("interval", nil, nil)
-	d.execute(context.WithoutCancel(ctx), ctx.Err, j)
-
-	select {
-	case <-j.Result():
-	default:
-		t.Fatal("no result delivered for the cancelled run")
+	out := <-j.Result()
+	if out.OK {
+		t.Error("preflight outcome ok = true, want false")
 	}
-	if _, known := scheduler.NewStamp(d.stampPath).Last(); known {
-		t.Error("cancelled run wrote a last-run record, want none (a cancelled run is not a completed run)")
+	rec, known := scheduler.NewStamp(d.stampPath).Last()
+	if !known {
+		t.Fatal("stamp record unreadable after a scheduled preflight failure, want a failed record")
+	}
+	if rec.OK {
+		t.Error("stamp record ok = true after a scheduled preflight failure, want false")
 	}
 }
 
@@ -251,7 +252,7 @@ func TestExecutor_ContainmentRecordsFailure(t *testing.T) {
 	ctx := t.Context()
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
 	seedStamp(t, d.stampPath, time.Now(), "ok") // a fresh success the halt must displace
-	d.runOnce = func(context.Context, stopRequested, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
+	d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
 		return runContained
 	}
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -22,16 +23,13 @@ const (
 	queueCapacity         = 16
 )
 
-type runOnceFunc func(ctx context.Context, stopping stopRequested, timeout time.Duration, trig string, p runPayload, newCmd scheduler.CommandRunner) runOutcome
-
 type daemon struct {
 	queue     *trigger.Queue[runPayload]
 	marker    *health.Marker
 	health    *health.Latch
-	verifier  *baseDirVerifier
 	stamp     *scheduler.Stamp
 	newCmd    scheduler.CommandRunner
-	runOnce   runOnceFunc
+	runOnce   func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome
 	fatal     chan error
 	stampPath string
 	timeout   time.Duration
@@ -42,12 +40,18 @@ type daemon struct {
 func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandRunner) error {
 	warnIfRootlessCacheUnwritable()
 
+	ln, err := trigger.Listen(socketPath)
+	if err != nil {
+		slog.Error("cannot bind trigger socket", "path", socketPath, "error", err)
+		return err
+	}
+
 	marker := health.NewMarker(healthMarkerPath)
 	marker.Set(false)
 
-	verifier := newBaseDirVerifier()
-	if err := verifier.verify(ctx); err != nil {
+	if err = verifyBaseDir(ctx); err != nil {
 		logBaseDirError(baseDir(), err)
+		_ = ln.Close()
 		return err
 	}
 
@@ -55,38 +59,32 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	timeout := loadRunTimeout()
 
 	stamp := scheduler.NewStamp(stampPath())
-	due := true
+	var remaining time.Duration
 	if scheduleEnabled {
-		due = stamp.Due(interval, time.Now(), scheduler.RetryFailed)
-	}
-
-	ln, err := trigger.Listen(socketPath)
-	if err != nil {
-		slog.Error("cannot bind trigger socket", "path", socketPath, "error", err)
-		return err
+		remaining = stamp.Remaining(interval, time.Now(), scheduler.RetryFailed)
 	}
 
 	d := &daemon{
 		queue:     trigger.NewQueue[runPayload](queueCapacity),
 		marker:    marker,
 		health:    health.NewLatch(marker),
-		verifier:  verifier,
 		stamp:     stamp,
 		newCmd:    newCmd,
+		runOnce:   runRenovateOnce,
 		stampPath: stampPath(),
 		timeout:   timeout,
 		fatal:     make(chan error, 1),
 	}
-	return d.run(ctx, ln, socketPath, interval, scheduleEnabled, due)
+	return d.run(ctx, ln, socketPath, interval, scheduleEnabled, remaining)
 }
 
-func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, interval time.Duration, scheduleEnabled, due bool) error {
+func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, interval time.Duration, scheduleEnabled bool, remaining time.Duration) error {
+	due := remaining == 0
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, abort := context.WithCancelCause(ctx)
 	defer abort(nil)
 
-	defer func() { _ = os.Remove(socketPath) }()
 	defer d.marker.Cleanup()
 	// Not due means a fresh successful run survived the restart, so booting healthy is honest.
 	d.health.Set(!scheduleEnabled || !due)
@@ -108,7 +106,7 @@ func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, in
 	}
 	srv.Serve(ln)
 
-	tickerDone := startTicker(ctx, d, interval, scheduleEnabled, due)
+	tickerDone := startTicker(ctx, d, interval, scheduleEnabled, remaining)
 
 	if scheduleEnabled {
 		slog.Info("container started", "mode", "built-in", "interval", interval,
@@ -148,7 +146,7 @@ func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, in
 	return fatalErr
 }
 
-func startTicker(ctx context.Context, d *daemon, interval time.Duration, enabled, due bool) <-chan struct{} {
+func startTicker(ctx context.Context, d *daemon, interval time.Duration, enabled bool, remaining time.Duration) <-chan struct{} {
 	done := make(chan struct{})
 	if !enabled {
 		close(done)
@@ -156,7 +154,7 @@ func startTicker(ctx context.Context, d *daemon, interval time.Duration, enabled
 	}
 	go func() {
 		defer close(done)
-		if due && ctx.Err() == nil {
+		if remaining == 0 {
 			d.tick("startup")
 		}
 		scheduler.RunLoop(ctx, func(context.Context) {
@@ -166,7 +164,7 @@ func startTicker(ctx context.Context, d *daemon, interval time.Duration, enabled
 			FireOnStart: false,
 			// Phase the first tick from the recorded previous run, so a
 			// restart neither adds a run nor delays the cadence.
-			FirstDelay: d.stamp.Remaining(interval, time.Now(), scheduler.RetryFailed),
+			FirstDelay: remaining,
 		})
 	}()
 	return done
@@ -187,9 +185,11 @@ func (d *daemon) runJobs(shutdownCtx context.Context) {
 	for j := range d.queue.Jobs() {
 		switch {
 		case d.halted:
-			cancelJobForContainment(j)
+			slog.Warn("run cancelled: a prior run's process group survived the kill sweep",
+				"trigger", j.Trigger, "repos", j.Payload.Repos)
+			j.Finish(trigger.Outcome{OK: false, Reason: containmentLostReason})
 		case shutdownCtx.Err() != nil:
-			cancelJobForShutdown(j, "queued")
+			cancelJobForShutdown(j, "queued", 0)
 		default:
 			d.execute(runCtx, shutdownCtx.Err, j)
 		}
@@ -198,47 +198,34 @@ func (d *daemon) runJobs(shutdownCtx context.Context) {
 
 const shutdownCancelReason = trigger.CancelledReason
 
-func cancelJobForShutdown(j *trigger.Job[runPayload], stage string) {
+func cancelJobForShutdown(j *trigger.Job[runPayload], stage string, elapsed time.Duration) {
 	slog.Warn("run cancelled by shutdown", "stage", stage, "trigger", j.Trigger, "repos", j.Payload.Repos)
-	j.Finish(trigger.Outcome{OK: false, Reason: shutdownCancelReason})
+	j.Finish(trigger.Outcome{OK: false, Duration: elapsed, Reason: shutdownCancelReason})
 }
 
-func cancelJobForContainment(j *trigger.Job[runPayload]) {
-	slog.Warn("run cancelled: a prior run's process group survived the kill sweep",
-		"trigger", j.Trigger, "repos", j.Payload.Repos)
-	j.Finish(trigger.Outcome{OK: false, Reason: containmentLostReason})
-}
-
-func (d *daemon) execute(runCtx context.Context, stopping stopRequested, j *trigger.Job[runPayload]) {
+func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigger.Job[runPayload]) {
 	j.Start()
 	start := time.Now()
 
 	dir := baseDirForEnv(j.Payload.Env)
-	if err := d.verifier.verifyAt(runCtx, dir); err != nil {
+	if err := verifyBaseDirAt(runCtx, dir); err != nil {
 		logBaseDirError(dir, err)
 		d.health.Set(false)
+		d.recordScheduled(j.Trigger, false)
 		j.Finish(trigger.Outcome{OK: false, Duration: time.Since(start), Reason: "base directory preflight failed"})
 		return
 	}
 
 	if stopping() != nil {
-		cancelJobForShutdown(j, "preflight")
+		cancelJobForShutdown(j, "preflight", time.Since(start))
 		return
 	}
 
-	runOnce := d.runOnce
-	if runOnce == nil {
-		runOnce = runRenovateOnce
-	}
-	outcome := runOnce(runCtx, stopping, d.timeout, j.Trigger, j.Payload, d.newCmd)
-	if outcome == runCancelled {
-		j.Finish(trigger.Outcome{OK: false, Reason: shutdownCancelReason})
-		return
-	}
+	outcome := d.runOnce(runCtx, d.timeout, j.Trigger, j.Payload, d.newCmd)
 	if outcome == runContained {
 		d.halted = true
 		d.health.Set(false)
-		// After a halt the next boot must treat the schedule as due.
+		// A contained scheduled run leaves the next boot due.
 		d.recordScheduled(j.Trigger, false)
 		slog.Error("halting run admission: renovate run process group survived the kill sweep",
 			"trigger", j.Trigger)
@@ -249,7 +236,18 @@ func (d *daemon) execute(runCtx context.Context, stopping stopRequested, j *trig
 	ok := outcome == runComplete
 	d.health.Set(ok)
 	d.recordScheduled(j.Trigger, ok)
-	j.Finish(trigger.Outcome{OK: ok, Duration: time.Since(start)})
+	j.Finish(trigger.Outcome{OK: ok, Duration: time.Since(start), Reason: failureReason(outcome, d.timeout)})
+}
+
+func failureReason(outcome runOutcome, timeout time.Duration) string {
+	switch outcome {
+	case runStartFailed:
+		return "failed: renovate could not be started (see the container log stream)"
+	case runTimedOut:
+		return fmt.Sprintf("failed: run exceeded RUN_TIMEOUT (%s)", timeout)
+	default:
+		return ""
+	}
 }
 
 // recordScheduled persists a scheduled run's outcome for the next boot's

@@ -28,7 +28,7 @@ func runClient(socketPath string, repos []string) int {
 		}
 	})
 	switch {
-	case err != nil && ctx.Err() != nil:
+	case errors.Is(err, context.Canceled):
 		if accepted {
 			slog.Warn("interrupted while waiting for the run; the run the daemon accepted continues there")
 		} else {
@@ -55,7 +55,7 @@ func finishResult(ev trigger.Event, repos []string) int {
 		slog.Info("triggered run complete", "repos", repos, "duration_ms", ev.DurationMs)
 		return 0
 	}
-	reason := cmp.Or(ev.Reason, "renovate exited non-zero (see the container log stream)")
+	reason := cmp.Or(ev.Reason, "the daemon reported no cause (see the container log stream)")
 	slog.Error("triggered run failed", "repos", repos, "duration_ms", ev.DurationMs, "reason", reason)
 	return 1
 }
