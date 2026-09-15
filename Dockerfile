@@ -11,7 +11,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /docker-renovate-scheduler .
 
-FROM renovate/renovate:44.90.2@sha256:7fbccea36c60ef12134d7d90ca76b6169978088443343c92dbb71b934d5c8bd9
+FROM renovate/renovate:44.90.3@sha256:aba0e1146d259bf2657c034f72ce63597a9f8335acec8084d9f396bc4ba09522
 
 USER root
 
