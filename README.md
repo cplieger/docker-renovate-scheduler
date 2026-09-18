@@ -1,10 +1,6 @@
 # docker-renovate-scheduler
 
-[![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/docker-renovate-scheduler/badges/size.json)](https://github.com/cplieger/docker-renovate-scheduler/pkgs/container/docker-renovate-scheduler)
-![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)
-![base: renovate/renovate](https://img.shields.io/badge/base-renovate%2Frenovate-1A1F6C)
-[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/docker-renovate-scheduler/badges/mutation.json)](https://github.com/cplieger/docker-renovate-scheduler/issues?q=label%3Agremlins-tracker)
-[![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/docker-renovate-scheduler/releases)
+[![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/docker-renovate-scheduler/badges/size.json)](https://github.com/cplieger/docker-renovate-scheduler/pkgs/container/docker-renovate-scheduler) ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue) ![base: renovate/renovate](https://img.shields.io/badge/base-renovate%2Frenovate-1A1F6C) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/docker-renovate-scheduler/badges/mutation.json)](https://github.com/cplieger/docker-renovate-scheduler/issues?q=label%3Agremlins-tracker) [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/docker-renovate-scheduler/releases)
 
 <!-- hub-overview BEGIN -->
 Run [Renovate](https://github.com/renovatebot/renovate) as a resident, always-on container instead of a one-shot job, driven by a built-in interval scheduler **or** an external trigger. A tiny Go wrapper around the official `renovate/renovate` image; structured logs, no metrics, no open ports.
