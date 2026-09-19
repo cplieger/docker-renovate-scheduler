@@ -1,6 +1,6 @@
 #!/bin/sh
 # Copy every linked Go module's license files into the /usr/share/licenses tree of
-# attribution.md section 4. usage: collect-licenses.sh --name IMAGE [--out DIR] [PACKAGE ...]
+# attribution.md section 4. usage: collect-licenses.sh --name IMAGE [--out DIR] [--src DIR] [PACKAGE ...]
 # CANONICAL COPY in cplieger/ci (configs/collect-licenses.sh), synced to each
 # root-Dockerfile repo's scripts/collect-licenses.sh: edit it there, never here.
 # A module with no license file fails the build rather than being skipped, because a
@@ -9,10 +9,15 @@ set -eu
 
 OUT=/out/usr/share/licenses
 NAME=""
+SRC=.
 while [ $# -gt 0 ]; do
   case "$1" in
     --out)
       OUT="${2:?--out needs a directory}"
+      shift 2
+      ;;
+    --src)
+      SRC="${2:?--src needs a module directory}"
       shift 2
       ;;
     --name)
@@ -42,6 +47,8 @@ case "$NAME" in
 esac
 [ $# -gt 0 ] || set -- ./...
 export GOWORK=off
+case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac
+cd "$SRC" || exit 2
 
 modules=0
 files=0
@@ -54,7 +61,8 @@ copy_files() {
   for f in "$1"/*; do
     [ -f "$f" ] || continue
     if [ "$3" = licenses ]; then
-      case "${f##*/}" in
+      case "$(printf '%s' "${f##*/}" | tr '[:lower:]' '[:upper:]')" in
+        *.GO) continue ;;
         LICENSE* | LICENCE* | COPYING* | NOTICE*) ;;
         *) continue ;;
       esac
