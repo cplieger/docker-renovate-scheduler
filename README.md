@@ -305,4 +305,6 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE). The image carries the license text of every bundled component under `/usr/share/licenses/`.
+
+The runtime base is the official `renovate/renovate` image, which packages [Renovate](https://github.com/renovatebot/renovate) under AGPL-3.0. The version and digest that base is pinned to are in the Dockerfile's `FROM` line, and Renovate's license and the corresponding source for that version are in the upstream repository at the matching release tag (`https://github.com/renovatebot/renovate/releases/tag/<version>`). The build applies no patches to Renovate, so this repository's Dockerfile is the complete record of what it adds to that image (the scheduler binary and a Go toolchain) and what it removes from it (the unused `docker` CLI and TypeScript compiler binaries).
