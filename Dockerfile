@@ -10,6 +10,10 @@ COPY *.go ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /docker-renovate-scheduler .
+COPY LICENSE NOTICE ./
+COPY scripts/collect-licenses.sh scripts/
+RUN --mount=type=cache,target=/go/pkg/mod \
+    sh scripts/collect-licenses.sh --name docker-renovate-scheduler .
 
 FROM renovate/renovate:44.103.2@sha256:521370dab3401a6387541da4cb75a60350f497e2d2b2d27131e19f534bd0e871
 
@@ -64,6 +68,7 @@ ARG GOLANG_VERSION=1.27.1
 RUN install-tool golang "${GOLANG_VERSION}"
 
 COPY --chmod=755 --from=go-builder /docker-renovate-scheduler /usr/local/bin/docker-renovate-scheduler
+COPY --from=go-builder /out/usr/share/licenses /usr/share/licenses
 
 USER 12021
 
