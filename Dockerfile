@@ -30,20 +30,9 @@ RUN [ -n "$(find /opt/containerbase -name docker)" ] \
     && [ -z "$(find /opt/containerbase -name docker 2>/dev/null)" ] \
     && test -x /usr/local/sbin/renovate-entrypoint.sh
 
-# TypeScript's native compiler arrives through a types-only peer dependency and
-# nothing at runtime requires it (trace: docker-builds.md); only the binary
-# goes, so module resolution is unchanged. The store path embeds the TypeScript
-# version, hence find plus a pre-check that fails when the base stops shipping it.
-RUN tsc_glob='*/@typescript/typescript-linux-*/lib/tsc' \
-    && store=/usr/local/renovate/node_modules/.pnpm \
-    && [ -n "$(find "$store" -type f -path "$tsc_glob")" ] \
-    && find "$store" -type f -path "$tsc_glob" -delete \
-    && [ -z "$(find "$store" -type f -path "$tsc_glob")" ]
-
 # `renovate --version` exits 0 on a release whose module graph is broken
 # (44.64.0 imported `tar` from a devDependency, renovatebot/renovate#45699);
-# importing the registries fails the build instead, and also catches a strip
-# above breaking module resolution.
+# importing the registries fails the build instead.
 RUN node --input-type=module -e \
     'const dir = "/usr/local/renovate/dist/modules"; \
      for (const m of ["datasource", "manager", "platform", "versioning"]) { \
