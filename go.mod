@@ -3,7 +3,7 @@ module github.com/cplieger/docker-renovate-scheduler
 go 1.27.1
 
 require (
-	github.com/cplieger/atomicfile/v3 v3.1.0
+	github.com/cplieger/atomicfile/v4 v4.0.0
 	github.com/cplieger/envx/v2 v2.0.3
 	github.com/cplieger/health v1.8.0
 	github.com/cplieger/scheduler/v4 v4.2.1
