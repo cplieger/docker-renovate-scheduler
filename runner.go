@@ -123,7 +123,7 @@ type runDiagnosis struct {
 
 // logRunFailure records a failed run, naming a likely cause when the exit
 // status identifies one so the operator reads a remedy instead of a number.
-// The message string is fixed because the README's alerting rules key on it.
+// The message string is fixed because the shipped alert rules key on it.
 func logRunFailure(trig string, durationMs int64, runErr error) {
 	if diag, ok := abortDiagnosis(runErr); ok {
 		slog.Error("renovate run failed",
@@ -151,7 +151,7 @@ func abortDiagnosis(runErr error) (runDiagnosis, bool) {
 		fix: "node sizes its heap from the container memory limit, so raise mem_limit; " +
 			"on a resident deployment also set RENOVATE_X_SQLITE_PACKAGE_CACHE=true, because " +
 			"the file package cache's end-of-run collection grows with the cache. " +
-			"See the README, 'Memory and the package cache'",
+			"See docs/configuration.md, 'Memory and the package cache'",
 	}, true
 }
 
