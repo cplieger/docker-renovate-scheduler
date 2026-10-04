@@ -1,22 +1,24 @@
-# Example compose for docker-renovate-scheduler. See the README for all configuration options and hardening.
+# Example compose for docker-renovate-scheduler. See docs/configuration.md and docs/security.md for all configuration options and hardening.
 services:
   renovate:
     image: ghcr.io/cplieger/docker-renovate-scheduler:latest
     container_name: renovate
     restart: unless-stopped
-    stop_grace_period: 10m  # let an in-flight run drain on stop instead of exit 137; see README "Graceful shutdown"
+    stop_grace_period: 10m  # lets a run in progress finish when the container stops
 
     environment:
-      RUN_INTERVAL: "6h"  # built-in cadence (Go duration); "off" = external trigger; see README "Scheduling modes"
-      LOG_FORMAT: "json"  # Renovate's own knob, not the scheduler's: structured logs for Alloy/Loki; see README "What it does"
-      # Renovate's own config (RENOVATE_*) is passed straight through:
+      RUN_INTERVAL: "6h"  # time between runs, or "off" to wait for your own scheduler
+      LOG_FORMAT: "json"  # Renovate's own setting, for JSON logs a log collector can read
+      # Every RENOVATE_* setting goes to Renovate unchanged.
       RENOVATE_PLATFORM: "github"
-      RENOVATE_AUTODISCOVER: "true"  # or set RENOVATE_REPOSITORIES
-      RENOVATE_TOKEN: "${RENOVATE_TOKEN}"
-      RENOVATE_GITHUB_COM_TOKEN: "${RENOVATE_GITHUB_COM_TOKEN}"  # changelogs + dodge rate limits
-      RENOVATE_PERSIST_REPO_DATA: "true"  # persist /data so runs git fetch, not clone
+      RENOVATE_AUTODISCOVER: "true"  # or list the repositories in RENOVATE_REPOSITORIES
+      RENOVATE_TOKEN: "${RENOVATE_TOKEN}"  # the bot account's token, set in .env
+      RENOVATE_GITHUB_COM_TOKEN: "${RENOVATE_GITHUB_COM_TOKEN}"  # a github.com token for changelogs and rate limits, set in .env
+      RENOVATE_PERSIST_REPO_DATA: "true"  # later runs fetch the repositories instead of cloning them again
       RENOVATE_REPOSITORY_CACHE: "enabled"
-      RENOVATE_X_SQLITE_PACKAGE_CACHE: "true"  # bounded package cache for an always-on container; see README "Memory and the package cache"
+      RENOVATE_X_SQLITE_PACKAGE_CACHE: "true"  # keeps the package cache from growing until runs fail
 
     volumes:
-      - "./data:/data"  # persist clones, caches + the last-run record; create ./data owned by UID 12021 first (see README "Volumes")
+      # Create ./data and run "sudo chown 12021:0 data" before the first start,
+      # or the container restarts in a loop.
+      - "./data:/data"

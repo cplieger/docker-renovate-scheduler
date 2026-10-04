@@ -51,7 +51,7 @@ ENV RENOVATE_BASE_DIR=/data
 
 # A non-default runtime UID cannot write /opt/containerbase/tools (12021:root),
 # so Renovate's on-demand Go install fails and every Go PR ships a stale go.sum;
-# installed as root, Go is usable by any UID (README "Running as a non-default user").
+# installed as root, Go is usable by any UID (docs/configuration.md "Running as another user").
 # renovate: datasource=golang-version depName=go
 ARG GOLANG_VERSION=1.27.1
 RUN install-tool golang "${GOLANG_VERSION}"

@@ -10,7 +10,7 @@ to preserve, and how to run the checks locally.
 
 ## Why this image wraps `renovate/renovate` (not distroless)
 
-The [README's "Not distroless" section](README.md#not-distroless-on-purpose)
+The [how-it-works page's first section](docs/how-it-works.md#built-on-renovates-own-image)
 covers _why_ the final stage is `FROM renovate/renovate:<version>` (Renovate
 installs toolchains at runtime via containerbase, so there is no static form to
 drop on `scratch`). The contributor-facing consequence: every run must inherit

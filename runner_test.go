@@ -356,16 +356,12 @@ func TestRunRenovateOnce_EnvironmentValuesNeverReachLifecycleLogs(t *testing.T) 
 	}
 }
 
-// TestRunRenovateOnce_LifecycleRecordsCarryCorrelationAttributes pins the
-// property every arm shares: each pass emits exactly one "renovate run
-// starting" record carrying the attributes that identify the run (trigger,
-// repo scope, timeout) and exactly one terminal record carrying its trigger
-// and elapsed time, so an operator can tie a terminal line back to its start.
-// README.md:240-262 keys RenovateNoRecentRun on the exact clean-run message and
-// INFO level; silently changing either makes the alert fire permanently.
-// The per-arm specifics (the timeout attribute on a timed-out run, the error
-// attribute on a failure) belong to the focused tests above. Serial: swaps
-// slog.Default.
+// TestRunRenovateOnce_LifecycleRecordsCarryCorrelationAttributes pins that
+// every pass emits one "renovate run starting" record (trigger, repo scope,
+// timeout) and one terminal record (trigger, elapsed), so a terminal line ties
+// back to its start. The RenovateNoRecentRun rule in docs/monitoring.md keys on
+// the exact clean-run message at INFO; changing either fires it permanently.
+// Serial: swaps slog.Default.
 func TestRunRenovateOnce_LifecycleRecordsCarryCorrelationAttributes(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -1025,7 +1021,7 @@ func TestAbortDiagnosis_IgnoresANonExitError(t *testing.T) {
 
 // TestRunRenovateOnce_AbortedRunNamesTheHeapCause pins the operator-facing
 // half: the message string stays exactly "renovate run failed" because the
-// README's RenovateRunFailed rule keys on the ERROR level and that wording,
+// RenovateRunFailed rule in docs/monitoring.md keys on the ERROR level and that wording,
 // and the diagnosis rides as attributes. Serial: swaps slog.Default.
 func TestRunRenovateOnce_AbortedRunNamesTheHeapCause(t *testing.T) {
 	rec := capture.Default(t)
