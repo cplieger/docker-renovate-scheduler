@@ -31,7 +31,7 @@ func warnIfRootlessCacheUnwritable() {
 			"fix", "run as the image's default UID 12021, or set RENOVATE_BINARY_SOURCE=global "+
 				"and redirect each tool cache to a writable volume, forwarding it to Renovate's "+
 				"artifact subprocesses via RENOVATE_CUSTOM_ENV_VARIABLES (or a config.js "+
-				"customEnvVariables); see the README, 'Running as a non-default user'")
+				"customEnvVariables); see docs/configuration.md, 'Running as another user'")
 	case rootlessRiskNoCacheVars:
 		slog.Warn("running as a non-default UID and RENOVATE_CUSTOM_ENV_VARIABLES "+
 			"redirects no tool cache; "+rootlessCacheConsequence,
@@ -40,7 +40,7 @@ func warnIfRootlessCacheUnwritable() {
 			"custom_env_vars", strings.Join(customEnvVarNames(os.Getenv("RENOVATE_CUSTOM_ENV_VARIABLES")), ","),
 			"fix", "add each redirected tool-cache variable (GOCACHE, npm_config_cache, …) "+
 				"to RENOVATE_CUSTOM_ENV_VARIABLES so it reaches Renovate's artifact "+
-				"subprocesses; see the README, 'Running as a non-default user'")
+				"subprocesses; see docs/configuration.md, 'Running as another user'")
 	}
 }
 
