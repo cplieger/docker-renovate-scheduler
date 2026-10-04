@@ -94,7 +94,7 @@ Keep the container's default user. Without the extra cache settings, another use
 
 The image opens no ports and runs no web server. The `run` command talks to the scheduler through a Unix socket in `/tmp`. Only the container's own user can open it, and only from inside the container. The container runs as Renovate's non-root user, UID 12021.
 
-The scheduler never logs your platform token. A `run` command sends its environment, which can include the token, to the scheduler through that socket only. Renovate starts from a list of arguments, with no shell. The image removes the `docker` command-line tool from Renovate's base image, so Renovate's `binarySource=docker` mode is not supported. [Security](docs/security.md) lists what the image contains.
+The scheduler never logs your platform token. A `run` command sends its environment, which can include the token, to the scheduler through that socket only. Renovate starts from a list of arguments, with no shell. The image removes the `docker` command-line tool from Renovate's base image, so Renovate's `binarySource=docker` mode is not supported. [Security](docs/hardening.md) lists what the image contains.
 
 ## Troubleshooting
 
@@ -115,7 +115,7 @@ docker-renovate-scheduler writes logfmt lines with UTC times to its container lo
 - [Configuration](docs/configuration.md) covers both scheduling modes, Ofelia, another user and the memory a run needs.
 - [How it works](docs/how-it-works.md) explains the queue, the schedule, shutdown and the health rules.
 - [Monitoring and alerts](docs/monitoring.md) lists the log lines and the alert rules.
-- [Security](docs/security.md) covers what the container accepts and what the image contains.
+- [Security](docs/hardening.md) covers what the container accepts and what the image contains.
 
 ## Credits
 

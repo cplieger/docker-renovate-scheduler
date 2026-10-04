@@ -1,4 +1,4 @@
-# Example compose for docker-renovate-scheduler. See docs/configuration.md and docs/security.md for all configuration options and hardening.
+# Example compose for docker-renovate-scheduler. See docs/configuration.md and docs/hardening.md for all configuration options and hardening.
 services:
   renovate:
     image: ghcr.io/cplieger/docker-renovate-scheduler:latest
