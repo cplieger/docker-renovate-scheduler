@@ -293,7 +293,7 @@ func TestRunClient_InterruptAfterAcceptanceReportsContinuingRun(t *testing.T) {
 }
 
 // TestRunClient_LogsDocumentedLifecycle pins the three lifecycle lines the
-// README's external-scheduler section publishes, their order, and the
+// docs/configuration.md "Your own scheduler" publishes, their order, and the
 // attributes that let a trigger's own log tie them to its run. Serial:
 // capture.Default swaps slog.Default.
 func TestRunClient_LogsDocumentedLifecycle(t *testing.T) {
