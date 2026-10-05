@@ -15,7 +15,7 @@ The container's main process, the scheduler, starts every Renovate run as its ow
 | Command | What it does |
 | --- | --- |
 | `daemon` | The default. Runs every Renovate run, listens on the socket and keeps the built-in schedule when `RUN_INTERVAL` is a duration |
-| `run [repo ...]` | Asks for one run and waits. Exits 0 or 1 with that run's result. Repository names go to Renovate, and the environment goes with the request |
+| `run [repo ...]` | Asks for one run, waits, and exits 0 or 1 with its result. The request carries the environment and any repository names for Renovate |
 | `health` | The healthcheck. It reads the health file |
 
 Because the scheduler runs every run, Renovate's output and the scheduler's own lines reach the container log in both modes. The scheduler neither captures nor reads Renovate's output. Each run starts through the image's entrypoint, so it gets Renovate's tool environment even when the request came from a `docker exec`. The scheduled runs and every `run` request share one queue, served one at a time in arrival order. [Your own scheduler](configuration.md#your-own-scheduler) has the queue's rules.
