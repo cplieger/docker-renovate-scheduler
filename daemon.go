@@ -29,6 +29,7 @@ type daemon struct {
 	health    *health.Latch
 	verifier  *baseDirVerifier
 	stamp     *scheduler.Stamp
+	tokens    *appTokenMinter // nil: Renovate uses its own RENOVATE_TOKEN
 	newCmd    scheduler.CommandRunner
 	runOnce   func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome
 	fatal     chan error
@@ -40,6 +41,13 @@ type daemon struct {
 
 func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandRunner) error {
 	warnIfRootlessCacheUnwritable()
+
+	app, err := loadAppConfig()
+	if err != nil {
+		slog.Error("github app configuration invalid", "error", err,
+			"hint", "see docs/configuration.md, 'GitHub App authentication'")
+		return err
+	}
 
 	ln, err := trigger.Listen(socketPath)
 	if err != nil {
@@ -58,7 +66,8 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	}
 
 	interval, scheduleEnabled := loadInterval()
-	timeout := loadRunTimeout()
+	runTimeout := loadRunTimeout()
+	timeout := runTimeoutFor(app, runTimeout)
 
 	stamp := scheduler.NewStamp(stampPath())
 	var remaining time.Duration
@@ -66,12 +75,15 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		remaining = stamp.Remaining(interval, time.Now(), scheduler.RetryFailed)
 	}
 
+	logAuthMode(app, runTimeout, timeout)
+
 	d := &daemon{
 		queue:     trigger.NewQueue[runPayload](queueCapacity),
 		marker:    marker,
 		health:    health.NewLatch(marker),
 		verifier:  verifier,
 		stamp:     stamp,
+		tokens:    newAppTokenMinter(app),
 		newCmd:    newCmd,
 		runOnce:   runRenovateOnce,
 		stampPath: stampPath(),
@@ -222,12 +234,17 @@ func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigg
 		return
 	}
 
+	p, authorized := d.authorize(runCtx, j, start)
+	if !authorized {
+		return
+	}
+
 	if stopping() != nil {
 		cancelJobForShutdown(j, "preflight", time.Since(start))
 		return
 	}
 
-	outcome := d.runOnce(runCtx, d.timeout, j.Trigger, j.Payload, d.newCmd)
+	outcome := d.runOnce(runCtx, d.timeout, j.Trigger, p, d.newCmd)
 	if outcome == runContained {
 		d.halted = true
 		d.health.Set(false)
@@ -243,6 +260,29 @@ func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigg
 	d.health.Set(ok)
 	d.recordScheduled(j.Trigger, ok)
 	j.Finish(trigger.Outcome{OK: ok, Duration: time.Since(start), Reason: failureReason(outcome, d.timeout)})
+}
+
+const mintFailedReason = "failed: no GitHub App installation token (see the container log stream)"
+
+// authorize returns the job's payload, carrying a fresh installation token in
+// App mode. On a mint failure it finishes the job as failed and returns false.
+func (d *daemon) authorize(ctx context.Context, j *trigger.Job[runPayload], start time.Time) (runPayload, bool) {
+	p := j.Payload
+	if d.tokens == nil {
+		return p, true
+	}
+	tok, err := d.tokens.mint(ctx)
+	if err != nil {
+		slog.Error("github app token request failed", "trigger", j.Trigger, "error", err)
+		d.health.Set(false)
+		d.recordScheduled(j.Trigger, false)
+		j.Finish(trigger.Outcome{OK: false, Duration: time.Since(start), Reason: mintFailedReason})
+		return p, false
+	}
+	slog.Info("github app installation token issued", "trigger", j.Trigger,
+		"installation_id", d.tokens.installationID, "expires_at", tok.expiresAt)
+	p.Env = withRenovateToken(p.Env, tok.value)
+	return p, true
 }
 
 func failureReason(outcome runOutcome, timeout time.Duration) string {

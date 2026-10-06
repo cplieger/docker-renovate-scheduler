@@ -9,6 +9,12 @@ docker-renovate-scheduler has no metrics endpoint. Its state is in its container
 | Message | Level | Fields worth reading |
 | --- | --- | --- |
 | `container started` | INFO | `mode`, `interval`, `timeout`, `base_dir`, `startup_run` |
+| `github auth mode` | INFO | `mode` (`app` or `token`), and `app_id` and `installation_id` for an App |
+| `run timeout capped to the installation token's life` | INFO | `run_timeout`, `effective`. App mode only |
+| `github app configuration invalid` | ERROR | `error`, `hint`. The container stops |
+| `github app installation resolved` | INFO | `installation_id`, `account`. Logged once when `GITHUB_APP_INSTALLATION_ID` is unset |
+| `github app installation token issued` | INFO | `trigger`, `installation_id`, `expires_at` |
+| `github app token request failed` | ERROR | `trigger`, `error`. The run fails and Renovate does not start |
 | `startup run skipped: the last scheduled run succeeded within the interval` | INFO | `last_success`, `interval` |
 | `renovate run starting` | INFO | `trigger`, `repos`, `timeout` |
 | `renovate run complete` | INFO | `trigger`, `duration_ms` |
@@ -40,9 +46,10 @@ groups:
         annotations:
           summary: "renovate: the scheduler logged an error"
           description: >
-            A run failed or timed out, the base-directory preflight failed, or
-            a leftover process halted run admission. Check the container logs,
-            RENOVATE_TOKEN and whether the platform is reachable.
+            A run failed or timed out, a GitHub App token request failed, the
+            base-directory preflight failed, or a leftover process halted run
+            admission. Check the container logs, RENOVATE_TOKEN or the GitHub
+            App settings, and whether the platform is reachable.
       - alert: RenovateNoRecentRun
         expr: |
           absent_over_time({container="renovate"} |= `renovate run complete` [13h])

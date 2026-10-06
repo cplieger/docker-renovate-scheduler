@@ -17,7 +17,7 @@ docker-renovate-scheduler keeps dependency pull requests coming from your Renova
 
 ## Who it is for
 
-docker-renovate-scheduler is built for people who self-host Renovate on a Docker host and want it to run like their other always-on containers, not from cron. It is Renovate's official image plus a scheduler, and passes your `RENOVATE_*` settings on unchanged. You need a bot account and its token.
+docker-renovate-scheduler is built for people who self-host Renovate on a Docker host and want it to run like their other always-on containers, not from cron. It is Renovate's official image plus a scheduler, and passes your `RENOVATE_*` settings on unchanged. You need a bot account's token or a GitHub App.
 
 Other ways to run Renovate suit a different setup:
 
@@ -73,18 +73,24 @@ Run `docker logs renovate`. You should see `container started`, then `renovate r
 
 ## Configuration reference
 
-The scheduler reads three settings, once at start, so recreate the container after a change. Everything else is Renovate's own configuration, as `RENOVATE_*` variables or a `config.js` like [`config.js.example`](config.js.example), documented in Renovate's [self-hosted configuration](https://docs.renovatebot.com/self-hosted-configuration/).
+The scheduler reads these settings once at start, so recreate the container after a change. Everything else is Renovate's own configuration, as `RENOVATE_*` variables or a `config.js` like [`config.js.example`](config.js.example), documented in Renovate's [self-hosted configuration](https://docs.renovatebot.com/self-hosted-configuration/).
 
 | Variable | Description | Default |
 | --- | --- | --- |
 | `RUN_INTERVAL` | Time between runs, such as `1h` or `30m`. `off` waits for your own scheduler to start each run | `6h` |
 | `RUN_TIMEOUT` | Longest time one run may take before it is stopped and fails | `1h` |
 | `LOG_LEVEL` | `debug`, `info`, `warn` or `error`, for the scheduler and Renovate. `trace` and `fatal` work for Renovate only. Any other value stops Renovate | `info` |
+| `GITHUB_APP_ID` | Your GitHub App's ID. With `GITHUB_APP_PRIVATE_KEY_FILE`, every run gets a fresh App installation token instead of `RENOVATE_TOKEN` | none |
+| `GITHUB_APP_PRIVATE_KEY_FILE` | Path inside the container to the App's private key file, such as a read-only mount | none |
+| `GITHUB_APP_INSTALLATION_ID` | The installation to use. Unset, the scheduler uses the App's only installation | none |
+
+Leave the three `GITHUB_APP_*` settings unset to keep using `RENOVATE_TOKEN`. [GitHub App authentication](docs/configuration.md#github-app-authentication) explains when an App is worth it and how to set one up.
 
 | Mount | Description |
 | --- | --- |
 | `/data` | Clones, caches, installed tools and the record of the last run. The container stops at start when its user cannot write here |
 | `/usr/src/app/config.js` | Optional Renovate `config.js`, if you prefer a file to `RENOVATE_*` variables |
+| Your choice, such as `/run/secrets/github-app.pem` | Optional GitHub App private key, read-only, named by `GITHUB_APP_PRIVATE_KEY_FILE` |
 
 To start a run yourself, run `docker exec renovate docker-renovate-scheduler run`, or add repository names after `run` to process only those.
 
@@ -94,7 +100,7 @@ Keep the container's default user. Without the extra cache settings, another use
 
 The image opens no ports and runs no web server. The `run` command talks to the scheduler through a Unix socket in `/tmp`. Only the container's own user can open it, and only from inside the container. The container runs as Renovate's non-root user, UID 12021.
 
-The scheduler never logs your platform token. A `run` command sends its environment, which can include the token, to the scheduler through that socket only. Renovate starts from a list of arguments, with no shell. The image removes the `docker` command-line tool from Renovate's base image, so Renovate's `binarySource=docker` mode is not supported. [Security](docs/hardening.md) lists what the image contains.
+The scheduler never logs your platform token, a GitHub App token or the App's private key. A `run` command sends its environment, which can include the token, to the scheduler through that socket only. Renovate starts from a list of arguments, with no shell. The image removes the `docker` command-line tool from Renovate's base image, so Renovate's `binarySource=docker` mode is not supported. [Security](docs/hardening.md) lists what the image contains.
 
 ## Troubleshooting
 
