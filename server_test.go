@@ -90,7 +90,7 @@ func TestServer_ForwardsScopeAndEnvironmentToTheRun(t *testing.T) {
 	sock := startTestServer(t, runner)
 
 	dec := rawRequest(t, sock, runPayload{
-		Repos: []string{"cplieger/homelab"},
+		Repos: []string{"owner/repo"},
 		Env:   []string{"RENOVATE_TEST_MARKER=from-client", "RENOVATE_BASE_DIR=" + t.TempDir(), "PATH=" + os.Getenv("PATH")},
 	})
 	var final trigger.Event
@@ -104,7 +104,7 @@ func TestServer_ForwardsScopeAndEnvironmentToTheRun(t *testing.T) {
 	if !final.OK {
 		t.Error("done ok=false: the forwarded environment did not reach the child (the shell assertion failed)")
 	}
-	if len(argsLog) != 1 || !strings.Contains(strings.Join(argsLog[0], " "), "cplieger/homelab") {
+	if len(argsLog) != 1 || !strings.Contains(strings.Join(argsLog[0], " "), "owner/repo") {
 		t.Errorf("run args = %v, want the request's positional repo", argsLog)
 	}
 }
