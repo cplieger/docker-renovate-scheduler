@@ -29,7 +29,7 @@ docker-renovate-scheduler has no metrics endpoint. Its state is in its container
 
 ## Alerting
 
-Ship the container's logs to Loki and evaluate these rules with [Loki's ruler](https://grafana.com/docs/loki/latest/alert/). Grafana Alloy's Docker log discovery ships them with no extra configuration. Firing alerts go through your Alertmanager like any Prometheus alert. The rules work with the built-in schedule and with your own scheduler, because every run logs to the container log. With your own scheduler, its job result is a second, independent signal, because the `run` command exits with the run's result.
+These rules are for Loki's ruler. Save the block below as a file in Loki's rules folder, as [Loading an app's alert rules](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#loading-an-apps-alert-rules) shows. The rules work with the built-in schedule and with your own scheduler, because every run logs to the container log. With your own scheduler, its job result is a second, independent signal, because the `run` command exits with the run's result.
 
 ```yaml
 groups:
