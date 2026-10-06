@@ -1,10 +1,10 @@
 # Configuration
 
-This page covers the scheduler's three settings in full, the two scheduling modes, running the container as another user and the memory a Renovate run needs. It is for readers who go past the quick start. Renovate's own settings are documented in Renovate's [self-hosted configuration](https://docs.renovatebot.com/self-hosted-configuration/).
+This page covers the scheduler's settings in full and GitHub App authentication. It also covers the two scheduling modes, running the container as another user and the memory a Renovate run needs. It is for readers who go past the quick start. Renovate's own settings are documented in Renovate's [self-hosted configuration](https://docs.renovatebot.com/self-hosted-configuration/).
 
 ## Settings
 
-The scheduler reads three environment variables at start. They sit outside the `RENOVATE_*` names, so Renovate never reads them as its own options.
+The scheduler reads these environment variables at start. They sit outside the `RENOVATE_*` names, so Renovate never reads them as its own options. The three `GITHUB_APP_*` settings are in [GitHub App authentication](#github-app-authentication).
 
 - `RUN_INTERVAL`, default `6h`, is the time between runs as a Go duration, such as `6h`, `1h` or `30m`. `off`, `disabled` and `0` turn the built-in schedule off, and runs then start only when your own scheduler asks. An unset, negative or unreadable value means `6h`.
 - `RUN_TIMEOUT`, default `1h`, is the longest one Renovate run may take, as a Go duration. A run past it is stopped and fails. A zero or negative value means `1h`. Renovate's own `RENOVATE_EXECUTION_TIMEOUT` is a separate limit for each command Renovate starts.
@@ -22,6 +22,47 @@ These settings suit this always-on container:
 - `RENOVATE_GITHUB_COM_TOKEN`, a github.com token Renovate uses to fetch changelogs when your platform is not github.com, and to stay under GitHub's rate limit.
 - `RENOVATE_PERSIST_REPO_DATA=true` and `RENOVATE_REPOSITORY_CACHE=enabled`. Later runs then fetch each repository instead of cloning it, and reuse Renovate's caches. Keep `/data` on a volume for this to work.
 - `RENOVATE_X_SQLITE_PACKAGE_CACHE=true`, which keeps the package cache bounded. [Memory and the package cache](#memory-and-the-package-cache) explains why.
+
+## GitHub App authentication
+
+On github.com, Renovate can run with a GitHub App installation token instead of a personal access token. A personal token acts as its user. Renovate's GitHub API calls then share that user's hourly [rate limit](https://docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api) with every other tool on the same account. Renovate's GitHub support makes many GraphQL calls, and a busy account runs out. An App installation has its own limit, which grows with the number of repositories it is installed on. Installation tokens last one hour, so the scheduler gets a new one for every run.
+
+Set these three settings on the container:
+
+- `GITHUB_APP_ID`, the App ID from the App's settings page.
+- `GITHUB_APP_PRIVATE_KEY_FILE`, the path inside the container to the App's private key, the `.pem` file GitHub generates. Mount it read-only, as a Docker secret or a bind mount, readable by the container's user. The scheduler reads the key from this file only. Putting the key itself in `GITHUB_APP_PRIVATE_KEY` stops the container at start.
+- `GITHUB_APP_INSTALLATION_ID`, optional. When unset, the first run looks up the App's installations and uses the only one. With more than one, that run fails and its log line lists them, so set the ID.
+
+```yaml
+    environment:
+      GITHUB_APP_ID: "123456"
+      GITHUB_APP_INSTALLATION_ID: "7890123"
+      GITHUB_APP_PRIVATE_KEY_FILE: "/run/secrets/github-app.pem"
+    volumes:
+      - "./data:/data"
+      - "./github-app.pem:/run/secrets/github-app.pem:ro"
+```
+
+Before each run, the scheduler signs a short-lived token with the private key and exchanges it at GitHub's REST API for an installation token. That run's Renovate gets it as `RENOVATE_TOKEN`. It replaces any `RENOVATE_TOKEN` set on the container or passed with `docker exec -e`. It also wins over a token in `config.js`, because Renovate prefers environment variables to its config file. A request that fails with a server error is retried with growing waits, up to four attempts. When no token can be had, the run fails with `github app token request failed` and Renovate does not start.
+
+The settings are checked at start. The container stops with `github app configuration invalid` when the key file is missing or unreadable, when it holds no RSA private key, or when only one of the two required settings is set. It also stops when `GITHUB_APP_PRIVATE_KEY_FILE` holds the key itself instead of a path.
+
+These errors never quote a setting's value or the key file's content, in case a token or the key ended up in the wrong place. The `github auth mode` line at start says which mode is in use and does not name the key file. Leave all three settings unset to keep `RENOVATE_TOKEN`.
+
+Give the App these repository permissions, read and write unless noted:
+
+- Contents, Pull requests, Checks and Commit statuses.
+- Issues, for the Dependency Dashboard.
+- Workflows, to update GitHub Actions files.
+- Dependabot alerts, read-only, for vulnerability alerts.
+- Administration, read-only, so Renovate can read repository settings such as the allowed merge methods.
+- Metadata, read-only.
+
+The App needs no webhook. Renovate's [GitHub App guide](https://docs.renovatebot.com/modules/platform/github/#running-as-a-github-app) lists the optional extras. With an App token, Renovate's pull requests and commits come from the App's bot account, `<app-name>[bot]`. Update anything that recognises Renovate by its author, such as branch rules or automerge settings. To keep the pull requests and Dependency Dashboard the old account opened, set `RENOVATE_IGNORE_PR_AUTHOR=true`, as Renovate's [docs](https://docs.renovatebot.com/self-hosted-configuration/#ignoreprauthor) describe for a change of account.
+
+Some things still need a personal token. GitHub's container and package registries accept only a [personal access token (classic)](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic), so a `ghcr.io` host rule for private images keeps one with `read:packages`. Registry pulls do not count against the GraphQL limit.
+
+A run must finish while its token is valid. Renovate reads its token once, at start, so the scheduler cannot renew it during a run. In App mode a run therefore stops after at most 56 minutes, even when `RUN_TIMEOUT` is longer. That leaves room for the token request and a margin before the hour ends. The start log then says `run timeout capped to the installation token's life`.
 
 ## The built-in schedule
 

@@ -8,6 +8,10 @@ The image opens no ports and runs no web server. The only way to start a run fro
 
 The container runs as Renovate's non-root user, UID 12021, or as the user Compose `user:` sets. The socket and the health file belong to that user, so `docker exec` runs must use it too. [Running as another user](configuration.md#running-as-another-user) explains what another user needs.
 
+With [GitHub App authentication](configuration.md#github-app-authentication), the private key stays in its read-only file. The scheduler reads it once at start. Each installation token lives one hour, goes only into that run's environment, and is never logged. The signed request token is never logged either. When GitHub's error message repeats it, the scheduler replaces it with `REDACTED`.
+
+The key file stays readable for as long as the container runs, by every process running as the container's user. That includes the commands Renovate runs after an update, if you allow any with `RENOVATE_ALLOWED_COMMANDS`. A personal token in `RENOVATE_TOKEN` has the same exposure, through the Renovate process's environment. The difference is that a key does not expire. If you think the key leaked, delete it on the App's settings page and generate a new one.
+
 A `run` command forwards its whole environment to the scheduler, which can include `RENOVATE_TOKEN`. That environment crosses only the same-user socket, no wider boundary than the `docker exec` that carried it, and the scheduler never logs it. The scheduler starts Renovate through the image's entrypoint with a list of arguments, with no shell.
 
 The image removes the `docker` command-line tool from Renovate's base image, so a Renovate run cannot start containers. Renovate's `binarySource=docker` mode needs that tool and is not supported here.
@@ -21,6 +25,7 @@ The image removes the `docker` command-line tool from Renovate's base image, so 
 | [`github.com/cplieger/atomicfile`](https://github.com/cplieger/atomicfile) | the write check on the base directory |
 | [`github.com/cplieger/envx`](https://github.com/cplieger/envx) | reading environment variables |
 | [`github.com/cplieger/health`](https://github.com/cplieger/health) | the file-based healthcheck |
+| [`github.com/cplieger/httpx`](https://github.com/cplieger/httpx) | retries for the GitHub App token request |
 | [`github.com/cplieger/scheduler`](https://github.com/cplieger/scheduler) | interval parsing, the run loop, the command runner and the socket queue |
 | [`github.com/cplieger/slogx`](https://github.com/cplieger/slogx) | the logging setup, logfmt with UTC times |
 
