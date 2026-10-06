@@ -40,7 +40,7 @@ RUN node --input-type=module -e \
      }'
 
 # upgrade never removes packages, so native driver builds during lockfile
-# maintenance keep working. PKG_REFRESH: docker-builds.md.
+# maintenance keep working.
 ARG PKG_REFRESH=static
 RUN echo "OS package refresh: ${PKG_REFRESH}" \
     && apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*

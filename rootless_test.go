@@ -11,7 +11,7 @@ import (
 
 // Cache forwarding is name-only; forwarded values are opaque.
 func TestRootlessCacheRisk(t *testing.T) {
-	const customUID = 568
+	const customUID = 1500
 
 	env := func(kv map[string]string) func(string) string {
 		return func(k string) string { return kv[k] }
