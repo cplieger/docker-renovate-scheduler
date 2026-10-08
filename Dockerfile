@@ -53,7 +53,7 @@ ENV RENOVATE_BASE_DIR=/data
 # so Renovate's on-demand Go install fails and every Go PR ships a stale go.sum;
 # installed as root, Go is usable by any UID (docs/configuration.md "Running as another user").
 # renovate: datasource=golang-version depName=go
-ARG GOLANG_VERSION=1.27.1
+ARG GOLANG_VERSION=1.27.2
 RUN install-tool golang "${GOLANG_VERSION}"
 
 COPY --chmod=755 --from=go-builder /docker-renovate-scheduler /usr/local/bin/docker-renovate-scheduler
