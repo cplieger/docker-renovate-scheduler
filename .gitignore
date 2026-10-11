@@ -1,7 +1,7 @@
 *.log
 .DS_Store
 
-# Kiro skill artifacts (app-review, judgement, steering-maintenance)
+# Local agent state
 **/.app-review/
 **/.judgement/
 **/.steering-maintenance/
