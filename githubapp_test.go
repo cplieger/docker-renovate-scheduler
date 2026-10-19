@@ -313,6 +313,42 @@ func TestMint_RefusesToGuessBetweenSeveralInstallations(t *testing.T) {
 	}
 }
 
+func TestMint_NeverFollowsARedirectToAnotherPortOnTheSameHost(t *testing.T) {
+	var leaked atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			leaked.Add(1)
+		}
+		writeJSON(w, http.StatusCreated, tokenBody())
+	}))
+	t.Cleanup(other.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(api.Close)
+	m := newAppTokenMinter(&appConfig{key: testAppKey(), appID: testAppID, installationID: testInstallation})
+	m.apiBase = api.URL
+	m.baseDelay = time.Millisecond
+
+	_, err := m.mint(t.Context())
+	if err == nil {
+		t.Errorf("mint() error = nil, want the redirect to another origin refused")
+	}
+	if got := leaked.Load(); got != 0 {
+		t.Errorf("requests carrying the bearer JWT to another port = %d, want 0", got)
+	}
+}
+
+func TestMint_RefusesARedirectThatOnlyChangesTheIPv6ZoneCase(t *testing.T) {
+	m := newAppTokenMinter(&appConfig{key: testAppKey(), appID: testAppID, installationID: testInstallation})
+	from := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "https://[fe80::1%25eth0]:8443/app/installations/7/access_tokens", nil)
+	to := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "https://[fe80::1%25ETH0]:8443/app/installations/7/access_tokens", nil)
+
+	if err := m.client.CheckRedirect(to, []*http.Request{from}); err == nil {
+		t.Errorf("CheckRedirect(%s after %s) = nil, want the zone change refused", to.URL, from.URL)
+	}
+}
+
 func TestLoadAppConfig(t *testing.T) {
 	tests := []struct {
 		env      map[string]string

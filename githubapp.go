@@ -204,8 +204,11 @@ func newAppTokenMinter(cfg *appConfig) *appTokenMinter {
 		return nil
 	}
 	return &appTokenMinter{
-		now:            time.Now,
-		client:         httpx.NewClient(tokenRequestTimeout),
+		now: time.Now,
+		client: &http.Client{
+			Timeout:       tokenRequestTimeout,
+			CheckRedirect: httpx.RedirectPolicyFunc(httpx.WithSameOrigin(true)),
+		},
 		key:            cfg.key,
 		apiBase:        githubAPIBase,
 		appID:          cfg.appID,
