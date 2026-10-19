@@ -741,6 +741,39 @@ func TestExecute_TokenNeverReachesTheLog(t *testing.T) {
 	}
 }
 
+func TestGitHubMessage(t *testing.T) {
+	t.Parallel()
+	const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiI0MjQyIn0.c2lnbmF0dXJl" // gitleaks:allow (fake JWT)
+	tests := []struct {
+		name    string
+		message string
+		want    string
+	}{
+		{
+			name:    "a cut inside an echoed JWT keeps none of it",
+			message: strings.Repeat("a", 180) + jwt[:40],
+			want:    strings.Repeat("a", 180) + "...",
+		},
+		{
+			name:    "a newline becomes a space",
+			message: "Bad\ncredentials",
+			want:    "Bad credentials",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			body, err := json.Marshal(map[string]string{"message": tt.message})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := githubMessage(body, jwt); got != tt.want {
+				t.Errorf("githubMessage(%q) = %q, want %q", body, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestExecute_AReflectedJWTNeverReachesTheLog uses a server that echoes the
 // bearer JWT in its error message. Not parallel: it swaps the global slog
 // default.
@@ -776,7 +809,7 @@ func TestExecute_AReflectedJWTNeverReachesTheLog(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			logged := buf.String()
-			if !strings.Contains(logged, "rejected REDACTED") {
+			if !strings.Contains(logged, "rejected [redacted]") {
 				t.Fatalf("log lacks the redacted server message, so the test did not reach it:\n%s", logged)
 			}
 			for _, jwt := range jwts {
