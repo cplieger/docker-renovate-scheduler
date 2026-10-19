@@ -427,10 +427,9 @@ func bootAppDaemon(t *testing.T, keyPath string) string {
 	t.Setenv(envAppKeyFile, keyPath)
 	t.Setenv(envAppKeyInline, "")
 	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
-	saveLogGlobals(t)
 	var buf bytes.Buffer
 	var mu sync.Mutex
-	slog.SetDefault(slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	capture.SwapDefault(t, slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	logged := func() string {
 		mu.Lock()
 		defer mu.Unlock()
@@ -551,9 +550,8 @@ func TestRunDaemon_MisplacedSecretNeverReachesTheLog(t *testing.T) {
 				}
 				t.Setenv(k, v)
 			}
-			saveLogGlobals(t)
 			var buf bytes.Buffer
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			capture.SwapDefault(t, slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 			err := runDaemon(t.Context(), testSocketPath(t), recordingRunner("true", nil))
 
@@ -698,10 +696,9 @@ func TestExecute_TokenFailureFailsTheRunWithoutStartingRenovate(t *testing.T) {
 // global slog default.
 func TestExecute_TokenNeverReachesTheLog(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	saveLogGlobals(t)
 	var buf bytes.Buffer
 	var mu sync.Mutex
-	slog.SetDefault(slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	capture.SwapDefault(t, slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	var calls atomic.Int32
 	var jwts []string
@@ -755,10 +752,9 @@ func TestExecute_AReflectedJWTNeverReachesTheLog(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-			saveLogGlobals(t)
 			var buf bytes.Buffer
 			var mu sync.Mutex
-			slog.SetDefault(slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			capture.SwapDefault(t, slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
 			var jwts []string
 			d := appModeDaemon(t, recordingRunner("true", nil), func(w http.ResponseWriter, r *http.Request) {
 				jwt := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
