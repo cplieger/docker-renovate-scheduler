@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -357,7 +358,7 @@ func TestSetupLogger_MapsLogLevelEnvToHandlerLevel(t *testing.T) {
 		{"empty falls back to info", "", slog.LevelInfo, slog.LevelDebug},
 		{"surrounding whitespace trimmed", "  warn  ", slog.LevelWarn, slog.LevelInfo},
 	}
-	_ = saveLogGlobals(t)
+	capture.SwapDefault(t, slog.Default())
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -380,7 +381,7 @@ func TestSetupLogger_MapsLogLevelEnvToHandlerLevel(t *testing.T) {
 // is the one it installs.
 func captureSetupLoggerOutput(t *testing.T, level string) string {
 	t.Helper()
-	restoreLogGlobals := saveLogGlobals(t)
+	prevLogger, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
 	prevStderr := os.Stderr
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -393,10 +394,16 @@ func captureSetupLoggerOutput(t *testing.T, level string) string {
 	})
 
 	t.Setenv("LOG_LEVEL", level)
-	os.Stderr = w
-	setupLogger()
-	os.Stderr = prevStderr
-	restoreLogGlobals()
+	// The subtest's SwapDefault cleanup retires setupLogger's logger before w closes.
+	t.Run("setupLogger", func(t *testing.T) {
+		capture.SwapDefault(t, slog.Default())
+		os.Stderr = w
+		setupLogger()
+		os.Stderr = prevStderr
+	})
+	if slog.Default() != prevLogger || log.Writer() != prevWriter || log.Flags() != prevFlags {
+		t.Fatal("setupLogger's logger outlived its subtest; log and slog still write into the captured pipe")
+	}
 	if err := w.Close(); err != nil {
 		t.Fatalf("close captured stderr = %v", err)
 	}
