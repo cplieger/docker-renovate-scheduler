@@ -1,7 +1,7 @@
 github.com/cplieger/atomicfile/v4 v4.2.0 h1:hbruc99AEUNLHzJWSS34NsR6k6vjGYr6uL3TRiPGcdw=
 github.com/cplieger/atomicfile/v4 v4.2.0/go.mod h1:hwmPt/GCOA/SHUX3hrxNRqdhQeaC2P1Ku1FxpnOi3fA=
-github.com/cplieger/envx/v2 v2.1.0-dev.3 h1:eKkPlzcCzrhCyyY6ZkgWJTgxCnejVryAP6RsNtWXgKw=
-github.com/cplieger/envx/v2 v2.1.0-dev.3/go.mod h1:EHs8RdZhtvTQXDgG1W+DSfuciEL26f/WW6VQQapL/Y8=
+github.com/cplieger/envx/v2 v2.1.0 h1:B/QkjKg7LEJSNLWh9Caur750ryK+WpbXBmTZWHjsI9Q=
+github.com/cplieger/envx/v2 v2.1.0/go.mod h1:EHs8RdZhtvTQXDgG1W+DSfuciEL26f/WW6VQQapL/Y8=
 github.com/cplieger/health v1.10.0 h1:t56+GKvpseo3FwFIXVcEyNrBe0Pb/YpjW17uKUeCqe4=
 github.com/cplieger/health v1.10.0/go.mod h1:Y1YQqGeH4YeEoTYzoNtzO/cp7+ummHliN/JsU/0UlKM=
 github.com/cplieger/httpx/v5 v5.2.0-dev.1 h1:wRLE1Tk0BfHS36q4CAmFOFae2zKE1FVdxq+yrMNpdA0=
@@ -10,9 +10,9 @@ github.com/cplieger/pathinside/v2 v2.1.0 h1:yBnm859aLMKALi8bTIaYBy7t1osIqCSMIJo8
 github.com/cplieger/pathinside/v2 v2.1.0/go.mod h1:sMHw6mQSFsGWsirWPQyQZ1+kqrAsXf9VcMUTUJsqm0w=
 github.com/cplieger/runesafe/v3 v3.2.0 h1:YoMExOkKrhIqks3FEGU0S26ZohRyHJpGbOjmEO6FpSA=
 github.com/cplieger/runesafe/v3 v3.2.0/go.mod h1:5XDABx7qgrlEAYnvKiXdak6rRQ5Zac6MyuQcksZUdEc=
-github.com/cplieger/scheduler/v4 v4.3.0-dev.1 h1:D2UjDkl0uj2HK7rTJQZUu/Wcfe1KD2zr7WPGXxMVFVs=
-github.com/cplieger/scheduler/v4 v4.3.0-dev.1/go.mod h1:ONnKeZ+efBTEk8y+RMWegjFBOyx/pMoQVQE00en1+xk=
-github.com/cplieger/slogx v1.8.0-dev.1 h1:rKB13MfPKb1J9UTeqnpesHjReiLilyxqCIhCb5gj4mM=
-github.com/cplieger/slogx v1.8.0-dev.1/go.mod h1:juFN2HIfnzy+39AQ9aIqCyaLyiOQo6qWuZCG1ubIkfA=
+github.com/cplieger/scheduler/v4 v4.3.0 h1:rqMnpHHLQA/hxcQ6dV2X11vxdgPu7Pc2gIBNAeJ20j4=
+github.com/cplieger/scheduler/v4 v4.3.0/go.mod h1:ONnKeZ+efBTEk8y+RMWegjFBOyx/pMoQVQE00en1+xk=
+github.com/cplieger/slogx v1.8.0 h1:M3YHELJl9kWUDl+u3jFcCiNA/UXB4Ywq5lMjBK832Ds=
+github.com/cplieger/slogx v1.8.0/go.mod h1:juFN2HIfnzy+39AQ9aIqCyaLyiOQo6qWuZCG1ubIkfA=
 pgregory.net/rapid v1.3.0 h1:vBvO0VSqti75J1jjYqpgPNBLKMd1+gxa9fYo7vk/Exc=
 pgregory.net/rapid v1.3.0/go.mod h1:dPlE4OBBxgXPqkP79flB6sJL1dx5azpI7HQ9MY9Z7uk=
