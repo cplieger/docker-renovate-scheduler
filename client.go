@@ -51,6 +51,11 @@ func runClient(socketPath string, repos []string) int {
 }
 
 func finishResult(ev trigger.Event, repos []string) int {
+	if ev.OK && ev.Reason != "" {
+		// The daemon tolerated a failure an outage can cause; see failureGrace.
+		slog.Warn("triggered run tolerated a failure", "repos", repos, "duration_ms", ev.DurationMs, "reason", ev.Reason)
+		return 0
+	}
 	if ev.OK {
 		slog.Info("triggered run complete", "repos", repos, "duration_ms", ev.DurationMs)
 		return 0

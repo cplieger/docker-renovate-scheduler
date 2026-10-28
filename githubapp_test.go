@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -10,6 +11,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -21,7 +25,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/scheduler/v4"
+	"github.com/cplieger/scheduler/v4/trigger"
 	"github.com/cplieger/slogx/capture"
 )
 
@@ -723,6 +729,71 @@ func TestExecute_TokenFailureFailsTheRunWithoutStartingRenovate(t *testing.T) {
 	}
 	if d.marker.Healthy() {
 		t.Error("health marker healthy after a token failure, want unhealthy")
+	}
+}
+
+// TestTransientMintError separates what a GitHub outage causes from a fault
+// that waiting does not fix.
+func TestTransientMintError(t *testing.T) {
+	t.Parallel()
+	rejected := &githubAPIError{method: "POST", path: "/p", status: http.StatusUnauthorized}
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"server error after the retries", httpx.MarkTransient(&githubAPIError{status: http.StatusBadGateway}), true},
+		{"the mint budget ran out", fmt.Errorf("mint: %w", context.DeadlineExceeded), true},
+		{"a connection GitHub dropped", fmt.Errorf("POST /p: %w", io.EOF), true},
+		{"a body cut short", fmt.Errorf("POST /p: %w", io.ErrUnexpectedEOF), true},
+		{"a rejected key", httpx.Permanent(rejected), false},
+		{"a key that cannot sign", errors.New("sign the JWT: bad key"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := transientMintError(tt.err); got != tt.want {
+				t.Errorf("transientMintError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExecute_TokenOutageIsToleratedForTheGrace covers a GitHub outage that
+// outlasts the mint's retries: like a repository error it passes as a warning
+// until it has lasted failureGrace, while a rejected key (above) fails at once.
+func TestExecute_TokenOutageIsToleratedForTheGrace(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	var started [][]string
+	d := appModeDaemon(t, recordingRunner("true", &started),
+		func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusServiceUnavailable, `{"message":"unavailable"}`)
+		})
+	d.tokens.baseDelay = time.Millisecond
+	d.health.Set(true)
+	run := func() trigger.Outcome {
+		t.Helper()
+		j := newJob("interval", nil, nil)
+		d.execute(t.Context(), t.Context().Err, j)
+		return <-j.Result()
+	}
+
+	if out := run(); !out.OK || out.Reason != toleratedReason {
+		t.Fatalf("token outage = ok %v reason %q, want ok with %q", out.OK, out.Reason, toleratedReason)
+	}
+	if !d.marker.Healthy() {
+		t.Error("health unhealthy after a tolerated token outage, want it untouched")
+	}
+
+	d.failingSince = d.failingSince.Add(-failureGrace)
+	if out := run(); out.OK || out.Reason != mintFailedReason {
+		t.Errorf("token outage past the grace = ok %v reason %q, want a failure with %q", out.OK, out.Reason, mintFailedReason)
+	}
+	if d.marker.Healthy() {
+		t.Error("health healthy after a token outage lasting the grace, want unhealthy")
+	}
+	if len(started) != 0 {
+		t.Errorf("renovate started %d times, want 0 without a token", len(started))
 	}
 }
 

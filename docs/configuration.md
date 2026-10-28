@@ -23,6 +23,10 @@ These settings suit this always-on container:
 - `RENOVATE_PERSIST_REPO_DATA=true` and `RENOVATE_REPOSITORY_CACHE=enabled`. Later runs then fetch each repository instead of cloning it, and reuse Renovate's caches. Keep `/data` on a volume for this to work.
 - `RENOVATE_X_SQLITE_PACKAGE_CACHE=true`, which keeps the package cache bounded. [Memory and the package cache](#memory-and-the-package-cache) explains why.
 
+The scheduler adds one setting when you have not set it: Renovate runs with `RENOVATE_EXIT_CODE_FOR_ERRORS=true`. Without it, Renovate exits 0 when a repository ends in an error, such as a clone the platform refused. The run is then reported complete and the container stays healthy, even when no repository was processed. With it, the scheduler logs the error as a warning naming its kind, and fails runs once such errors have lasted 2 hours, as [Repository errors](monitoring.md#repository-errors) explains.
+
+To keep Renovate's own behaviour, set `RENOVATE_EXIT_CODE_FOR_ERRORS=false` on the container, or in the environment of the `run` command. A `config.js` value does not do this, because Renovate ranks its environment variables above its config file.
+
 ## GitHub App authentication
 
 On github.com, Renovate can run with a GitHub App installation token instead of a personal access token. A personal token acts as its user. Renovate's GitHub API calls then share that user's hourly [rate limit](https://docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api) with every other tool on the same account. Renovate's GitHub support makes many GraphQL calls, and a busy account runs out. An App installation has its own limit, which grows with the number of repositories it is installed on. Installation tokens last one hour, so the scheduler gets a new one for every run.
@@ -43,7 +47,7 @@ Set these three settings on the container:
       - "./github-app.pem:/run/secrets/github-app.pem:ro"
 ```
 
-Before each run, the scheduler signs a short-lived token with the private key and exchanges it at GitHub's REST API for an installation token. That run's Renovate gets it as `RENOVATE_TOKEN`. It replaces any `RENOVATE_TOKEN` set on the container or passed with `docker exec -e`. It also wins over a token in `config.js`, because Renovate prefers environment variables to its config file. A request that fails with a server error is retried with growing waits, up to four attempts. When no token can be had, the run fails with `github app token request failed` and Renovate does not start.
+Before each run, the scheduler signs a short-lived token with the private key and exchanges it at GitHub's REST API for an installation token. That run's Renovate gets it as `RENOVATE_TOKEN`. It replaces any `RENOVATE_TOKEN` set on the container or passed with `docker exec -e`. It also wins over a token in `config.js`, because Renovate prefers environment variables to its config file. A request that fails with a server error is retried with growing waits, up to four attempts. When GitHub keeps failing or does not answer, the run is skipped with a warning until that has lasted 2 hours, as [Repository errors](monitoring.md#repository-errors) explains. Otherwise the run fails with `github app token request failed` and Renovate does not start.
 
 The settings are checked at start. The container stops with `github app configuration invalid` when the key file is missing or unreadable, when it holds no RSA private key, or when only one of the two required settings is set. It also stops when `GITHUB_APP_PRIVATE_KEY_FILE` holds the key itself instead of a path.
 
@@ -83,9 +87,9 @@ docker exec renovate docker-renovate-scheduler run             # every configure
 docker exec renovate docker-renovate-scheduler run owner/repo  # one repository, passed on to Renovate
 ```
 
-The `run` command hands the request to the scheduler and waits until that run ends. It exits 0 when the run succeeded and 1 when it failed, also when the run waited behind another one. Interrupting the wait ends the command with exit 1 and a warning. A run the scheduler had already accepted still runs to its end, so exit 1 there means the command did not see the result, not that the run failed.
+The `run` command hands the request to the scheduler and waits until that run ends. It exits 0 when the run succeeded and 1 when it failed, also when the run waited behind another one. A repository error or a GitHub App token outage that has lasted less than 2 hours exits 0 with a warning, as [Repository errors](monitoring.md#repository-errors) explains. Interrupting the wait ends the command with exit 1 and a warning. A run the scheduler had already accepted still runs to its end, so exit 1 there means the command did not see the result, not that the run failed.
 
-The run's full Renovate output goes to the container log. Your scheduler's own log shows only the command's short lines, `triggered run accepted`, `triggered run started`, then `triggered run complete` or `triggered run failed` with a `reason`. Read the detail of a run from `docker logs` or your log store, and its result from the exit code.
+The run's full Renovate output goes to the container log. Your scheduler's own log shows only the command's short lines, `triggered run accepted`, `triggered run started`, then `triggered run complete`, `triggered run tolerated a failure` or `triggered run failed` with a `reason`. Read the detail of a run from `docker logs` or your log store, and its result from the exit code.
 
 The environment of the `docker exec` goes with the request. `docker exec -e RENOVATE_AUTODISCOVER=false renovate docker-renovate-scheduler run owner/repo` runs Renovate for that repository with that setting. The command needs no entrypoint prefix, because the scheduler starts every run through the image's own entrypoint and so with Renovate's full tool environment.
 
