@@ -13,7 +13,7 @@ docker-renovate-scheduler keeps dependency pull requests coming from your Renova
 - Also starts a run on request, from `docker exec` or your own scheduler, for all repositories or only named ones.
 - Runs one pass at a time and queues the others, each with its own result.
 - Keeps clones and caches on `/data` between runs.
-- Marks itself unhealthy when a run fails, until the next good run.
+- Marks itself unhealthy when a run fails, until the next good run. A repository error or a GitHub App token outage counts only once it has lasted 2 hours, because a platform outage causes most of them.
 
 ## Who it is for
 
@@ -86,6 +86,8 @@ The scheduler reads these settings once at start, so recreate the container afte
 
 Leave the three `GITHUB_APP_*` settings unset to keep using `RENOVATE_TOKEN`. [GitHub App authentication](docs/configuration.md#github-app-authentication) explains when an App is worth it and how to set one up.
 
+Unless you set it, Renovate runs with `RENOVATE_EXIT_CODE_FOR_ERRORS=true`, so a repository that ends in an error, such as a refused clone, is noticed. A platform outage causes most of these, so the scheduler logs them as warnings and reports a failed run only once they have lasted 2 hours. [Renovate's own settings](docs/configuration.md#renovates-own-settings) has the details and how to turn it off.
+
 | Mount | Description |
 | --- | --- |
 | `/data` | Clones, caches, installed tools and the record of the last run. The container stops at start when its user cannot write here |
@@ -104,7 +106,7 @@ The scheduler never logs your platform token, a GitHub App token or the App's pr
 
 ## Troubleshooting
 
-The healthcheck reads a file the scheduler updates after each run. Unhealthy means the last run failed, and the next good run makes it healthy again. With the built-in schedule, it also turns unhealthy when no run has finished for 13 hours with the defaults, which is twice `RUN_INTERVAL` plus `RUN_TIMEOUT`. The image allows 10 minutes at start for a slow first run.
+The healthcheck reads a file the scheduler updates after each run. Unhealthy means the last run failed, and the next good run makes it healthy again. Repository errors and GitHub App token outages make it unhealthy only once they have lasted 2 hours. With the built-in schedule, it also turns unhealthy when no run has finished for 13 hours with the defaults, which is twice `RUN_INTERVAL` plus `RUN_TIMEOUT`. The image allows 10 minutes at start for a slow first run.
 
 - The container restarts with `base directory preflight failed`. The `data` folder does not belong to user 12021. Repeat step 1 of the quick start.
 - A run fails with `exit status 134` and a `likely_cause` field. Node most likely ran out of heap memory, often after Renovate raised its PRs. Set `mem_limit` to 3g or more and keep `RENOVATE_X_SQLITE_PACKAGE_CACHE=true`, as [Memory and the package cache](docs/configuration.md#memory-and-the-package-cache) explains.
@@ -114,7 +116,7 @@ The healthcheck reads a file the scheduler updates after each run. Unhealthy mea
 
 ## Monitoring
 
-docker-renovate-scheduler writes logfmt lines with UTC times to its container log, and Renovate's own output follows on the same log in both scheduling modes. It has no metrics endpoint. [Monitoring and alerts](docs/monitoring.md) lists the log lines and two Loki alert rules, one for a failed run and one for no finished run in 13 hours.
+docker-renovate-scheduler writes logfmt lines with UTC times to its container log, and Renovate's own output follows on the same log in both scheduling modes. It has no metrics endpoint. [Monitoring and alerts](docs/monitoring.md) lists the log lines and two Loki alert rules, one for a failed run and one for no finished run in 14 hours.
 
 ## Documentation
 

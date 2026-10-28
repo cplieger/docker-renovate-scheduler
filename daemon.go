@@ -21,22 +21,36 @@ var errContainmentLost = errors.New("renovate run process group survived the kil
 const (
 	containmentLostReason = "failed: run process group survived the kill sweep; scheduler halting"
 	queueCapacity         = 16
+	// failureGrace is how long runs may keep failing in a way a platform outage
+	// causes before one fails: past the median GitHub incident (about 80 min in
+	// its 2024-2026 availability reports) and Renovate's 2-hour lockfile-error
+	// hold after a release. With runs every hour, the third failing run is
+	// usually the first to fail.
+	failureGrace    = 2 * time.Hour
+	toleratedReason = "ok: tolerated a repository error or token outage; runs fail once one lasts 2h (see the container log stream)"
+	escalatedReason = "failed: runs have failed for over 2h (see the container log stream)"
 )
 
 type daemon struct {
-	queue     *trigger.Queue[runPayload]
-	marker    *health.Marker
-	health    *health.Latch
-	verifier  *baseDirVerifier
-	stamp     *scheduler.Stamp
-	tokens    *appTokenMinter // nil: Renovate uses its own RENOVATE_TOKEN
-	newCmd    scheduler.CommandRunner
-	runOnce   func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome
-	fatal     chan error
-	stampPath string
-	timeout   time.Duration
-	// Only the executor accesses halted.
-	halted bool
+	queue    *trigger.Queue[runPayload]
+	marker   *health.Marker
+	health   *health.Latch
+	verifier *baseDirVerifier
+	stamp    *scheduler.Stamp
+	tokens   *appTokenMinter // nil: Renovate uses its own RENOVATE_TOKEN
+	newCmd   scheduler.CommandRunner
+	runOnce  func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome
+	fatal    chan error
+	// Only the executor accesses the failing-since times and halted. Each is the
+	// start of the first run in an unbroken series of tolerable failures, zero
+	// after a good run. Full passes and scoped runs keep their own, so the
+	// frequent scoped runs a webhook sends cannot reset a fault only the full
+	// pass meets.
+	failingSince       time.Time
+	scopedFailingSince time.Time
+	stampPath          string
+	timeout            time.Duration
+	halted             bool
 }
 
 func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandRunner) error {
@@ -257,9 +271,58 @@ func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigg
 		return
 	}
 	ok := outcome == runComplete
-	d.health.Set(ok)
+	tolerated := outcome == runRepositoryError && d.tolerate(j, start)
+	switch {
+	case ok:
+		*d.failingSinceFor(j) = time.Time{}
+		d.health.Set(true)
+	case tolerated:
+		d.keepHealth()
+	default:
+		d.health.Set(false)
+	}
+	// The stamp keeps the real result, so a restart during an outage retries at boot.
 	d.recordScheduled(j.Trigger, ok)
-	j.Finish(trigger.Outcome{OK: ok, Duration: time.Since(start), Reason: failureReason(outcome, d.timeout)})
+	reason := failureReason(outcome, d.timeout)
+	if tolerated {
+		reason = toleratedReason
+	}
+	j.Finish(trigger.Outcome{OK: ok || tolerated, Duration: time.Since(start), Reason: reason})
+}
+
+func (d *daemon) failingSinceFor(j *trigger.Job[runPayload]) *time.Time {
+	if len(j.Payload.Repos) > 0 {
+		return &d.scopedFailingSince
+	}
+	return &d.failingSince
+}
+
+// tolerate reports whether a failure an outage can cause passes as a warning:
+// the first of a series, and any within failureGrace of that run's start. A
+// tolerated failure keeps health's state (keepHealth). Past the grace it logs
+// the escalation and returns false.
+func (d *daemon) tolerate(j *trigger.Job[runPayload], start time.Time) bool {
+	since := d.failingSinceFor(j)
+	if since.IsZero() {
+		*since = start
+		return true
+	}
+	failing := time.Since(*since)
+	if failing < failureGrace {
+		return true
+	}
+	slog.Error("renovate runs keep failing", "trigger", j.Trigger, "repos", j.Payload.Repos,
+		"failing_for", failing.Round(time.Second))
+	return false
+}
+
+// keepHealth leaves health as it was after a tolerated failure, refreshing a
+// healthy marker: a run did happen, so the built-in lease must not lapse
+// during an outage shorter than failureGrace.
+func (d *daemon) keepHealth() {
+	if d.marker.Healthy() {
+		d.health.Set(true)
+	}
 }
 
 const mintFailedReason = "failed: no GitHub App installation token (see the container log stream)"
@@ -273,6 +336,13 @@ func (d *daemon) authorize(ctx context.Context, j *trigger.Job[runPayload], star
 	}
 	tok, err := d.tokens.mint(ctx)
 	if err != nil {
+		if transientMintError(err) && d.tolerate(j, start) {
+			slog.Warn("renovate run skipped: github app token unavailable", "trigger", j.Trigger, "error", err)
+			d.keepHealth()
+			d.recordScheduled(j.Trigger, false)
+			j.Finish(trigger.Outcome{OK: true, Duration: time.Since(start), Reason: toleratedReason})
+			return p, false
+		}
 		slog.Error("github app token request failed", "trigger", j.Trigger, "error", err)
 		d.health.Set(false)
 		d.recordScheduled(j.Trigger, false)
@@ -291,6 +361,8 @@ func failureReason(outcome runOutcome, timeout time.Duration) string {
 		return "failed: renovate could not be started (see the container log stream)"
 	case runTimedOut:
 		return fmt.Sprintf("failed: run exceeded RUN_TIMEOUT (%s)", timeout)
+	case runRepositoryError:
+		return escalatedReason
 	default:
 		return ""
 	}
