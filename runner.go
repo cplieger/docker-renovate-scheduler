@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -42,15 +43,33 @@ var defaultCommandRunner scheduler.CommandRunner = func() scheduler.CommandRunne
 	}
 }()
 
-// withChildOverrides appends the scheduler's fixed child-environment overrides
-// after env, where os/exec's last-duplicate-wins dedup lets them beat any forwarded value.
+// childDefaults are Renovate settings the scheduler supplies only when env
+// carries no entry for the key, so an explicit value, even an empty one, wins.
+var childDefaults = []string{
+	// Renovate exits 0 when a repository ends in a host or platform error, so a
+	// run whose every clone was refused would read as complete and keep health
+	// green (#1336). With this, such a run exits with a code naming the error,
+	// which the executor turns into a failure once it lasts (failureGrace).
+	"RENOVATE_EXIT_CODE_FOR_ERRORS=true",
+}
+
+// withChildOverrides appends the missing childDefaults, then the scheduler's
+// fixed child-environment overrides, after env, where os/exec's
+// last-duplicate-wins dedup lets the overrides beat any forwarded value.
 func withChildOverrides(env []string) []string {
 	if env == nil {
 		env = os.Environ()
 	}
+	var defaults []string
+	for _, kv := range childDefaults {
+		key, _, _ := strings.Cut(kv, "=")
+		if !slices.ContainsFunc(env, func(e string) bool { return strings.HasPrefix(e, key+"=") }) {
+			defaults = append(defaults, kv)
+		}
+	}
 	// Concat copies: env is the caller's slice, so a bare append could write
 	// into its spare capacity.
-	return slices.Concat(env, []string{
+	return slices.Concat(env, defaults, []string{
 		// Keeps the per-run dumb-init from detaching Renovate into a new
 		// session outside the Setpgid group the kill sweep addresses.
 		"DUMB_INIT_SETSID=0",
@@ -67,6 +86,9 @@ const (
 	runTimedOut
 	// A surviving group can still write the base directory.
 	runContained
+	// A repository ended in an error state (Renovate's exit 3 to 8) and Renovate
+	// went on with the others; the executor decides whether the run fails.
+	runRepositoryError
 )
 
 func runRenovateOnce(ctx context.Context, timeout time.Duration, trig string, p runPayload, newCmd scheduler.CommandRunner) runOutcome {
@@ -103,7 +125,9 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trig string, p 
 		slog.Error("renovate run timed out",
 			"trigger", trig, "duration_ms", durationMs, "timeout", timeout)
 	default:
-		logRunFailure(trig, durationMs, runErr)
+		if logRunFailure(trig, durationMs, runErr) {
+			failure = runRepositoryError
+		}
 	}
 	if survived {
 		return runContained
@@ -122,17 +146,27 @@ type runDiagnosis struct {
 }
 
 // logRunFailure records a failed run, naming a likely cause when the exit
-// status identifies one so the operator reads a remedy instead of a number.
-// The message string is fixed because the shipped alert rules key on it.
-func logRunFailure(trig string, durationMs int64, runErr error) {
+// status identifies one so the operator reads a remedy instead of a number,
+// and reports whether it was a repository error. A repository error is a
+// warning here, because a platform outage causes most of them; the executor
+// escalates one that lasts. The message strings are fixed because the shipped
+// alert rules key on them.
+func logRunFailure(trig string, durationMs int64, runErr error) (repositoryError bool) {
+	if diag, ok := repositoryErrorDiagnosis(runErr); ok {
+		slog.Warn("renovate run ended in a repository error",
+			"trigger", trig, "duration_ms", durationMs, "error", runErr,
+			"likely_cause", diag.cause, "fix", diag.fix)
+		return true
+	}
 	if diag, ok := abortDiagnosis(runErr); ok {
 		slog.Error("renovate run failed",
 			"trigger", trig, "duration_ms", durationMs, "error", runErr,
 			"likely_cause", diag.cause, "fix", diag.fix)
-		return
+		return false
 	}
 	slog.Error("renovate run failed",
 		"trigger", trig, "duration_ms", durationMs, "error", runErr)
+	return false
 }
 
 // abortDiagnosis names the likely cause of a SIGABRT-shaped run failure. Node
@@ -152,6 +186,35 @@ func abortDiagnosis(runErr error) (runDiagnosis, bool) {
 			"on a resident deployment also set RENOVATE_X_SQLITE_PACKAGE_CACHE=true, because " +
 			"the file package cache's end-of-run collection grows with the cache. " +
 			"See docs/configuration.md, 'Memory and the package cache'",
+	}, true
+}
+
+// repositoryErrorCauses are the exit codes Renovate's exitCodeForErrors gives a
+// run whose repository ended in an error state (childDefaults turns it on).
+var repositoryErrorCauses = map[int]string{
+	3: "a repository ended in a Renovate system error, such as a full disk",
+	4: "a repository ended in a platform error, such as a rate limit or credentials the platform rejected",
+	5: "a repository ended in a configuration error",
+	6: "a repository ended in a temporary error",
+	7: "a repository ended in an external host error, a lockfile error or missing credentials, " +
+		"such as a platform outage or a clone or push the platform refused",
+	8: "a repository ended in an unknown error",
+}
+
+func repositoryErrorDiagnosis(runErr error) (runDiagnosis, bool) {
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) {
+		return runDiagnosis{}, false
+	}
+	cause, ok := repositoryErrorCauses[exitErr.ExitCode()]
+	if !ok {
+		return runDiagnosis{}, false
+	}
+	return runDiagnosis{
+		cause: cause,
+		fix: "Renovate's 'Repository finished' line names the repository and its result; " +
+			"Renovate goes on with the other repositories, so their updates still land. " +
+			"A run fails only once such errors have lasted 2h; see docs/monitoring.md, 'Repository errors'",
 	}, true
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -133,6 +134,26 @@ func TestRunClient_RequestSendFailureExitsOne(t *testing.T) {
 
 	if code := runClient(sock, nil); code != 1 {
 		t.Errorf("runClient() = %d when the request write fails, want 1", code)
+	}
+}
+
+// TestFinishResult_ToleratedRunExitsZeroWithAWarning: the daemon finishes a
+// tolerated failure ok with a reason, so an external scheduler stays quiet
+// through an outage while its own log still names what happened. Serial: swaps
+// slog.Default.
+func TestFinishResult_ToleratedRunExitsZeroWithAWarning(t *testing.T) {
+	rec := capture.Default(t)
+
+	if code := finishResult(trigger.Event{OK: true, Reason: toleratedReason}, []string{"owner/a"}); code != 0 {
+		t.Errorf("finishResult(tolerated) = %d, want 0", code)
+	}
+	const msg = "triggered run tolerated a failure"
+	if n := rec.CountLevel(slog.LevelWarn, msg); n != 1 {
+		t.Fatalf("WARN records matching %q = %d, want 1; captured: %v", msg, n, rec.Messages())
+	}
+	if !rec.AttrContains(msg, "reason", "2h") {
+		value, ok := rec.Attr(msg, "reason")
+		t.Errorf("tolerated line reason = (%v, %v), want the daemon's reason naming the 2h grace", value, ok)
 	}
 }
 

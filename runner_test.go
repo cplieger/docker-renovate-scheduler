@@ -755,26 +755,44 @@ func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
 // the override anywhere but last, or dropped a forwarded entry, goes red here.
 func TestWithChildOverrides(t *testing.T) {
 	t.Parallel()
-	const setsidOverride = "DUMB_INIT_SETSID=0"
+	const (
+		setsidOverride = "DUMB_INIT_SETSID=0"
+		exitCodes      = "RENOVATE_EXIT_CODE_FOR_ERRORS=true"
+	)
 	tests := []struct {
 		name string
 		env  []string
 		want []string
 	}{
 		{
-			name: "appends the override to a forwarded env without the variable",
+			name: "appends the default and the override to a forwarded env without either",
 			env:  []string{"PATH=/usr/bin", "RENOVATE_X=y"},
-			want: []string{"PATH=/usr/bin", "RENOVATE_X=y", setsidOverride},
+			want: []string{"PATH=/usr/bin", "RENOVATE_X=y", exitCodes, setsidOverride},
 		},
 		{
 			name: "a pre-existing setsid entry is outranked by the appended override",
 			env:  []string{"DUMB_INIT_SETSID=1", "PATH=/usr/bin"},
-			want: []string{"DUMB_INIT_SETSID=1", "PATH=/usr/bin", setsidOverride},
+			want: []string{"DUMB_INIT_SETSID=1", "PATH=/usr/bin", exitCodes, setsidOverride},
 		},
 		{
-			name: "empty non-nil env still gets the override",
+			name: "empty non-nil env still gets the default and the override",
 			env:  []string{},
-			want: []string{setsidOverride},
+			want: []string{exitCodes, setsidOverride},
+		},
+		{
+			name: "an explicit false keeps Renovate's exit-0 behaviour",
+			env:  []string{"RENOVATE_EXIT_CODE_FOR_ERRORS=false"},
+			want: []string{"RENOVATE_EXIT_CODE_FOR_ERRORS=false", setsidOverride},
+		},
+		{
+			name: "an explicit empty value counts as set",
+			env:  []string{"RENOVATE_EXIT_CODE_FOR_ERRORS="},
+			want: []string{"RENOVATE_EXIT_CODE_FOR_ERRORS=", setsidOverride},
+		},
+		{
+			name: "a longer name sharing the prefix does not count as set",
+			env:  []string{"RENOVATE_EXIT_CODE_FOR_ERRORS_X=false"},
+			want: []string{"RENOVATE_EXIT_CODE_FOR_ERRORS_X=false", exitCodes, setsidOverride},
 		},
 	}
 	for _, tt := range tests {
@@ -802,8 +820,40 @@ func TestWithChildOverrides_LeavesTheCallersSliceAlone(t *testing.T) {
 	if !slices.Equal(backing, before) {
 		t.Errorf("withChildOverrides() wrote into the caller's backing array: %q, want %q", backing, before)
 	}
-	if len(got) != len(env)+1 {
-		t.Errorf("withChildOverrides() = %v, want the %d forwarded entries plus the override", got, len(env))
+	if len(got) != len(env)+2 {
+		t.Errorf("withChildOverrides() = %v, want the %d forwarded entries plus the default and the override", got, len(env))
+	}
+}
+
+// TestRunRenovateOnce_ChildGetsExitCodesForErrors pins the default at the child:
+// a ticker run and a forwarded env both reach Renovate with exitCodeForErrors on,
+// and a value the operator set, here in the daemon's own environ, is kept.
+func TestRunRenovateOnce_ChildGetsExitCodesForErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		daemon string
+		env    []string
+		want   string
+	}{
+		{"ticker run", "", nil, "true"},
+		{"forwarded env without the variable", "", []string{"PATH=" + os.Getenv("PATH")}, "true"},
+		{"operator's false in the daemon environ", "false", nil, "false"},
+		{"operator's false in a forwarded env", "", []string{"RENOVATE_EXIT_CODE_FOR_ERRORS=false", "PATH=" + os.Getenv("PATH")}, "false"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setenv first so the original value comes back after the test.
+			t.Setenv("RENOVATE_EXIT_CODE_FOR_ERRORS", tt.daemon)
+			if tt.daemon == "" {
+				if err := os.Unsetenv("RENOVATE_EXIT_CODE_FOR_ERRORS"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runner := shellAssertRunner(`[ "$RENOVATE_EXIT_CODE_FOR_ERRORS" = "` + tt.want + `" ]`)
+			if got := runRenovateOnce(t.Context(), time.Minute, "test", runPayload{Env: tt.env}, runner); got != runComplete {
+				t.Errorf("runRenovateOnce() = %v, want runComplete: child did not see RENOVATE_EXIT_CODE_FOR_ERRORS=%s (env=%v)", got, tt.want, tt.env)
+			}
+		})
 	}
 }
 
@@ -1045,6 +1095,59 @@ func TestRunRenovateOnce_AbortedRunNamesTheHeapCause(t *testing.T) {
 	if !rec.AttrContains("renovate run failed", "fix", "mem_limit") {
 		value, ok := rec.Attr("renovate run failed", "fix")
 		t.Errorf("failure record fix = (%v, %v), want a value naming mem_limit", value, ok)
+	}
+}
+
+// TestRepositoryErrorDiagnosis covers exitCodeForErrors' codes 3 to 8 and
+// keeps Renovate's plain failure (1), its config parse error (2) and an abort
+// out of that population.
+func TestRepositoryErrorDiagnosis(t *testing.T) {
+	t.Parallel()
+
+	for code := range 10 {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			t.Parallel()
+			runErr := exec.CommandContext(t.Context(), "sh", "-c", "exit "+strconv.Itoa(code)).Run()
+			diag, got := repositoryErrorDiagnosis(runErr)
+			if want := code >= 3 && code <= 8; got != want {
+				t.Fatalf("repositoryErrorDiagnosis(exit %d) ok = %v, want %v", code, got, want)
+			}
+			if got && (diag.cause == "" || !strings.Contains(diag.fix, "Repository finished")) {
+				t.Errorf("repositoryErrorDiagnosis(exit %d) = %+v, want a cause and a fix naming 'Repository finished'", code, diag)
+			}
+		})
+	}
+	if _, ok := repositoryErrorDiagnosis(errors.New("fork/exec: no such file or directory")); ok {
+		t.Error("repositoryErrorDiagnosis(non-ExitError) ok = true, want false")
+	}
+}
+
+// TestRunRenovateOnce_RefusedCloneIsARepositoryErrorWarning pins the line an
+// operator reads when exitCodeForErrors turns a refused clone into exit 7: a
+// WARN naming the cause, never the ERROR `renovate run failed` the shipped
+// alert fires on, because the executor decides whether the run fails.
+// Serial: swaps slog.Default.
+func TestRunRenovateOnce_RefusedCloneIsARepositoryErrorWarning(t *testing.T) {
+	rec := capture.Default(t)
+	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "sh", "-c", "exit 7")
+	}
+
+	got := runRenovateOnce(t.Context(), time.Minute, "external", runPayload{}, runner)
+
+	if got != runRepositoryError {
+		t.Fatalf("runRenovateOnce() = %v, want runRepositoryError", got)
+	}
+	const msg = "renovate run ended in a repository error"
+	if n := rec.CountLevel(slog.LevelWarn, msg); n != 1 {
+		t.Fatalf("WARN records matching %q = %d, want 1; captured: %v", msg, n, rec.Messages())
+	}
+	if !rec.AttrContains(msg, "likely_cause", "external host error") {
+		value, ok := rec.Attr(msg, "likely_cause")
+		t.Errorf("warning likely_cause = (%v, %v), want a value naming the external host error", value, ok)
+	}
+	if n := rec.CountLevel(slog.LevelError, ""); n != 0 {
+		t.Errorf("ERROR records = %d, want 0 for a repository error; captured: %v", n, rec.Messages())
 	}
 }
 

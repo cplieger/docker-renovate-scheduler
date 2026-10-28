@@ -107,6 +107,105 @@ func TestExecutor_MarkerFollowsRunOutcome(t *testing.T) {
 	}
 }
 
+// TestExecutor_RepositoryErrorsFailOnlyAfterTheGrace pins failureGrace: a
+// repository error finishes ok with a caveat and leaves health alone until such
+// errors have lasted 2h, and a good run ends the series. Full passes and scoped
+// runs keep their own series. Serial: swaps slog.Default.
+func TestExecutor_RepositoryErrorsFailOnlyAfterTheGrace(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	rec := capture.Default(t)
+	d, markerPath := newBareDaemon(t, recordingRunner("true", nil))
+	outcome := runComplete
+	d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
+		return outcome
+	}
+	run := func(repos ...string) trigger.Outcome {
+		t.Helper()
+		j := newJob("external", repos, nil)
+		d.execute(t.Context(), t.Context().Err, j)
+		return <-j.Result()
+	}
+
+	run()
+	// Age the marker, so the tolerated run below must refresh it for the lease.
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(markerPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	outcome = runRepositoryError
+	if out := run(); !out.OK || out.Reason != toleratedReason {
+		t.Fatalf("first repository error = ok %v reason %q, want ok with %q", out.OK, out.Reason, toleratedReason)
+	}
+	if !d.marker.Healthy() {
+		t.Error("health unhealthy after a tolerated repository error, want it untouched")
+	}
+	if fi, err := os.Stat(markerPath); err != nil || !fi.ModTime().After(old) {
+		t.Errorf("marker not refreshed by a tolerated run (stat err %v), so the built-in lease would lapse in an outage", err)
+	}
+	if out := run(); !out.OK {
+		t.Errorf("second repository error within the grace = ok false (reason %q), want tolerated", out.Reason)
+	}
+
+	d.failingSince = d.failingSince.Add(-failureGrace)
+	if out := run(); out.OK || out.Reason != escalatedReason {
+		t.Fatalf("repository error past the grace = ok %v reason %q, want a failure with %q", out.OK, out.Reason, escalatedReason)
+	}
+	if d.marker.Healthy() {
+		t.Error("health healthy after repository errors lasting the grace, want unhealthy")
+	}
+	if n := rec.CountLevel(slog.LevelError, "renovate runs keep failing"); n != 1 {
+		t.Errorf("ERROR records matching %q = %d, want 1; captured: %v", "renovate runs keep failing", n, rec.Messages())
+	}
+
+	outcome = runComplete
+	run("owner/scoped")
+	if d.failingSince.IsZero() {
+		t.Error("a good scoped run ended the full pass's series, want it kept")
+	}
+	outcome = runRepositoryError
+	if out := run(); out.OK {
+		t.Error("full-pass repository error past the grace after a good scoped run = ok, want failed")
+	}
+	if out := run("owner/scoped"); !out.OK {
+		t.Error("first scoped repository error = failed, want tolerated on the scoped clock")
+	}
+	d.scopedFailingSince = d.scopedFailingSince.Add(-failureGrace)
+	if out := run("owner/scoped"); out.OK {
+		t.Error("scoped repository error past the grace = ok, want failed")
+	}
+
+	outcome = runComplete
+	run()
+	if !d.failingSince.IsZero() || !d.marker.Healthy() {
+		t.Errorf("after a good full pass: failingSince = %v, healthy = %v; want zero and healthy", d.failingSince, d.marker.Healthy())
+	}
+	outcome = runRepositoryError
+	if out := run(); !out.OK {
+		t.Error("first repository error after a good run = failed, want tolerated")
+	}
+
+	outcome = runFailed
+	run()
+	outcome = runRepositoryError
+	if out := run(); !out.OK {
+		t.Error("repository error within the grace after a hard failure = failed, want tolerated")
+	}
+	if d.marker.Healthy() {
+		t.Error("a tolerated repository error re-greened health after a hard failure, want it left unhealthy")
+	}
+
+	// A tolerated scheduled run still records its real result, so a restart
+	// during an outage runs again at boot.
+	j := newJob("interval", nil, nil)
+	d.execute(t.Context(), t.Context().Err, j)
+	if out := <-j.Result(); !out.OK {
+		t.Fatalf("scheduled repository error within the grace = failed (reason %q), want tolerated", out.Reason)
+	}
+	if stamp, known := d.stamp.Last(); !known || stamp.OK {
+		t.Errorf("stamp after a tolerated scheduled run = (%+v, known %v), want a recorded failure", stamp, known)
+	}
+}
+
 func TestExecutor_CarriesRunFailureReason(t *testing.T) {
 	tests := []struct {
 		name       string

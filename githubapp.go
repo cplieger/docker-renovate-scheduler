@@ -273,6 +273,15 @@ func (m *appTokenMinter) resolveInstallation(ctx context.Context, jwt string) (i
 		len(list), strings.Join(accounts, ", "), envAppInstallationID)
 }
 
+// transientMintError reports whether a failed mint is one a GitHub outage
+// causes: a server or network failure that outlasted the retries, a connection
+// GitHub dropped, or the mint's own budget running out. A rejected key, a
+// missing installation or a malformed response stays a hard failure.
+func transientMintError(err error) bool {
+	return httpx.IsTransient(err) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
 // call makes one REST request with retries on transport errors and 5xx, and
 // decodes a 2xx body into out. Error text carries GitHub's message only,
 // never a response body, which for the token endpoint holds the token.
