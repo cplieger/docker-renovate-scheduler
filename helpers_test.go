@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,26 +13,6 @@ import (
 	"github.com/cplieger/scheduler/v4"
 	"github.com/cplieger/scheduler/v4/trigger"
 )
-
-// saveLogGlobals captures the three globals slog.SetDefault mutates and restores
-// them at test end; call it before the swap. The returned func restores on demand.
-//
-// SetDefault also aims the log package at the installed handler and skips that
-// redirect for slog's own default handler, so reinstalling the previous logger
-// cannot undo it; slog's default handler emits through log.Output, so a dead log
-// writer silences the package. slog restores first because a non-default previous
-// handler re-runs the redirect.
-func saveLogGlobals(t *testing.T) func() {
-	t.Helper()
-	prevLogger, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
-	restore := func() {
-		slog.SetDefault(prevLogger)
-		log.SetOutput(prevWriter)
-		log.SetFlags(prevFlags)
-	}
-	t.Cleanup(restore)
-	return restore
-}
 
 func newJob(trig string, repos, env []string) *trigger.Job[runPayload] {
 	return trigger.NewJob(trig, runPayload{Repos: repos, Env: env})

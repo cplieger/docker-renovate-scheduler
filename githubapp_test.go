@@ -313,6 +313,42 @@ func TestMint_RefusesToGuessBetweenSeveralInstallations(t *testing.T) {
 	}
 }
 
+func TestMint_NeverFollowsARedirectToAnotherPortOnTheSameHost(t *testing.T) {
+	var leaked atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			leaked.Add(1)
+		}
+		writeJSON(w, http.StatusCreated, tokenBody())
+	}))
+	t.Cleanup(other.Close)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(api.Close)
+	m := newAppTokenMinter(&appConfig{key: testAppKey(), appID: testAppID, installationID: testInstallation})
+	m.apiBase = api.URL
+	m.baseDelay = time.Millisecond
+
+	_, err := m.mint(t.Context())
+	if err == nil {
+		t.Errorf("mint() error = nil, want the redirect to another origin refused")
+	}
+	if got := leaked.Load(); got != 0 {
+		t.Errorf("requests carrying the bearer JWT to another port = %d, want 0", got)
+	}
+}
+
+func TestMint_RefusesARedirectThatOnlyChangesTheIPv6ZoneCase(t *testing.T) {
+	m := newAppTokenMinter(&appConfig{key: testAppKey(), appID: testAppID, installationID: testInstallation})
+	from := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "https://[fe80::1%25eth0]:8443/app/installations/7/access_tokens", nil)
+	to := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "https://[fe80::1%25ETH0]:8443/app/installations/7/access_tokens", nil)
+
+	if err := m.client.CheckRedirect(to, []*http.Request{from}); err == nil {
+		t.Errorf("CheckRedirect(%s after %s) = nil, want the zone change refused", to.URL, from.URL)
+	}
+}
+
 func TestLoadAppConfig(t *testing.T) {
 	tests := []struct {
 		env      map[string]string
@@ -427,10 +463,9 @@ func bootAppDaemon(t *testing.T, keyPath string) string {
 	t.Setenv(envAppKeyFile, keyPath)
 	t.Setenv(envAppKeyInline, "")
 	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
-	saveLogGlobals(t)
 	var buf bytes.Buffer
 	var mu sync.Mutex
-	slog.SetDefault(slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	capture.SwapDefault(t, slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	logged := func() string {
 		mu.Lock()
 		defer mu.Unlock()
@@ -551,9 +586,8 @@ func TestRunDaemon_MisplacedSecretNeverReachesTheLog(t *testing.T) {
 				}
 				t.Setenv(k, v)
 			}
-			saveLogGlobals(t)
 			var buf bytes.Buffer
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			capture.SwapDefault(t, slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 			err := runDaemon(t.Context(), testSocketPath(t), recordingRunner("true", nil))
 
@@ -698,10 +732,9 @@ func TestExecute_TokenFailureFailsTheRunWithoutStartingRenovate(t *testing.T) {
 // global slog default.
 func TestExecute_TokenNeverReachesTheLog(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	saveLogGlobals(t)
 	var buf bytes.Buffer
 	var mu sync.Mutex
-	slog.SetDefault(slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	capture.SwapDefault(t, slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	var calls atomic.Int32
 	var jwts []string
@@ -741,6 +774,39 @@ func TestExecute_TokenNeverReachesTheLog(t *testing.T) {
 	}
 }
 
+func TestGitHubMessage(t *testing.T) {
+	t.Parallel()
+	const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiI0MjQyIn0.c2lnbmF0dXJl" // gitleaks:allow (fake JWT)
+	tests := []struct {
+		name    string
+		message string
+		want    string
+	}{
+		{
+			name:    "a cut inside an echoed JWT keeps none of it",
+			message: strings.Repeat("a", 180) + jwt[:40],
+			want:    strings.Repeat("a", 180) + "...",
+		},
+		{
+			name:    "a newline becomes a space",
+			message: "Bad\ncredentials",
+			want:    "Bad credentials",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			body, err := json.Marshal(map[string]string{"message": tt.message})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := githubMessage(body, jwt); got != tt.want {
+				t.Errorf("githubMessage(%q) = %q, want %q", body, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestExecute_AReflectedJWTNeverReachesTheLog uses a server that echoes the
 // bearer JWT in its error message. Not parallel: it swaps the global slog
 // default.
@@ -755,10 +821,9 @@ func TestExecute_AReflectedJWTNeverReachesTheLog(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-			saveLogGlobals(t)
 			var buf bytes.Buffer
 			var mu sync.Mutex
-			slog.SetDefault(slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			capture.SwapDefault(t, slog.New(slog.NewTextHandler(&lockedWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug})))
 			var jwts []string
 			d := appModeDaemon(t, recordingRunner("true", nil), func(w http.ResponseWriter, r *http.Request) {
 				jwt := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -776,7 +841,7 @@ func TestExecute_AReflectedJWTNeverReachesTheLog(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			logged := buf.String()
-			if !strings.Contains(logged, "rejected REDACTED") {
+			if !strings.Contains(logged, "rejected [redacted]") {
 				t.Fatalf("log lacks the redacted server message, so the test did not reach it:\n%s", logged)
 			}
 			for _, jwt := range jwts {

@@ -25,6 +25,7 @@ import (
 
 	"github.com/cplieger/envx/v2"
 	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/runesafe/v3"
 )
 
 // The scheduler's GitHub App settings stay outside RENOVATE_* so Renovate
@@ -203,8 +204,11 @@ func newAppTokenMinter(cfg *appConfig) *appTokenMinter {
 		return nil
 	}
 	return &appTokenMinter{
-		now:            time.Now,
-		client:         httpx.NewClient(tokenRequestTimeout),
+		now: time.Now,
+		client: &http.Client{
+			Timeout:       tokenRequestTimeout,
+			CheckRedirect: httpx.RedirectPolicyFunc(httpx.WithSameOrigin(true)),
+		},
 		key:            cfg.key,
 		apiBase:        githubAPIBase,
 		appID:          cfg.appID,
@@ -334,9 +338,9 @@ func (e *githubAPIError) Error() string {
 
 const maxGitHubMessage = 200
 
-// githubMessage extracts GitHub's error "message" with secret redacted,
-// bounded, or "" when the body is not GitHub's error shape. The order is
-// redact, normalize, redact, cap: a server can echo the request's JWT.
+// githubMessage extracts GitHub's error "message" as one line with secret
+// redacted, bounded, or "" when the body is not GitHub's error shape: a
+// server can echo the request's JWT.
 func githubMessage(body []byte, secret string) string {
 	var e struct {
 		Message string `json:"message"`
@@ -344,9 +348,8 @@ func githubMessage(body []byte, secret string) string {
 	if json.Unmarshal(body, &e) != nil {
 		return ""
 	}
-	msg := httpx.RedactSecretString(e.Message, httpx.Secret(secret))
-	msg = httpx.RedactSecretString(strings.ToValidUTF8(msg, ""), httpx.Secret(secret))
-	return strings.ToValidUTF8(msg[:min(len(msg), maxGitHubMessage)], "")
+	msg, _ := runesafe.RedactSingleLineCapped(e.Message, maxGitHubMessage, "...", secret)
+	return msg
 }
 
 // withRenovateToken appends the minted token after env so os/exec's
