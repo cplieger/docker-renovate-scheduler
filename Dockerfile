@@ -15,7 +15,7 @@ COPY scripts/collect-licenses.sh scripts/
 RUN --mount=type=cache,target=/go/pkg/mod \
     sh scripts/collect-licenses.sh --name docker-renovate-scheduler .
 
-FROM renovate/renovate:44.200.1@sha256:d2c9fe4124062e44b64b568f038fedf661ff86dcd6bc6f8d56c57a6d1889c3be
+FROM renovate/renovate:44.200.2@sha256:165e8e95bc337faede7558d7c7c30f2a0d57f52a444d6ddf92d83b6024e88447
 
 USER root
 
