@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/atomicfile/v4"
-	"github.com/cplieger/envx/v2"
-	"github.com/cplieger/scheduler/v4"
-	"github.com/cplieger/slogx"
+	"github.com/cplieger/go/envx"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/slogx"
 )
 
 const (
@@ -129,14 +129,14 @@ func (v *baseDirVerifier) verifyAt(ctx context.Context, dir string) error {
 }
 
 func probeBaseDirWrite(ctx context.Context, dir string) error {
-	res, err := atomicfile.ProbeWritable(ctx, dir, atomicfile.WithMkdirMode(0o700))
+	res, err := filesafe.ProbeWritable(ctx, dir, filesafe.WithMkdirMode(0o700))
 	if err != nil {
 		return fmt.Errorf("base dir %q write probe not attempted: %w", dir, err)
 	}
 	return baseDirProbeResultError(dir, res)
 }
 
-func baseDirProbeResultError(dir string, res atomicfile.ProbeResult) error {
+func baseDirProbeResultError(dir string, res filesafe.ProbeResult) error {
 	if res.OK() {
 		return nil
 	}

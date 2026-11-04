@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/health"
+	"github.com/cplieger/go/health"
 )
 
 func TestProbe_WedgedBuiltinLoopFailsFreshness(t *testing.T) {

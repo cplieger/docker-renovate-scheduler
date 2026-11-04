@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/cplieger/scheduler/v4/trigger"
+	"github.com/cplieger/go/scheduler/trigger"
 )
 
 func runClient(socketPath string, repos []string) int {

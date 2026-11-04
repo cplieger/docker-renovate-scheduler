@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/cplieger/health"
+	"github.com/cplieger/go/health"
 )
 
 func main() {

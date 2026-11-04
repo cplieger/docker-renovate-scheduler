@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 // The leader exits before its deadline; an unreaped member holds the sweep open.
