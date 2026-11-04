@@ -94,11 +94,30 @@ function serveGit(req, res, url, body) {
   if (req.headers['git-protocol']) {
     env.HTTP_GIT_PROTOCOL = req.headers['git-protocol'];
   }
-  const cgi = spawn('git', ['http-backend'], { env });
+  // A GET has no body and http-backend never reads its stdin, so it gets none: a
+  // write to a backend that already exited fails with EPIPE.
+  const hasBody = body.length > 0;
+  const cgi = spawn('git', ['http-backend'], {
+    env,
+    stdio: [hasBody ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+  });
   const chunks = [];
+  let answered = false;
   cgi.stdout.on('data', (chunk) => chunks.push(chunk));
   cgi.stderr.on('data', (chunk) => process.stderr.write(chunk));
+  // A failed spawn emits 'error' and may still emit 'close'.
+  cgi.on('error', (err) => {
+    process.stderr.write(`forge-stub: git http-backend: ${err.message}\n`);
+    if (!answered) {
+      answered = true;
+      res.writeHead(502).end();
+    }
+  });
   cgi.on('close', () => {
+    if (answered) {
+      return;
+    }
+    answered = true;
     const out = Buffer.concat(chunks);
     const split = out.indexOf('\r\n\r\n');
     const end = split < 0 ? out.indexOf('\n\n') : split;
@@ -121,7 +140,16 @@ function serveGit(req, res, url, body) {
     res.writeHead(status, headers);
     res.end(out.subarray(end + (split < 0 ? 2 : 4)));
   });
-  cgi.stdin.end(body);
+  if (hasBody) {
+    // A backend that refuses a request exits without reading its body: the write
+    // fails with EPIPE and the refusal is still on stdout.
+    cgi.stdin.on('error', (err) => {
+      if (err.code !== 'EPIPE') {
+        process.stderr.write(`forge-stub: git http-backend stdin: ${err.message}\n`);
+      }
+    });
+    cgi.stdin.end(body);
+  }
 }
 
 const server = createServer((req, res) => {
