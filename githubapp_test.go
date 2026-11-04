@@ -25,10 +25,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/scheduler/v4"
-	"github.com/cplieger/scheduler/v4/trigger"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/scheduler/trigger"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 const (
@@ -742,11 +742,11 @@ func TestTransientMintError(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{"server error after the retries", httpx.MarkTransient(&githubAPIError{status: http.StatusBadGateway}), true},
+		{"server error after the retries", httpclient.MarkTransient(&githubAPIError{status: http.StatusBadGateway}), true},
 		{"the mint budget ran out", fmt.Errorf("mint: %w", context.DeadlineExceeded), true},
 		{"a connection GitHub dropped", fmt.Errorf("POST /p: %w", io.EOF), true},
 		{"a body cut short", fmt.Errorf("POST /p: %w", io.ErrUnexpectedEOF), true},
-		{"a rejected key", httpx.Permanent(rejected), false},
+		{"a rejected key", httpclient.Permanent(rejected), false},
 		{"a key that cannot sign", errors.New("sign the JWT: bad key"), false},
 	}
 	for _, tt := range tests {

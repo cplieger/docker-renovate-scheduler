@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cplieger/scheduler/v4"
+	"github.com/cplieger/go/scheduler"
 )
 
 const (

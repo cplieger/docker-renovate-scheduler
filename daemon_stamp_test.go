@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/scheduler/v4"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 const startupSkippedMsg = "startup run skipped: the last scheduled run succeeded within the interval"

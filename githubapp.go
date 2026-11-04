@@ -23,9 +23,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/envx/v2"
-	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/envx"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/textsafe"
 )
 
 // The scheduler's GitHub App settings stay outside RENOVATE_* so Renovate
@@ -207,13 +207,13 @@ func newAppTokenMinter(cfg *appConfig) *appTokenMinter {
 		now: time.Now,
 		client: &http.Client{
 			Timeout:       tokenRequestTimeout,
-			CheckRedirect: httpx.RedirectPolicyFunc(httpx.WithSameOrigin(true)),
+			CheckRedirect: httpclient.RedirectPolicyFunc(httpclient.WithSameOrigin(true)),
 		},
 		key:            cfg.key,
 		apiBase:        githubAPIBase,
 		appID:          cfg.appID,
 		installationID: cfg.installationID,
-		baseDelay:      httpx.DefaultBaseDelay,
+		baseDelay:      httpclient.DefaultBaseDelay,
 	}
 }
 
@@ -278,7 +278,7 @@ func (m *appTokenMinter) resolveInstallation(ctx context.Context, jwt string) (i
 // GitHub dropped, or the mint's own budget running out. A rejected key, a
 // missing installation or a malformed response stays a hard failure.
 func transientMintError(err error) bool {
-	return httpx.IsTransient(err) || errors.Is(err, context.DeadlineExceeded) ||
+	return httpclient.IsTransient(err) || errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
@@ -286,39 +286,39 @@ func transientMintError(err error) bool {
 // decodes a 2xx body into out. Error text carries GitHub's message only,
 // never a response body, which for the token endpoint holds the token.
 func (m *appTokenMinter) call(ctx context.Context, method, path, jwt string, out any) error {
-	_, err := httpx.Do(ctx, func(ctx context.Context) (struct{}, error) {
+	_, err := httpclient.Do(ctx, func(ctx context.Context) (struct{}, error) {
 		return struct{}{}, m.attempt(ctx, method, path, jwt, out)
-	}, httpx.WithMaxAttempts(tokenMintAttempts), httpx.WithBaseDelay(m.baseDelay),
-		httpx.WithLabel("github app "+method+" "+path))
+	}, httpclient.WithMaxAttempts(tokenMintAttempts), httpclient.WithBaseDelay(m.baseDelay),
+		httpclient.WithLabel("github app "+method+" "+path))
 	return err
 }
 
 func (m *appTokenMinter) attempt(ctx context.Context, method, path, jwt string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, method, m.apiBase+path, http.NoBody)
 	if err != nil {
-		return httpx.Permanent(err)
+		return httpclient.Permanent(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", githubAPIVer)
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, httpx.LogSafeError(err))
+		return fmt.Errorf("%s %s: %w", method, path, httpclient.LogSafeError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := httpx.ReadLimitedBody(resp.Body, maxAPIBodyBytes)
+	body, err := httpclient.ReadLimitedBody(resp.Body, maxAPIBodyBytes)
 	if err != nil {
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		apiErr := &githubAPIError{method: method, path: path, status: resp.StatusCode, message: githubMessage(body, jwt)}
 		if resp.StatusCode >= 500 {
-			return httpx.MarkTransient(apiErr)
+			return httpclient.MarkTransient(apiErr)
 		}
-		return httpx.Permanent(apiErr)
+		return httpclient.Permanent(apiErr)
 	}
 	if err := json.NewDecoder(bytes.NewReader(body)).Decode(out); err != nil {
-		return httpx.Permanent(fmt.Errorf("%s %s: malformed response body", method, path))
+		return httpclient.Permanent(fmt.Errorf("%s %s: malformed response body", method, path))
 	}
 	return nil
 }
@@ -357,7 +357,7 @@ func githubMessage(body []byte, secret string) string {
 	if json.Unmarshal(body, &e) != nil {
 		return ""
 	}
-	msg, _ := runesafe.RedactSingleLineCapped(e.Message, maxGitHubMessage, "...", secret)
+	msg, _ := textsafe.RedactSingleLineCapped(e.Message, maxGitHubMessage, "...", secret)
 	return msg
 }
 

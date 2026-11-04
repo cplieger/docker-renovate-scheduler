@@ -16,10 +16,10 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/cplieger/health"
-	"github.com/cplieger/scheduler/v4"
-	"github.com/cplieger/scheduler/v4/trigger"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/scheduler/trigger"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 func newTestDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, context.CancelFunc, <-chan struct{}) {
