@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/health"
-	"github.com/cplieger/scheduler/v4"
-	"github.com/cplieger/scheduler/v4/trigger"
+	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/scheduler/trigger"
 )
 
 func newJob(trig string, repos, env []string) *trigger.Job[runPayload] {

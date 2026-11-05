@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/scheduler/v4/trigger"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/scheduler/trigger"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 // fakeDaemon runs serve off the test goroutine, so serve must not call t.Fatal.

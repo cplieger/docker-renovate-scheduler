@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/scheduler/v4"
-	"github.com/cplieger/scheduler/v4/trigger"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/scheduler/trigger"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 // startTestServer wires a queue + executor + trigger server on a temp socket

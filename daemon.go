@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cplieger/health"
-	"github.com/cplieger/scheduler/v4"
-	"github.com/cplieger/scheduler/v4/trigger"
+	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/scheduler/trigger"
 )
 
 var errContainmentLost = errors.New("renovate run process group survived the kill sweep")

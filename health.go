@@ -1,6 +1,6 @@
 package main
 
-import "github.com/cplieger/health"
+import "github.com/cplieger/go/health"
 
 const healthMarkerPath = health.DefaultPath
 

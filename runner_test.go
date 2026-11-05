@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/scheduler/v4"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 func TestRenovateInvocation(t *testing.T) {
