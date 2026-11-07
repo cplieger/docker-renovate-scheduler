@@ -118,8 +118,11 @@ func TestServeMetricsServesHealthz(t *testing.T) {
 			}
 		})
 	}
-	if reasons["failed"] == reasons["stale"] {
-		t.Errorf("a failed and a stale marker both report %q, want a reason naming each fault", reasons["failed"])
+	if reasons["failed"] != reasonRunFailed {
+		t.Errorf("GET /healthz on a failed marker reports %q, want %q", reasons["failed"], reasonRunFailed)
+	}
+	if reasons["stale"] != reasonStuck {
+		t.Errorf("GET /healthz on a stale marker reports %q, want %q", reasons["stale"], reasonStuck)
 	}
 
 	t.Run("HEAD", func(t *testing.T) {
