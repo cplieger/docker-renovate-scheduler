@@ -117,7 +117,7 @@ The healthcheck reads a file the scheduler updates after each run. Unhealthy mea
 
 ## Monitoring
 
-docker-renovate-scheduler logs one `run finished` record per run and can serve a Prometheus metrics page when `METRICS_LISTEN_ADDR` is set, for example `:9470`. Alert rules for Prometheus and for Loki ship in [`alerts/`](alerts/); load one of the two files. [Monitoring and alerts](docs/monitoring.md) lists them and says who tells you the schedule stopped. The image has a Docker healthcheck; [Knowing the app is alive](docs/monitoring.md#knowing-the-app-is-alive) says what it proves and who is told.
+docker-renovate-scheduler logs one `run finished` record per run and can serve a Prometheus metrics page when `METRICS_LISTEN_ADDR` is set, for example `:9470`. Alert rules for Prometheus and for Loki ship in [`alerts/`](alerts/). Load one of the two files. [Monitoring and alerts](docs/monitoring.md) lists them and says who tells you the schedule stopped. The image has a Docker healthcheck. [Knowing the app is alive](docs/monitoring.md#knowing-the-app-is-alive) says what it proves and who is told.
 
 ## Documentation
 

@@ -28,7 +28,7 @@ Every series starts with `renovate_scheduler_`. `scope` is `full` for a run over
 | `last_success_timestamp_seconds` | gauge | `scope` | Unix time the scope's last complete run ended |
 | `failing_since_timestamp_seconds` | gauge | `scope` | Unix time the current series of tolerated failures began, 0 when runs are not failing |
 | `trigger_rejected_total` | counter | `reason` | Run requests refused, `full` for a full queue and `closing` during shutdown |
-| `healthy` | gauge | | 1 while the healthcheck would pass, else 0 |
+| `healthy` | gauge | | 1 while the health file the healthcheck reads is present, else 0. It does not age, so a stopped schedule leaves it at 1 until `RenovateNoRecentRun` fires |
 | `info` | gauge | `mode`, `auth` | Always 1, with labels that name the scheduling mode (`built-in` or `external`) and the GitHub auth (`token` or `app`) |
 
 `result` is one of `complete`, `failed`, `aborted`, `timed_out`, `start_failed`, `repository_error`, `token_unavailable`, `token_failed`, `preflight_failed` and `contained`. The page also carries the Go runtime and process families (`go_*`, `process_*`) under the names Go's official Prometheus client uses, so stock Go dashboards work.
@@ -89,7 +89,7 @@ These lines are for reading a run by hand. No alert rule reads them.
 | `trigger request rejected` | WARN | `repos`, `reason` |
 | `run cancelled by shutdown` | WARN | `stage`, `trigger`, `repos` |
 
-A `docker exec` run's own command writes `triggered run accepted`, `triggered run started`, then `triggered run complete`, `triggered run tolerated a failure` (WARN, exit 0) or `triggered run failed` to the log of whatever ran it, and exits with the run's result.
+A `docker exec` run's own command writes `triggered run accepted`, `triggered run started`, then `triggered run complete`, `triggered run tolerated a failure` (WARN, exit 0) or `triggered run failed`. It writes them to the log of whatever ran it and exits with the run's result.
 
 ## Alerting
 
