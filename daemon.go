@@ -39,7 +39,7 @@ type daemon struct {
 	stamp    *scheduler.Stamp
 	tokens   *appTokenMinter // nil: Renovate uses its own RENOVATE_TOKEN
 	newCmd   scheduler.CommandRunner
-	runOnce  func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome
+	runOnce  func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult
 	fatal    chan error
 	// Only the executor accesses the failing-since times and halted. Each is the
 	// start of the first run in an unbroken series of tolerable failures, zero
@@ -60,13 +60,13 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	if err != nil {
 		slog.Error("github app configuration invalid", "error", err,
 			"hint", "see docs/configuration.md, 'GitHub App authentication'")
-		return err
+		return daemonStopped(err)
 	}
 
 	ln, err := trigger.Listen(socketPath)
 	if err != nil {
 		slog.Error("cannot bind trigger socket", "path", socketPath, "error", err)
-		return err
+		return daemonStopped(err)
 	}
 
 	marker := health.NewMarker(healthMarkerPath)
@@ -76,7 +76,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	if err = verifier.verify(ctx); err != nil {
 		logBaseDirError(baseDir(), err)
 		_ = ln.Close()
-		return err
+		return daemonStopped(err)
 	}
 
 	interval, scheduleEnabled := loadInterval()
@@ -173,7 +173,17 @@ func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, in
 	<-tickerDone
 	<-served
 	slog.Info("shutdown complete")
-	return fatalErr
+	if fatalErr != nil {
+		return daemonStopped(fatalErr)
+	}
+	return nil
+}
+
+// daemonStopped writes the one line that says the daemon is exiting
+// abnormally, at every error return of runDaemon, and returns err.
+func daemonStopped(err error) error {
+	slog.Error(daemonStoppedMsg, "error", err)
+	return err
 }
 
 func startTicker(ctx context.Context, d *daemon, interval time.Duration, enabled bool, remaining time.Duration) <-chan struct{} {
@@ -240,12 +250,11 @@ func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigg
 	dir := baseDirForEnv(j.Payload.Env)
 	if err := d.verifier.verifyAt(runCtx, dir); err != nil {
 		logBaseDirError(dir, err)
-		d.health.Set(false)
 		// The stamp shares the probed directory, so a timeout cannot safely write it.
 		if !errors.Is(err, context.DeadlineExceeded) {
 			d.recordScheduled(j.Trigger, false)
 		}
-		j.Finish(trigger.Result{OK: false, Duration: time.Since(start), Reason: "base directory preflight failed"})
+		d.finish(j, start, runVerdict{result: resultPreflightFailed, reason: "base directory preflight failed", exitCode: noExitCode})
 		return
 	}
 
@@ -259,36 +268,111 @@ func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigg
 		return
 	}
 
-	outcome := d.runOnce(runCtx, d.timeout, j.Trigger, p, d.newCmd)
-	if outcome == runContained {
+	res := d.runOnce(runCtx, d.timeout, j.Trigger, p, d.newCmd)
+	if res.outcome == runContained {
 		d.halted = true
-		d.health.Set(false)
 		// A contained scheduled run leaves the next boot due.
 		d.recordScheduled(j.Trigger, false)
 		slog.Error("halting run admission: renovate run process group survived the kill sweep",
 			"trigger", j.Trigger)
-		j.Finish(trigger.Result{OK: false, Duration: time.Since(start), Reason: containmentLostReason})
+		d.finish(j, start, runVerdict{result: resultContained, reason: containmentLostReason, exitCode: res.exitCode})
 		d.fatal <- errContainmentLost
 		return
 	}
-	ok := outcome == runComplete
-	tolerated := outcome == runRepositoryError && d.tolerate(j, start)
-	switch {
-	case ok:
+	ok := res.outcome == runComplete
+	tolerated := res.outcome == runRepositoryError && d.tolerate(j, start)
+	if ok {
 		*d.failingSinceFor(j) = time.Time{}
-		d.health.Set(true)
-	case tolerated:
-		d.keepHealth()
-	default:
-		d.health.Set(false)
 	}
 	// The stamp keeps the real result, so a restart during an outage retries at boot.
 	d.recordScheduled(j.Trigger, ok)
-	reason := failureReason(outcome, d.timeout)
+	reason := failureReason(res.outcome, d.timeout)
 	if tolerated {
 		reason = toleratedReason
 	}
-	j.Finish(trigger.Result{OK: ok || tolerated, Duration: time.Since(start), Reason: reason})
+	d.finish(j, start, runVerdict{
+		result: resultOf(res), reason: reason, exitCode: res.exitCode, ok: ok || tolerated, tolerated: tolerated,
+	})
+}
+
+// Completed-run results, the `result` field of the run finished record.
+const (
+	resultComplete         = "complete"
+	resultFailed           = "failed"
+	resultAborted          = "aborted"
+	resultTimedOut         = "timed_out"
+	resultStartFailed      = "start_failed"
+	resultRepositoryError  = "repository_error"
+	resultTokenUnavailable = "token_unavailable" //nolint:gosec // a result name, not a credential
+	resultTokenFailed      = "token_failed"
+	resultPreflightFailed  = "preflight_failed"
+	resultContained        = "contained"
+
+	runFinishedMsg   = "run finished"
+	daemonStoppedMsg = "daemon stopped"
+	// noExitCode is the record's exit_code when Renovate did not run.
+	noExitCode = -1
+)
+
+func resultOf(res runResult) string {
+	switch res.outcome {
+	case runComplete:
+		return resultComplete
+	case runStartFailed:
+		return resultStartFailed
+	case runTimedOut:
+		return resultTimedOut
+	case runRepositoryError:
+		return resultRepositoryError
+	case runContained:
+		return resultContained
+	}
+	if res.exitCode == abortExitCode {
+		return resultAborted
+	}
+	return resultFailed
+}
+
+// runVerdict is how a completed run ended. ok is the verdict the run client
+// reports, so a tolerated failure is ok.
+type runVerdict struct {
+	result    string
+	reason    string
+	exitCode  int
+	ok        bool
+	tolerated bool
+}
+
+// finish ends every completed run: it sets health from the verdict, writes
+// the run's one run finished record and finishes the job, so the record, the
+// health marker and the run client's exit code cannot disagree. A tolerated
+// failure leaves health as it was (keepHealth).
+func (d *daemon) finish(j *trigger.Job[runPayload], start time.Time, v runVerdict) {
+	if v.tolerated {
+		d.keepHealth()
+	} else {
+		d.health.Set(v.ok)
+	}
+	elapsed := time.Since(start)
+	slog.Info(runFinishedMsg, "trigger", j.Trigger, "scope", scopeOf(j), "result", v.result,
+		"ok", boolDigit(v.ok), "tolerated", boolDigit(v.tolerated),
+		"exit_code", v.exitCode, "duration_ms", elapsed.Milliseconds())
+	j.Finish(trigger.Result{OK: v.ok, Duration: elapsed, Reason: v.reason})
+}
+
+func scopeOf(j *trigger.Job[runPayload]) string {
+	if len(j.Payload.Repos) > 0 {
+		return "scoped"
+	}
+	return "full"
+}
+
+// boolDigit writes a verdict as 1 or 0, because a log rule unwraps it as a number.
+func boolDigit(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func (d *daemon) failingSinceFor(j *trigger.Job[runPayload]) *time.Time {
@@ -337,17 +421,22 @@ func (d *daemon) authorize(ctx context.Context, j *trigger.Job[runPayload], star
 	}
 	tok, err := d.tokens.mint(ctx)
 	if err != nil {
-		if transientMintError(err) && d.tolerate(j, start) {
+		transient := transientMintError(err)
+		if transient && d.tolerate(j, start) {
 			slog.Warn("renovate run skipped: github app token unavailable", "trigger", j.Trigger, "error", err)
-			d.keepHealth()
 			d.recordScheduled(j.Trigger, false)
-			j.Finish(trigger.Result{OK: true, Duration: time.Since(start), Reason: toleratedReason})
+			d.finish(j, start, runVerdict{
+				result: resultTokenUnavailable, reason: toleratedReason, exitCode: noExitCode, ok: true, tolerated: true,
+			})
 			return p, false
 		}
 		slog.Error("github app token request failed", "trigger", j.Trigger, "error", err)
-		d.health.Set(false)
 		d.recordScheduled(j.Trigger, false)
-		j.Finish(trigger.Result{OK: false, Duration: time.Since(start), Reason: mintFailedReason})
+		result := resultTokenFailed
+		if transient {
+			result = resultTokenUnavailable
+		}
+		d.finish(j, start, runVerdict{result: result, reason: mintFailedReason, exitCode: noExitCode})
 		return p, false
 	}
 	slog.Info("github app installation token issued", "trigger", j.Trigger,

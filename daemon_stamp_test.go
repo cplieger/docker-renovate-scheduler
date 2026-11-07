@@ -299,8 +299,8 @@ func TestExecutor_ContainmentRecordsFailure(t *testing.T) {
 	ctx := t.Context()
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
 	seedStamp(t, d.stampPath, time.Now(), "ok") // a fresh success the halt must displace
-	d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
-		return runContained
+	d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
+		return runResult{outcome: runContained}
 	}
 
 	j := newJob("interval", nil, nil)

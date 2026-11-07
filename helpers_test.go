@@ -108,14 +108,14 @@ func gatedRunner(t *testing.T) (runner scheduler.CommandRunner, awaitEntered, re
 // gatedRunOnce returns a runOnce seam that signals entry after execute's
 // shutdown preflight check, a boundary gatedRunner's readiness file cannot
 // observe, then blocks until released and reports a clean outcome.
-func gatedRunOnce(t *testing.T) (runOnce func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome, awaitEntered, release func()) {
+func gatedRunOnce(t *testing.T) (runOnce func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult, awaitEntered, release func()) {
 	t.Helper()
 	entered := make(chan struct{})
 	proceed := make(chan struct{})
-	runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
+	runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
 		close(entered)
 		<-proceed
-		return runComplete
+		return runResult{outcome: runComplete}
 	}
 	awaitEntered = func() {
 		select {

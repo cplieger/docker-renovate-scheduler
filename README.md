@@ -116,7 +116,7 @@ The healthcheck reads a file the scheduler updates after each run. Unhealthy mea
 
 ## Monitoring
 
-docker-renovate-scheduler writes logfmt lines with UTC times to its container log, and Renovate's own output follows on the same log in both scheduling modes. It has no metrics endpoint. [Monitoring and alerts](docs/monitoring.md) lists the log lines and two Loki alert rules, one for a failed run and one for no finished run in 14 hours.
+docker-renovate-scheduler writes logfmt lines with UTC times to its container log, and Renovate's own output follows on the same log in both scheduling modes. It has no metrics endpoint. [Monitoring and alerts](docs/monitoring.md) lists the log lines and the three Loki alert rules in `alerts/logql.yaml`: a failed run, no complete full run in 14 hours, and a scheduler that stopped with an error.
 
 ## Documentation
 

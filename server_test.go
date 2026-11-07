@@ -122,7 +122,7 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
 	// Read inflightCtx only after execDone closes.
 	var inflightCtx context.Context
-	d.runOnce = func(runCtx context.Context, timeout time.Duration, trig string, p runPayload, newCmd scheduler.CommandRunner) runOutcome {
+	d.runOnce = func(runCtx context.Context, timeout time.Duration, trig string, p runPayload, newCmd scheduler.CommandRunner) runResult {
 		inflightCtx = runCtx
 		return runOnce(runCtx, timeout, trig, p, newCmd)
 	}

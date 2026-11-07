@@ -32,52 +32,26 @@ docker-renovate-scheduler has no metrics endpoint. Its state is in its container
 
 ## Alerting
 
-These rules are for Loki's ruler. Save the block below as a file in Loki's rules folder, as [Loading an app's alert rules](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#loading-an-apps-alert-rules) shows. The rules work with the built-in schedule and with your own scheduler, because every run logs to the container log. With your own scheduler, its job result is a second, independent signal, because the `run` command exits with the run's result.
+`alerts/logql.yaml` holds the rules for Loki's ruler. Load it as [Loading an app's alert rules](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#loading-an-apps-alert-rules) shows. If you copied the two rules this page used to embed, delete them first: both would fire for the same fault.
 
-```yaml
-groups:
-  - name: renovate
-    rules:
-      - alert: RenovateRunFailed
-        expr: |
-          sum by (container) (count_over_time(
-            {container="renovate"} |= `level=ERROR` [15m]
-          )) > 0
-        for: 0m
-        labels:
-          severity: warning
-        annotations:
-          summary: "renovate: the scheduler logged an error"
-          description: >
-            A run failed or timed out, repository errors or token outages
-            lasted 2h, a GitHub App token request failed, the base-directory
-            preflight failed, or a leftover process halted run admission.
-            Check the container logs, RENOVATE_TOKEN or the GitHub App
-            settings, and whether the platform is reachable.
-      - alert: RenovateNoRecentRun
-        expr: |
-          absent_over_time({container="renovate"} |= `renovate run complete` [14h])
-        for: 30m
-        labels:
-          severity: warning
-        annotations:
-          summary: "renovate has not completed a run in 14h"
-          description: >
-            No `renovate run complete` line in 14h. Runs may be failing, the
-            container or log pipeline may have stopped, the container may have
-            been renamed, or your scheduler may have stopped sending requests.
-            Rule those out, then restart the container.
-```
+| Alert | Fires when | Severity |
+| --- | --- | --- |
+| `RenovateRunFailed` | the latest run of a scope, full or scoped, failed; it resolves at that scope's next good run | warning |
+| `RenovateNoRecentRun` | no complete full run in 14h | warning |
+| `RenovateDaemonStopped` | the scheduler logged `daemon stopped` and exited | warning |
 
-When a run leaves behind a process that cannot be stopped, the scheduler logs `halting run admission`, stops taking runs and exits. The container restart then ends the leftover process. A normal shutdown lets the current run finish, so a redeploy fires `RenovateRunFailed` only if that run then fails.
+The rules read the `run finished` record that every completed run writes once at INFO, and the `daemon stopped` line, so keep `LOG_LEVEL` at `info`. Renovate reads the same setting.
 
-`RenovateRunFailed` can fire while updates are landing. A run that runs out of node's heap fails after its repositories are processed, so its pull requests are already open. That failure line carries `likely_cause` and `fix`, and [Memory and the package cache](configuration.md#memory-and-the-package-cache) has the remedy.
+| Record | Level | Fields |
+| --- | --- | --- |
+| `run finished` | INFO | `trigger`; `scope` (`full`, or `scoped` for a run that named repositories); `result` (`complete`, `failed`, `aborted`, `timed_out`, `start_failed`, `repository_error`, `token_unavailable`, `token_failed`, `preflight_failed` or `contained`); `ok` (1 or 0, as the `run` command reports it, so a tolerated failure is 1); `tolerated` (1 or 0); `exit_code` (Renovate's, or -1 when Renovate did not run or a signal ended it); `duration_ms` |
+| `daemon stopped` | ERROR | `error`. The scheduler exits after it |
 
-`RenovateNoRecentRun` watches a heartbeat. The scheduler logs `renovate run complete` after every run that succeeds, in both modes. With the built-in schedule that is at start when a run is due, then every `RUN_INTERVAL`, 6h by default. With your own scheduler it is once per request. A run that exits zero but leaves a process behind logs `halting run admission` at ERROR instead, which `RenovateRunFailed` catches.
+A run cancelled by shutdown, or refused after a halt, did not complete and writes no record. A normal shutdown lets the current run finish, so a redeploy fires `RenovateRunFailed` only if that run then fails.
 
-Set the `RenovateNoRecentRun` window to at least twice the sum of your `RUN_INTERVAL` and `RUN_TIMEOUT`, which is 14h with the defaults. A run that tolerates a [repository error](#repository-errors) logs no `renovate run complete`, so one such run doubles the gap. With your own scheduler, set it to at least twice the sum of that scheduler's cadence and `RUN_TIMEOUT`. A restart keeps the schedule's rhythm, so it adds nothing to that gap.
+Set the 14h windows to at least twice the sum of your `RUN_INTERVAL` and `RUN_TIMEOUT`. With your own scheduler, use that scheduler's cadence. A tolerated run is not a complete run, so one such run doubles the gap `RenovateNoRecentRun` sees.
 
-Thresholds and the `severity` label are starting points. Change the `container` selector to the label your log collector sets, such as `job` or `service`. Route by whatever labels your Alertmanager uses.
+Thresholds and the `severity` label are starting points. Change the `container` selector to the label your log collector sets, such as `job` or `service`.
 
 ## Repository errors
 

@@ -91,7 +91,14 @@ const (
 	runRepositoryError
 )
 
-func runRenovateOnce(ctx context.Context, timeout time.Duration, trig string, p runPayload, newCmd scheduler.CommandRunner) runOutcome {
+// runResult is one Renovate run: its outcome and Renovate's exit code, -1
+// when the process did not start or a signal ended it.
+type runResult struct {
+	outcome  runOutcome
+	exitCode int
+}
+
+func runRenovateOnce(ctx context.Context, timeout time.Duration, trig string, p runPayload, newCmd scheduler.CommandRunner) runResult {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -104,9 +111,10 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trig string, p 
 	cmd.Env = withChildOverrides(p.Env)
 	if startErr := cmd.Start(); startErr != nil {
 		logRunFailure(trig, time.Since(start).Milliseconds(), startErr)
-		return runStartFailed
+		return runResult{outcome: runStartFailed, exitCode: -1}
 	}
 	runErr := cmd.Wait()
+	exitCode := cmd.ProcessState.ExitCode()
 	durationMs := time.Since(start).Milliseconds()
 	// Read the deadline before the containment sweep consumes more time.
 	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
@@ -116,10 +124,10 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trig string, p 
 	switch {
 	case runErr == nil:
 		if survived {
-			return runContained
+			return runResult{outcome: runContained, exitCode: exitCode}
 		}
 		slog.Info("renovate run complete", "trigger", trig, "duration_ms", durationMs)
-		return runComplete
+		return runResult{outcome: runComplete, exitCode: exitCode}
 	case timedOut:
 		failure = runTimedOut
 		slog.Error("renovate run timed out",
@@ -130,9 +138,9 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trig string, p 
 		}
 	}
 	if survived {
-		return runContained
+		return runResult{outcome: runContained, exitCode: exitCode}
 	}
-	return failure
+	return runResult{outcome: failure, exitCode: exitCode}
 }
 
 // abortExitCode is how node's SIGABRT reaches the daemon: the entrypoint chain

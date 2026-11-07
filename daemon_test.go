@@ -116,8 +116,8 @@ func TestExecutor_RepositoryErrorsFailOnlyAfterTheGrace(t *testing.T) {
 	rec := capture.Default(t)
 	d, markerPath := newBareDaemon(t, recordingRunner("true", nil))
 	outcome := runComplete
-	d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
-		return outcome
+	d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
+		return runResult{outcome: outcome}
 	}
 	run := func(repos ...string) trigger.Result {
 		t.Helper()
@@ -221,8 +221,8 @@ func TestExecutor_CarriesRunFailureReason(t *testing.T) {
 			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 			d, _ := newBareDaemon(t, recordingRunner("true", nil))
 			d.timeout = time.Hour
-			d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
-				return tt.outcome
+			d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
+				return runResult{outcome: tt.outcome}
 			}
 
 			j := newJob("external", nil, nil)
@@ -804,9 +804,9 @@ func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
 	invocations := 0
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
 	d.marker.Set(true) // a healthy pre-containment state the halt must clear
-	d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
+	d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
 		invocations++
-		return runContained // the group survived the sweep
+		return runResult{outcome: runContained} // the group survived the sweep
 	}
 
 	first := newJob("external", nil, nil)
@@ -875,10 +875,10 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 	entered := make(chan struct{})
 	proceed := make(chan struct{})
 	var release sync.Once
-	runOnce := func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
+	runOnce := func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
 		close(entered)
 		<-proceed
-		return runContained // the sweep could not confirm group death — reported after shutdown began
+		return runResult{outcome: runContained} // the sweep could not confirm group death — reported after shutdown began
 	}
 
 	sock := testSocketPath(t)
@@ -985,8 +985,8 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
 
-	runOnce := func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
-		return runContained // the group survived the sweep mid-operation
+	runOnce := func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
+		return runResult{outcome: runContained} // the group survived the sweep mid-operation
 	}
 
 	sock := testSocketPath(t)
