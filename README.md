@@ -116,7 +116,7 @@ The healthcheck reads a file the scheduler updates after each run. Unhealthy mea
 
 ## Monitoring
 
-docker-renovate-scheduler writes logfmt lines with UTC times to its container log, and Renovate's own output follows on the same log in both scheduling modes. It has no metrics endpoint. [Monitoring and alerts](docs/monitoring.md) lists the log lines and the three Loki alert rules in `alerts/logql.yaml`: a failed run, no complete full run in 14 hours, and a scheduler that stopped with an error.
+docker-renovate-scheduler writes logfmt lines with UTC times to its container log, and Renovate's own output follows on the same log in both scheduling modes. Set `METRICS_LISTEN_ADDR`, for example `:9470`, to serve Prometheus metrics; unset, the image opens no port. [Monitoring and alerts](docs/monitoring.md) lists the log lines and two alternative rule files: `alerts/logql.yaml` for Loki and `alerts/promql.yaml` for Prometheus. Both alert on a failed run and on no complete full run in 14 hours. The Loki file also alerts on a scheduler that stopped with an error, which `RenovateDown` covers in the Prometheus file.
 
 ## Documentation
 

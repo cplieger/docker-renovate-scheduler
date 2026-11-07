@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/cplieger/go/health"
-	"github.com/cplieger/go/measure"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
 )
@@ -96,9 +95,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	logAuthMode(app, runTimeout, timeout)
 
 	completed := scheduler.NewStamp(completedStampPath())
-	reg := measure.NewRegistry(metricsPrefix)
-	last, known := completed.Last()
-	metrics := newRunMetrics(reg, marker, modeName(scheduleEnabled), authName(app), last, known)
+	reg, metrics := newMetricsRegistry(marker, modeName(scheduleEnabled), authName(app), completed)
 	metricsAddr := metricsListenAddr()
 	stopMetrics, err := serveMetrics(ctx, metricsAddr, reg)
 	if err != nil {

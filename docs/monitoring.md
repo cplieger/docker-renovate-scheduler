@@ -1,10 +1,10 @@
 # Monitoring and alerts
 
-This page lists the log lines docker-renovate-scheduler writes and two alert rules for them. It is for readers who send container logs to Loki or a similar log store.
+This page lists the log lines docker-renovate-scheduler writes, its optional metrics and the alert rules for both. It is for readers who send container logs to Loki or scrape metrics with Prometheus.
 
 ## What it logs
 
-docker-renovate-scheduler has no metrics endpoint. Its state is in its container log. The scheduler writes its own lines as logfmt with UTC times, whatever the container's `TZ`, and Renovate's output follows on the same log. Set `LOG_FORMAT=json` for Renovate to write JSON. Every run, scheduled or started with `docker exec`, runs inside the scheduler, so both reach the container log in both scheduling modes.
+Its state is in its container log, and, with `METRICS_LISTEN_ADDR` set, on a Prometheus metrics page at `/metrics`. With the setting unset, the image opens no port. The scheduler writes its own lines as logfmt with UTC times, whatever the container's `TZ`, and Renovate's output follows on the same log. Set `LOG_FORMAT=json` for Renovate to write JSON. Every run, scheduled or started with `docker exec`, runs inside the scheduler, so both reach the container log in both scheduling modes.
 
 | Message | Level | Fields worth reading |
 | --- | --- | --- |
@@ -32,13 +32,14 @@ docker-renovate-scheduler has no metrics endpoint. Its state is in its container
 
 ## Alerting
 
-`alerts/logql.yaml` holds the rules for Loki's ruler. Load it as [Loading an app's alert rules](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#loading-an-apps-alert-rules) shows. If you copied the two rules this page used to embed, delete them first: both would fire for the same fault.
+`alerts/logql.yaml` holds the rules for Loki's ruler, and `alerts/promql.yaml` the same alerts for Prometheus over the metrics page, scraped as job `renovate`. Load one of the two files, not both, as [Loading an app's alert rules](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#loading-an-apps-alert-rules) shows. If you copied the two rules this page used to embed, delete them first: both would fire for the same fault.
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
 | `RenovateRunFailed` | the latest run of a scope, full or scoped, failed; it resolves at that scope's next good run | warning |
 | `RenovateNoRecentRun` | no complete full run in 14h | warning |
-| `RenovateDaemonStopped` | the scheduler logged `daemon stopped` and exited | warning |
+| `RenovateDaemonStopped` | the scheduler logged `daemon stopped` and exited; in `alerts/logql.yaml` only | warning |
+| `RenovateDown` | no successful scrape for 5m, which also covers a stopped scheduler; in `alerts/promql.yaml` only | warning |
 
 The rules read the `run finished` record that every completed run writes once at INFO, and the `daemon stopped` line, so keep `LOG_LEVEL` at `info`. Renovate reads the same setting.
 

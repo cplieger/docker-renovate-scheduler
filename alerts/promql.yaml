@@ -1,0 +1,57 @@
+# Alert rules for docker-renovate-scheduler as a Prometheus rule group, for
+# Prometheus, Mimir, vmalert or any ruler that reads Prometheus rules. This file
+# is the alternative to alerts/logql.yaml: load one of the two, not both. The
+# rules read the page served when METRICS_LISTEN_ADDR is set; scrape it as job
+# `renovate`. Thresholds and severity labels are starting points. The 14h
+# window (50400 seconds) is twice RUN_INTERVAL plus RUN_TIMEOUT at the
+# defaults; resize it to your schedule. RenovateDown exists only in this file;
+# in alerts/logql.yaml, RenovateDaemonStopped covers a stopped scheduler. Notes
+# are in docs/monitoring.md.
+groups:
+  - name: renovate
+    rules:
+      # Two arms, because neither covers the other: `up == 0` catches a target
+      # that fails its scrape and keeps its labels, `absent(up{...})` catches a
+      # target that is gone. Use an exact job matcher, never a regex.
+      - alert: RenovateDown
+        expr: up{job="renovate"} == 0 or absent(up{job="renovate"})
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "docker-renovate-scheduler is not being scraped"
+          description: >
+            No successful scrape for 5m: the container is stopped, crash-looping
+            or refusing to start, or the scrape cannot reach METRICS_LISTEN_ADDR.
+            Check the container's state and its `daemon stopped` line.
+      # A scope's series appear at its first completed run, so a fresh install
+      # stays quiet, and the rule resolves at that scope's next good run.
+      - alert: RenovateRunFailed
+        expr: renovate_scheduler_last_run_ok == 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The last {{ $labels.scope }} Renovate run failed"
+          description: >
+            The latest completed run of this scope failed.
+            renovate_scheduler_last_run_result names the cause, and the
+            container log has the detail. Check RENOVATE_TOKEN or the GitHub
+            App settings, whether the platform is reachable, and the memory limit.
+      # The full scope's last success is read back from RENOVATE_BASE_DIR after
+      # a restart. With no complete full run on record the series is absent, so
+      # the second arm measures the wait from the process start instead.
+      - alert: RenovateNoRecentRun
+        expr: |
+          time() - renovate_scheduler_last_success_timestamp_seconds{scope="full"} > 50400
+          or
+          (time() - process_start_time_seconds > 50400 unless on (job, instance) renovate_scheduler_last_success_timestamp_seconds{scope="full"})
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No full Renovate run has completed in 14h"
+          description: >
+            No complete full run in 14h. Runs may be failing or tolerated, or
+            the schedule or your own scheduler may have stopped. Runs scoped to
+            repositories do not count.

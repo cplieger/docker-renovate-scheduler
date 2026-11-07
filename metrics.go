@@ -104,6 +104,14 @@ func newRunMetrics(reg *measure.Registry, marker *health.Marker, mode, auth stri
 	return m
 }
 
+// newMetricsRegistry builds the registry the metrics page serves, seeded from
+// the completed-run stamp. alert_parity_test.go builds it the same way.
+func newMetricsRegistry(marker *health.Marker, mode, auth string, completed *scheduler.Stamp) (*measure.Registry, *runMetrics) {
+	reg := measure.NewRegistry(metricsPrefix)
+	last, known := completed.Last()
+	return reg, newRunMetrics(reg, marker, mode, auth, last, known)
+}
+
 func unixSeconds(t time.Time) float64 {
 	return float64(t.Unix())
 }
