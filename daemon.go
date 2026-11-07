@@ -98,7 +98,8 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	completed := scheduler.NewStamp(completedStampPath())
 	reg, metrics := newMetricsRegistry(marker, modeName(scheduleEnabled), authName(app), completed)
 	metricsAddr := metricsListenAddr()
-	stopMetrics, err := serveMetrics(ctx, metricsAddr, reg)
+	healthz := newHealthz(marker, runLease(interval, scheduleEnabled, runTimeout))
+	stopMetrics, err := serveMetrics(ctx, metricsAddr, reg, healthz)
 	if err != nil {
 		slog.Error("cannot listen on METRICS_LISTEN_ADDR", "value", metricsAddr, "error", err)
 		_ = ln.Close()
