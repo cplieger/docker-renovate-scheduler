@@ -43,7 +43,8 @@ groups:
       # a restart. With no complete full run on record the series is absent, so
       # the second arm measures the wait from the process start instead. That
       # arm counts only the target scraped as job `renovate`; every exporter
-      # has a process start time, so rename the job in both arms together.
+      # has a process start time, so rename renovate in every job matcher in
+      # this file, RenovateDown's two arms and this one.
       - alert: RenovateNoRecentRun
         expr: |
           time() - renovate_scheduler_last_success_timestamp_seconds{scope="full"} > 50400

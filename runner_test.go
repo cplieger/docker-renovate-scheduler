@@ -210,9 +210,9 @@ exec setsid -w sh -c 'echo $$ > "$0"; exec sleep 30' "$1"`
 // TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly pins the distinct
 // ERROR messages for a timed-out run vs a genuine non-zero exit. The outcomes
 // differ too (runTimedOut vs runFailed) and their own tests pin those; the
-// image smoke test and the docs' message table read the message, so a mutation
-// that swaps or downgrades either must fail here even where the outcome is
-// still right.
+// docs' message table lists both messages and the image smoke test reads
+// "renovate run failed", so a mutation that swaps or downgrades either must
+// fail here even where the outcome is still right.
 func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	tests := []struct {
 		name    string
