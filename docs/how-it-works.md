@@ -45,7 +45,7 @@ When a run leaves a process behind that the scheduler cannot stop, the scheduler
 
 ## Health
 
-The healthcheck runs `docker-renovate-scheduler health`, which reads a file the scheduler updates after each run.
+The healthcheck runs `docker-renovate-scheduler health`, which reads a file the scheduler updates after each run. With `METRICS_LISTEN_ADDR` set, `/healthz` on that address gives the same verdict while the scheduler can write that file, and names the failed check. Nothing tells you about an unhealthy container unless something watches Docker health or probes `/healthz`. [Knowing the app is alive](monitoring.md#knowing-the-app-is-alive) lists the answers and who is told.
 
 With the built-in schedule, the container starts unhealthy and turns healthy after the first successful run. When the record on `/data` shows a successful run within the last interval, the startup run is skipped and the container starts healthy. A failed run makes it unhealthy, and the next good run makes it healthy again. A health file that no run has updated within `2 x RUN_INTERVAL + RUN_TIMEOUT` also counts as unhealthy, so a stopped schedule shows as an unhealthy container instead of a quiet one. With the defaults that is 13 hours.
 

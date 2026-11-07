@@ -4,7 +4,9 @@ This page covers what the container accepts and what the image contains. It is f
 
 ## What the container accepts
 
-The image opens no ports and runs no web server. The only way to start a run from outside the scheduler is a `docker exec` of the `run` command, which talks to the scheduler through a socket at `/tmp/docker-renovate-scheduler.sock`. Only the container's own user can open that socket, and only from inside the container, which is the same boundary `docker exec` already enforces. A `run` from another user fails at once with `permission denied`.
+The image opens no port and runs no web server unless `METRICS_LISTEN_ADDR` is set. That listener serves only `GET /metrics` and `GET /healthz`, answers any other path with 404 and any other method with 405, and has no login, so keep it on your network. It cuts off a client that takes over 10 seconds to send its request or 30 seconds to read the answer.
+
+The only way to start a run from outside the scheduler is a `docker exec` of the `run` command, which talks to the scheduler through a socket at `/tmp/docker-renovate-scheduler.sock`. Only the container's own user can open that socket, and only from inside the container, which is the same boundary `docker exec` already enforces. A `run` from another user fails at once with `permission denied`.
 
 The container runs as Renovate's non-root user, UID 12021, or as the user Compose `user:` sets. The socket and the health file belong to that user, so `docker exec` runs must use it too. [Running as another user](configuration.md#running-as-another-user) explains what another user needs.
 
@@ -24,7 +26,9 @@ The image removes the `docker` command-line tool from Renovate's base image, so 
 | golang, the builder stage only | [Docker Hub](https://hub.docker.com/_/golang) |
 | [`github.com/cplieger/go/filesafe`](https://github.com/cplieger/go/tree/main/filesafe) | the write check on the base directory |
 | [`github.com/cplieger/go/envx`](https://github.com/cplieger/go/tree/main/envx) | reading environment variables |
-| [`github.com/cplieger/go/health`](https://github.com/cplieger/go/tree/main/health) | the file-based healthcheck |
+| [`github.com/cplieger/go/health`](https://github.com/cplieger/go/tree/main/health) | the file-based healthcheck and the `/healthz` answer |
+| [`github.com/cplieger/go/httpserver`](https://github.com/cplieger/go/tree/main/httpserver) | the optional metrics listener's timeouts and shutdown |
+| [`github.com/cplieger/go/measure`](https://github.com/cplieger/go/tree/main/measure) | the optional metrics page |
 | [`github.com/cplieger/go/httpclient`](https://github.com/cplieger/go/tree/main/httpclient) | retries for the GitHub App token request |
 | [`github.com/cplieger/go/textsafe`](https://github.com/cplieger/go/tree/main/textsafe) | sanitizing, redacting and capping GitHub API error text before it is logged |
 | [`github.com/cplieger/go/scheduler`](https://github.com/cplieger/go/tree/main/scheduler) | interval parsing, the run loop, the command runner and the socket queue |
