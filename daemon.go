@@ -280,9 +280,14 @@ func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigg
 		return
 	}
 	ok := res.outcome == runComplete
-	tolerated := res.outcome == runRepositoryError && d.tolerate(j, start)
+	tolerated := false
+	if res.outcome == runRepositoryError {
+		var failing time.Duration
+		tolerated, failing = d.tolerate(j, start)
+		logRepositoryError(runCtx, j, res, failing, tolerated)
+	}
 	if ok {
-		*d.failingSinceFor(j) = time.Time{}
+		d.recovered(j)
 	}
 	// The stamp keeps the real result, so a restart during an outage retries at boot.
 	d.recordScheduled(j.Trigger, ok)
@@ -382,23 +387,44 @@ func (d *daemon) failingSinceFor(j *trigger.Job[runPayload]) *time.Time {
 	return &d.failingSince
 }
 
-// tolerate reports whether a failure an outage can cause passes as a warning:
-// the first of a series, and any within failureGrace of that run's start. A
-// tolerated failure keeps health's state (keepHealth). Past the grace it logs
-// the escalation and returns false.
-func (d *daemon) tolerate(j *trigger.Job[runPayload], start time.Time) bool {
+// tolerate reports whether a failure an outage can cause passes as a warning
+// (the first of a series, and any within failureGrace of that run's start)
+// and how long runs have failed. A tolerated failure keeps health's state
+// (keepHealth).
+func (d *daemon) tolerate(j *trigger.Job[runPayload], start time.Time) (tolerated bool, failingFor time.Duration) {
 	since := d.failingSinceFor(j)
 	if since.IsZero() {
 		*since = start
-		return true
 	}
 	failing := time.Since(*since)
-	if failing < failureGrace {
-		return true
+	return failing < failureGrace, failing.Round(time.Second)
+}
+
+// failureLevel is the level of a failed run's one line: WARN while the
+// failure is tolerated, ERROR once it fails the run.
+func failureLevel(tolerated bool) slog.Level {
+	if tolerated {
+		return slog.LevelWarn
 	}
-	slog.Error("renovate runs keep failing", "trigger", j.Trigger, "repos", j.Payload.Repos,
-		"failing_for", failing.Round(time.Second))
-	return false
+	return slog.LevelError
+}
+
+func logRepositoryError(ctx context.Context, j *trigger.Job[runPayload], res runResult, failing time.Duration, tolerated bool) {
+	diag, _ := repositoryErrorDiagnosis(res.err)
+	slog.Log(ctx, failureLevel(tolerated), "renovate run ended in a repository error",
+		"trigger", j.Trigger, "duration_ms", res.duration.Milliseconds(), "error", res.err,
+		"likely_cause", diag.cause, "fix", diag.fix, "failing_for", failing)
+}
+
+// recovered ends the job's series of tolerable failures at a good run.
+func (d *daemon) recovered(j *trigger.Job[runPayload]) {
+	since := d.failingSinceFor(j)
+	if since.IsZero() {
+		return
+	}
+	slog.Info("renovate runs recovered", "trigger", j.Trigger, "scope", scopeOf(j),
+		"failing_for", time.Since(*since).Round(time.Second))
+	*since = time.Time{}
 }
 
 // keepHealth leaves health as it was after a tolerated failure, refreshing a
@@ -421,22 +447,20 @@ func (d *daemon) authorize(ctx context.Context, j *trigger.Job[runPayload], star
 	}
 	tok, err := d.tokens.mint(ctx)
 	if err != nil {
-		transient := transientMintError(err)
-		if transient && d.tolerate(j, start) {
-			slog.Warn("renovate run skipped: github app token unavailable", "trigger", j.Trigger, "error", err)
-			d.recordScheduled(j.Trigger, false)
-			d.finish(j, start, runVerdict{
-				result: resultTokenUnavailable, reason: toleratedReason, exitCode: noExitCode, ok: true, tolerated: true,
-			})
+		d.recordScheduled(j.Trigger, false)
+		if !transientMintError(err) {
+			slog.Error("github app token request failed", "trigger", j.Trigger, "error", err)
+			d.finish(j, start, runVerdict{result: resultTokenFailed, reason: mintFailedReason, exitCode: noExitCode})
 			return p, false
 		}
-		slog.Error("github app token request failed", "trigger", j.Trigger, "error", err)
-		d.recordScheduled(j.Trigger, false)
-		result := resultTokenFailed
-		if transient {
-			result = resultTokenUnavailable
+		tolerated, failing := d.tolerate(j, start)
+		slog.Log(ctx, failureLevel(tolerated), "renovate run skipped: github app token unavailable",
+			"trigger", j.Trigger, "error", err, "failing_for", failing)
+		v := runVerdict{result: resultTokenUnavailable, reason: mintFailedReason, exitCode: noExitCode}
+		if tolerated {
+			v.reason, v.ok, v.tolerated = toleratedReason, true, true
 		}
-		d.finish(j, start, runVerdict{result: result, reason: mintFailedReason, exitCode: noExitCode})
+		d.finish(j, start, v)
 		return p, false
 	}
 	slog.Info("github app installation token issued", "trigger", j.Trigger,

@@ -15,13 +15,13 @@ docker-renovate-scheduler has no metrics endpoint. Its state is in its container
 | `github app installation resolved` | INFO | `installation_id`, `account`. Logged once when `GITHUB_APP_INSTALLATION_ID` is unset |
 | `github app installation token issued` | INFO | `trigger`, `installation_id`, `expires_at` |
 | `github app token request failed` | ERROR | `trigger`, `error`. The run fails and Renovate does not start |
-| `renovate run skipped: github app token unavailable` | WARN | `trigger`, `error`. GitHub did not answer the token request; tolerated for 2h, see [Repository errors](#repository-errors) |
+| `renovate run skipped: github app token unavailable` | WARN, or ERROR once such failures have lasted 2h | `trigger`, `error`, `failing_for`. GitHub did not answer the token request, see [Repository errors](#repository-errors) |
 | `startup run skipped: the last scheduled run succeeded within the interval` | INFO | `last_success`, `interval` |
 | `renovate run starting` | INFO | `trigger`, `repos`, `timeout` |
 | `renovate run complete` | INFO | `trigger`, `duration_ms` |
 | `renovate run failed` | ERROR | `trigger`, `duration_ms`, `error`, and `likely_cause` and `fix` after a heap exhaustion |
-| `renovate run ended in a repository error` | WARN | `trigger`, `duration_ms`, `error`, `likely_cause`, `fix`. See [Repository errors](#repository-errors) |
-| `renovate runs keep failing` | ERROR | `trigger`, `repos`, `failing_for`. Repository errors or token outages have lasted 2h; this run fails |
+| `renovate run ended in a repository error` | WARN, or ERROR once such failures have lasted 2h | `trigger`, `duration_ms`, `error`, `likely_cause`, `fix`, `failing_for`. See [Repository errors](#repository-errors) |
+| `renovate runs recovered` | INFO | `trigger`, `scope`, `failing_for`. The first good run after repository errors or token outages |
 | `renovate run timed out` | ERROR | `trigger`, `duration_ms`, `timeout` |
 | `base directory preflight failed` | ERROR | `path`, `error`, `hint` |
 | `halting run admission: renovate run process group survived the kill sweep` | ERROR | `trigger` |
@@ -68,6 +68,6 @@ The scheduler runs Renovate with `RENOVATE_EXIT_CODE_FOR_ERRORS=true` unless you
 
 A platform outage causes most of these, so one is not yet a failure. The scheduler logs `renovate run ended in a repository error` at WARN with that `likely_cause`, leaves health as it was, and the `run` command exits 0. A GitHub App token request that GitHub does not answer is treated the same way, logged as `renovate run skipped: github app token unavailable`. A rejected key or a missing installation still fails at once. So does an outage that stops Renovate before its first repository, during its own start-up calls to the platform: Renovate exits 1 then, like any other Renovate failure.
 
-Once such failures have lasted 2 hours with no good run in between, the scheduler logs `renovate runs keep failing` at ERROR. That run then fails: health turns unhealthy, the `run` command exits 1 and `RenovateRunFailed` fires. Each failing run after it fails too, until a good one. At an hourly cadence the third failing run is the first to fail, or the second when the built-in schedule's first two failing runs take an hour or more together. With the 6-hour default it is the second. Full runs and runs scoped to repositories keep separate clocks, so frequent good scoped runs cannot reset the full run's clock: its ERROR line and exit code still report the fault. Health follows the last run, though, so a good scoped run turns it healthy again. A restart starts the clock again.
+Each of these lines carries `failing_for`, how long such failures have lasted. Once that reaches 2 hours with no good run in between, the same line is written at ERROR instead, and that run fails: health turns unhealthy, the `run` command exits 1 and `RenovateRunFailed` fires. Each failing run after it fails too, until a good one. At an hourly cadence the third failing run is the first to fail, or the second when the built-in schedule's first two failing runs take an hour or more together. With the 6-hour default it is the second. Full runs and runs scoped to repositories keep separate clocks, so frequent good scoped runs cannot reset the full run's clock: its ERROR line and exit code still report the fault. Health follows the last run, though, so a good scoped run turns it healthy again. A restart starts the clock again. The first good run after such failures logs `renovate runs recovered` with how long they lasted.
 
 Renovate's `Repository finished` line names the repository and its `result`, such as `external-host-error`. Set `RENOVATE_EXIT_CODE_FOR_ERRORS=false` on the container to keep Renovate's own behaviour, as [Renovate's own settings](configuration.md#renovates-own-settings) explains.

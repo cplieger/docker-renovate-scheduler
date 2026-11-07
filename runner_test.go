@@ -1119,29 +1119,27 @@ func TestRepositoryErrorDiagnosis(t *testing.T) {
 	}
 }
 
-// TestRunRenovateOnce_RefusedCloneIsARepositoryErrorWarning pins the line an
-// operator reads when exitCodeForErrors turns a refused clone into exit 7: a
-// WARN naming the cause, never the ERROR `renovate run failed` the shipped
-// alert fires on, because the executor decides whether the run fails.
+// TestRunRenovateOnce_RefusedCloneIsARepositoryError pins how a refused clone,
+// which exitCodeForErrors turns into exit 7, reaches the executor: as a
+// repository error carrying Renovate's error, with no failure line written,
+// because only the executor knows whether the run is still tolerated.
 // Serial: swaps slog.Default.
-func TestRunRenovateOnce_RefusedCloneIsARepositoryErrorWarning(t *testing.T) {
+func TestRunRenovateOnce_RefusedCloneIsARepositoryError(t *testing.T) {
 	rec := capture.Default(t)
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "sh", "-c", "exit 7")
 	}
 
-	got := runRenovateOnce(t.Context(), time.Minute, "external", runPayload{}, runner).outcome
+	got := runRenovateOnce(t.Context(), time.Minute, "external", runPayload{}, runner)
 
-	if got != runRepositoryError {
-		t.Fatalf("runRenovateOnce().outcome = %v, want runRepositoryError", got)
+	if got.outcome != runRepositoryError || got.exitCode != 7 {
+		t.Fatalf("runRenovateOnce() = %+v, want runRepositoryError with exit code 7", got)
 	}
-	const msg = "renovate run ended in a repository error"
-	if n := rec.CountLevel(slog.LevelWarn, msg); n != 1 {
-		t.Fatalf("WARN records matching %q = %d, want 1; captured: %v", msg, n, rec.Messages())
+	if diag, ok := repositoryErrorDiagnosis(got.err); !ok || !strings.Contains(diag.cause, "external host error") {
+		t.Errorf("result error %v diagnoses as (%+v, %v), want the external host error", got.err, diag, ok)
 	}
-	if !rec.AttrContains(msg, "likely_cause", "external host error") {
-		value, ok := rec.Attr(msg, "likely_cause")
-		t.Errorf("warning likely_cause = (%v, %v), want a value naming the external host error", value, ok)
+	if n := rec.CountLevel(slog.LevelWarn, ""); n != 0 {
+		t.Errorf("WARN records = %d, want 0; captured: %v", n, rec.Messages())
 	}
 	if n := rec.CountLevel(slog.LevelError, ""); n != 0 {
 		t.Errorf("ERROR records = %d, want 0 for a repository error; captured: %v", n, rec.Messages())

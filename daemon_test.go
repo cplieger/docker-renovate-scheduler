@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -153,8 +154,8 @@ func TestExecutor_RepositoryErrorsFailOnlyAfterTheGrace(t *testing.T) {
 	if d.marker.Healthy() {
 		t.Error("health healthy after repository errors lasting the grace, want unhealthy")
 	}
-	if n := rec.CountLevel(slog.LevelError, "renovate runs keep failing"); n != 1 {
-		t.Errorf("ERROR records matching %q = %d, want 1; captured: %v", "renovate runs keep failing", n, rec.Messages())
+	if n := rec.CountLevel(slog.LevelError, ""); n != 1 {
+		t.Errorf("ERROR records = %d, want 1 for one failed run; captured: %v", n, rec.Messages())
 	}
 
 	outcome = runComplete
@@ -203,6 +204,123 @@ func TestExecutor_RepositoryErrorsFailOnlyAfterTheGrace(t *testing.T) {
 	}
 	if stamp, known := d.stamp.Last(); !known || stamp.OK {
 		t.Errorf("stamp after a tolerated scheduled run = (%+v, known %v), want a recorded failure", stamp, known)
+	}
+}
+
+// failureLines drives one run through the executor and returns the lines it
+// wrote, parsed.
+func failureLines(t *testing.T, d *daemon, read func() []string, from *int) []map[string]string {
+	t.Helper()
+	j := newJob("external", nil, nil)
+	d.execute(t.Context(), t.Context().Err, j)
+	<-j.Result()
+	lines := read()
+	var out []map[string]string
+	for _, l := range lines[*from:] {
+		if l != "" {
+			out = append(out, parseLogfmt(t, l))
+		}
+	}
+	*from = len(lines)
+	return out
+}
+
+// withLevel returns the lines at level, only those named msg when msg is set.
+func withLevel(lines []map[string]string, level, msg string) []map[string]string {
+	var out []map[string]string
+	for _, l := range lines {
+		if l["level"] == level && (msg == "" || l["msg"] == msg) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func failingFor(t *testing.T, line map[string]string) time.Duration {
+	t.Helper()
+	d, err := time.ParseDuration(line["failing_for"])
+	if err != nil {
+		t.Fatalf("failing_for = %q, not a duration (line %v)", line["failing_for"], line)
+	}
+	return d
+}
+
+// TestExecutor_OneLinePerFailedRunAndOneOnRecovery pins the log shape of an
+// outage: each failed run writes one line, WARN inside failureGrace and ERROR
+// past it, carrying how long runs have failed, and the first good run after
+// it writes one INFO line saying so. Serial: swaps slog.Default.
+func TestExecutor_OneLinePerFailedRunAndOneOnRecovery(t *testing.T) {
+	const repoErr = "renovate run ended in a repository error"
+	const tokenErr = "renovate run skipped: github app token unavailable"
+	const recovered = "renovate runs recovered"
+	cases := []struct {
+		setup func(t *testing.T, d *daemon)
+		heal  func(t *testing.T, d *daemon)
+		name  string
+		msg   string
+	}{
+		{name: "repository error", msg: repoErr, setup: shellRunner("exit 7"), heal: shellRunner("exit 0")},
+		{
+			name: "token outage", msg: tokenErr,
+			setup: tokenServer(http.StatusServiceUnavailable, `{"message":"unavailable"}`),
+			heal: func(t *testing.T, d *daemon) {
+				shellRunner("exit 0")(t, d)
+				tokenServer(http.StatusCreated, tokenBody())(t, d)
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+			read := logLines(t)
+			d, _ := newBareDaemon(t, recordingRunner("true", nil))
+			c.setup(t, d)
+			from := 0
+
+			lines := failureLines(t, d, read, &from)
+			if warns := withLevel(lines, "WARN", c.msg); len(warns) != 1 {
+				t.Fatalf("failed run inside the grace wrote WARN lines %v, want one %q", warns, c.msg)
+			} else if failingFor(t, warns[0]) >= failureGrace {
+				t.Errorf("failing_for = %s on the first failure, want under the grace", warns[0]["failing_for"])
+			}
+			if errs := withLevel(lines, "ERROR", ""); len(errs) != 0 {
+				t.Errorf("failed run inside the grace wrote ERROR lines %v, want none", errs)
+			}
+
+			d.failingSince = d.failingSince.Add(-failureGrace)
+			lines = failureLines(t, d, read, &from)
+			errs := withLevel(lines, "ERROR", "")
+			if len(errs) != 1 || errs[0]["msg"] != c.msg {
+				t.Fatalf("failed run past the grace wrote ERROR lines %v, want exactly one %q", errs, c.msg)
+			}
+			if failingFor(t, errs[0]) < failureGrace {
+				t.Errorf("failing_for = %s past the grace, want at least %s", errs[0]["failing_for"], failureGrace)
+			}
+			if warns := withLevel(lines, "WARN", c.msg); len(warns) != 0 {
+				t.Errorf("failed run past the grace also wrote WARN lines %v, want none", warns)
+			}
+
+			c.heal(t, d)
+			lines = failureLines(t, d, read, &from)
+			var got []map[string]string
+			for _, l := range lines {
+				if l["msg"] == recovered {
+					got = append(got, l)
+				}
+			}
+			if len(got) != 1 || got[0]["level"] != "INFO" {
+				t.Fatalf("first good run wrote %v, want one INFO %q", got, recovered)
+			}
+			if failingFor(t, got[0]) < failureGrace {
+				t.Errorf("recovered failing_for = %s, want at least %s", got[0]["failing_for"], failureGrace)
+			}
+
+			for _, l := range failureLines(t, d, read, &from) {
+				if l["msg"] == recovered {
+					t.Errorf("a second good run wrote %v, want no %q", l, recovered)
+				}
+			}
+		})
 	}
 }
 
