@@ -25,8 +25,8 @@ groups:
           description: >
             The latest `run finished` record of this scope has ok=0. Its
             `result` field names the cause, and the line before it has the
-            detail. Check RENOVATE_TOKEN or the GitHub App settings, whether
-            the platform is reachable, and the container's memory limit.
+            detail. Check RENOVATE_TOKEN or the GitHub App settings, and
+            whether the platform is reachable.
       - alert: RenovateNoRecentRun
         expr: |
           absent_over_time({container="renovate"} |= `msg="run finished"` | logfmt scope, result | scope="full" | result="complete" [14h])

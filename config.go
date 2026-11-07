@@ -52,7 +52,6 @@ func metricsListenAddr() string {
 	})
 }
 
-// completedStampPath records every complete full run, beside stampPath.
 func completedStampPath() string {
 	return filepath.Join(baseDir(), completedStampName)
 }

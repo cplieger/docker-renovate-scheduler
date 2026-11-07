@@ -43,6 +43,7 @@ type daemon struct {
 	tokens    *appTokenMinter // nil: Renovate uses its own RENOVATE_TOKEN
 	newCmd    scheduler.CommandRunner
 	runOnce   func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult
+	now       func() time.Time // a run's start time
 	fatal     chan error
 	// Only the executor accesses the failing-since times and halted. Each is the
 	// start of the first run in an unbroken series of tolerable failures, zero
@@ -116,6 +117,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		tokens:    newAppTokenMinter(app),
 		newCmd:    newCmd,
 		runOnce:   runRenovateOnce,
+		now:       time.Now,
 		stampPath: stampPath(),
 		timeout:   timeout,
 		fatal:     make(chan error, 1),
@@ -263,7 +265,7 @@ func cancelJobForShutdown(j *trigger.Job[runPayload], stage string, elapsed time
 
 func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigger.Job[runPayload]) {
 	j.Start()
-	start := time.Now()
+	start := d.now()
 
 	dir := baseDirForEnv(j.Payload.Env)
 	if err := d.verifier.verifyAt(runCtx, dir); err != nil {
@@ -441,11 +443,12 @@ func (d *daemon) failingSinceFor(j *trigger.Job[runPayload]) *time.Time {
 // (keepHealth).
 func (d *daemon) tolerate(j *trigger.Job[runPayload], start time.Time) (tolerated bool, failingFor time.Duration) {
 	since := d.failingSinceFor(j)
-	if since.IsZero() {
+	first := since.IsZero()
+	if first {
 		*since = start
 	}
 	failing := time.Since(*since)
-	return failing < failureGrace, failing.Round(time.Second)
+	return first || failing < failureGrace, failing.Round(time.Second)
 }
 
 // failureLevel is the level of a failed run's one line: WARN while the

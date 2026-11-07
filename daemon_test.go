@@ -245,6 +245,64 @@ func failingFor(t *testing.T, line map[string]string) time.Duration {
 	return d
 }
 
+// TestExecutor_FirstFailureIsToleratedHoweverLongItsRunLasted pins the first
+// failure of a series as tolerated even when the run itself lasted
+// failureGrace: the grace counts from the series' first run, which has no
+// earlier failure to escalate. Serial: swaps slog.Default.
+func TestExecutor_FirstFailureIsToleratedHoweverLongItsRunLasted(t *testing.T) {
+	cases := []struct {
+		setup func(t *testing.T, d *daemon)
+		name  string
+		msg   string
+	}{
+		{name: "repository error", msg: "renovate run ended in a repository error", setup: shellRunner("exit 7")},
+		{
+			name: "token outage", msg: "renovate run skipped: github app token unavailable",
+			setup: tokenServer(http.StatusServiceUnavailable, `{"message":"unavailable"}`),
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+			read := logLines(t)
+			d, _ := newBareDaemon(t, recordingRunner("true", nil))
+			d.health.Set(true)
+			c.setup(t, d)
+			lasted := failureGrace + 30*time.Minute
+			d.now = func() time.Time { return time.Now().Add(-lasted) }
+
+			j := newJob("external", nil, nil)
+			d.execute(t.Context(), t.Context().Err, j)
+			out := <-j.Result()
+			var lines []map[string]string
+			for _, l := range read() {
+				if l != "" {
+					lines = append(lines, parseLogfmt(t, l))
+				}
+			}
+
+			if !out.OK || out.Reason != toleratedReason {
+				t.Errorf("outcome = ok %v reason %q, want ok with %q", out.OK, out.Reason, toleratedReason)
+			}
+			if !d.marker.Healthy() {
+				t.Error("health unhealthy after the first failure, want it kept")
+			}
+			if warns := withLevel(lines, "WARN", c.msg); len(warns) != 1 {
+				t.Errorf("wrote WARN lines %v, want one %q", warns, c.msg)
+			} else if got := failingFor(t, warns[0]); got < lasted {
+				t.Errorf("failing_for = %s, want at least %s", got, lasted)
+			}
+			if errs := withLevel(lines, "ERROR", ""); len(errs) != 0 {
+				t.Errorf("wrote ERROR lines %v, want none", errs)
+			}
+			records := withLevel(lines, "INFO", runFinishedMsg)
+			if len(records) != 1 || records[0]["ok"] != "1" || records[0]["tolerated"] != "1" {
+				t.Errorf("run finished records = %v, want one with ok=1 tolerated=1", records)
+			}
+		})
+	}
+}
+
 // TestExecutor_OneLinePerFailedRunAndOneOnRecovery pins the log shape of an
 // outage: each failed run writes one line, WARN inside failureGrace and ERROR
 // past it, carrying how long runs have failed, and the first good run after
@@ -996,7 +1054,7 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 	runOnce := func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
 		close(entered)
 		<-proceed
-		return runResult{outcome: runContained} // the sweep could not confirm group death — reported after shutdown began
+		return runResult{outcome: runContained} // the sweep could not confirm group death, reported after shutdown began
 	}
 
 	sock := testSocketPath(t)
@@ -1015,6 +1073,7 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 		metrics:   testMetrics(marker),
 		newCmd:    recordingRunner("true", nil),
 		runOnce:   runOnce,
+		now:       time.Now,
 		stampPath: stampPath(),
 		timeout:   time.Minute,
 		fatal:     make(chan error, 1),
@@ -1125,6 +1184,7 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 		metrics:   testMetrics(marker),
 		newCmd:    recordingRunner("true", nil),
 		runOnce:   runOnce,
+		now:       time.Now,
 		stampPath: stampPath(),
 		timeout:   time.Minute,
 		fatal:     make(chan error, 1),

@@ -25,7 +25,8 @@ groups:
             or refusing to start, or the scrape cannot reach METRICS_LISTEN_ADDR.
             Check the container's state and its `daemon stopped` line.
       # A scope's series appear at its first completed run, so a fresh install
-      # stays quiet, and the rule resolves at that scope's next good run.
+      # stays quiet, and the rule resolves at that scope's next good run, or at
+      # a restart, until that scope's next run.
       - alert: RenovateRunFailed
         expr: renovate_scheduler_last_run_ok == 0
         for: 0m
@@ -40,12 +41,14 @@ groups:
             App settings, whether the platform is reachable, and the memory limit.
       # The full scope's last success is read back from RENOVATE_BASE_DIR after
       # a restart. With no complete full run on record the series is absent, so
-      # the second arm measures the wait from the process start instead.
+      # the second arm measures the wait from the process start instead. That
+      # arm counts only the target scraped as job `renovate`; every exporter
+      # has a process start time, so rename the job in both arms together.
       - alert: RenovateNoRecentRun
         expr: |
           time() - renovate_scheduler_last_success_timestamp_seconds{scope="full"} > 50400
           or
-          (time() - process_start_time_seconds > 50400 unless on (job, instance) renovate_scheduler_last_success_timestamp_seconds{scope="full"})
+          (time() - process_start_time_seconds{job="renovate"} > 50400 unless on (job, instance) renovate_scheduler_last_success_timestamp_seconds{scope="full"})
         for: 30m
         labels:
           severity: warning

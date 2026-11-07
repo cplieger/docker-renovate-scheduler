@@ -209,9 +209,10 @@ exec setsid -w sh -c 'echo $$ > "$0"; exec sleep 30' "$1"`
 
 // TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly pins the distinct
 // ERROR messages for a timed-out run vs a genuine non-zero exit. The outcomes
-// differ too (runTimedOut vs runFailed) and their own tests pin those; alerting
-// keys on the message, so a mutation that swaps or downgrades either must fail
-// here even where the outcome is still right.
+// differ too (runTimedOut vs runFailed) and their own tests pin those; the
+// image smoke test and the docs' message table read the message, so a mutation
+// that swaps or downgrades either must fail here even where the outcome is
+// still right.
 func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -955,15 +956,12 @@ func TestRunRenovateOnce_NonCleanRunsSweepAndReportContainment(t *testing.T) {
 }
 
 // TestRunRenovateOnce_CleanUnconfirmableGroupDeathReportsContainment pins the
-// arm where the two containment inputs disagree: Renovate exited ZERO but the
-// kill sweep could not confirm its process group dead. The run must report
-// runContained so daemon.execute halts admission, and it must NOT emit the
-// "renovate run complete" record the completion-absence alerting watches for --
-// the clean-arm sibling
-// (TestRunRenovateOnce_CleanRunSweepsLeftoverGroupMember) reaches runComplete
-// because its member is promptly reaped. The unconfirmable state is a
-// SIGKILLed-but-unreaped zombie joined into the leader's group, a direct child
-// of the TEST binary so the test owns the reap. Serial: swaps slog.Default.
+// arm where Renovate exited zero but the kill sweep could not confirm its
+// process group dead: the run reports runContained, so daemon.execute halts
+// admission, and writes no "renovate run complete" record, which the image
+// smoke test reads as success. The unconfirmable state is a SIGKILLed but
+// unreaped zombie in the leader's group, a child of the test binary so the
+// test owns the reap. Serial: swaps slog.Default.
 func TestRunRenovateOnce_CleanUnconfirmableGroupDeathReportsContainment(t *testing.T) {
 	rec := capture.Default(t)
 	dir := t.TempDir()

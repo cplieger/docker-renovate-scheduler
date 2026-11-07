@@ -15,7 +15,6 @@ import (
 	"github.com/cplieger/go/scheduler/trigger"
 )
 
-// metricsPrefix names every series on the metrics page.
 const metricsPrefix = "renovate_scheduler"
 
 // Run scopes, the `scope` field of the run finished record and a label.
@@ -25,7 +24,6 @@ const (
 	scopeScoped = "scoped"
 )
 
-// Why the queue refused a run, the reason label of the rejection counter.
 const (
 	rejectFull    = "full"
 	rejectClosing = "closing"
@@ -39,8 +37,6 @@ var (
 	}
 )
 
-// runMetrics are the series each completed run sets, from the values its run
-// finished record carries.
 type runMetrics struct {
 	runs         *measure.LabeledCounter
 	lastOK       *measure.LabeledGauge
@@ -116,7 +112,6 @@ func unixSeconds(t time.Time) float64 {
 	return float64(t.Unix())
 }
 
-// observe sets a scope's series from one completed run.
 func (m *runMetrics) observe(scope string, v runVerdict, elapsed time.Duration, at, failingSince time.Time) {
 	m.runs.Add(1, scope, v.result)
 	for _, r := range runResults {
@@ -136,7 +131,6 @@ func (m *runMetrics) observe(scope string, v runVerdict, elapsed time.Duration, 
 	m.failingSince.Set(clock, scope)
 }
 
-// rejectedRun counts one run request the queue refused with err.
 func (m *runMetrics) rejectedRun(err error) {
 	reason := rejectClosing
 	if errors.Is(err, trigger.ErrFull) {

@@ -36,6 +36,7 @@ func newBareDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, strin
 		metrics:   testMetrics(marker),
 		newCmd:    runner,
 		runOnce:   runRenovateOnce,
+		now:       time.Now,
 		stampPath: stampFile,
 		timeout:   time.Minute,
 		fatal:     make(chan error, 1),

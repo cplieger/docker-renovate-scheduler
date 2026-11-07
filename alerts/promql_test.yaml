@@ -122,6 +122,30 @@ tests:
               summary: "No full Renovate run has completed in 14h"
               description: "No complete full run in 14h. Runs may be failing or tolerated, or the schedule or your own scheduler may have stopped. Runs scoped to repositories do not count.\n"
 
+  - name: another job's process start never raises RenovateNoRecentRun
+    interval: 1m
+    input_series:
+      - series: 'process_start_time_seconds{job="node", instance="node:9100"}'
+        values: "0x1000"
+    alert_rule_test:
+      - eval_time: 14h35m
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+
+  - name: another job's process start beside a healthy renovate target never raises RenovateNoRecentRun
+    interval: 1m
+    input_series:
+      - series: 'process_start_time_seconds{job="node", instance="node:9100"}'
+        values: "0x1000"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1000"
+      - series: 'renovate_scheduler_last_success_timestamp_seconds{job="renovate", instance="renovate:9470", scope="full"}'
+        values: "1+60x1000"
+    alert_rule_test:
+      - eval_time: 14h35m
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+
   - name: a complete full run every 6h, the default interval, never alerts
     interval: 1m
     input_series:
