@@ -1,7 +1,7 @@
 github.com/cplieger/go/envx v1.0.0-dev.1 h1:1EAU/2CHQJa1hG1pzkrs2p5ZwwTqhrmHLoj9OtSuEHc=
 github.com/cplieger/go/envx v1.0.0-dev.1/go.mod h1:VBXyb3Y1VcaOMKyzj+fN2F1ZHRzZgoZuEOafwdg1fkM=
-github.com/cplieger/go/filesafe v1.0.0-dev.2 h1:Y9CEthiQH/VkzjNXgt1kyr0UzPL+PNc2klUj2npdkYg=
-github.com/cplieger/go/filesafe v1.0.0-dev.2/go.mod h1:Pu9t7x6mRQwXm09EdWaQvVK++fpjgGP7+58XiMxGYks=
+github.com/cplieger/go/filesafe v1.0.0-dev.4 h1:05SeUM+hKRzdu4qROsLC3edb06CK44VEm+9L2Gs34xM=
+github.com/cplieger/go/filesafe v1.0.0-dev.4/go.mod h1:Pu9t7x6mRQwXm09EdWaQvVK++fpjgGP7+58XiMxGYks=
 github.com/cplieger/go/health v1.0.0-dev.3 h1:cTbUZ38yLP8Je8aup6f+WNezkf0rJbtUbHWTLPJfJrQ=
 github.com/cplieger/go/health v1.0.0-dev.3/go.mod h1:Qo0xx+JK05tjEi+oAjPT0zcRrhZkcKFEO32SRkjZd7I=
 github.com/cplieger/go/httpclient v1.0.0-dev.4 h1:TSeqhBSwwoOvvgTT6fykSOp+nsjqyPyeiXM6kTb99DU=
@@ -10,8 +10,8 @@ github.com/cplieger/go/pathinside v1.0.0-dev.1 h1:iVkDRXYDDAgaTBm02ekQ+VH7KhXZTI
 github.com/cplieger/go/pathinside v1.0.0-dev.1/go.mod h1:+Fj6L8z2GUfDFi/uvAzoxF1iIADDf83g4fMbrvelDUY=
 github.com/cplieger/go/scheduler v1.0.0-dev.1 h1:SliSxE9oAN2UWDgvipCQIKK1JJkcGnysGgGf43PWUT0=
 github.com/cplieger/go/scheduler v1.0.0-dev.1/go.mod h1:2cQv1OLOFwmyVNBbR/ocU1I6Qbg46787ZS+a0xZKHJI=
-github.com/cplieger/go/slogx v1.0.0-dev.1 h1:oYkkLGxYkUHebk+OtaWVzD9NwPqTmq13HztG6NaArn4=
-github.com/cplieger/go/slogx v1.0.0-dev.1/go.mod h1:4v0aqEGWQ4ubxjIiddoMocANHMKB6SdYTgOWYaIUX6A=
+github.com/cplieger/go/slogx v1.0.0-dev.2 h1:hQqOH9v0i3l8NPBvSN8rts9LA+JXKINCyhW72Z+11X8=
+github.com/cplieger/go/slogx v1.0.0-dev.2/go.mod h1:4v0aqEGWQ4ubxjIiddoMocANHMKB6SdYTgOWYaIUX6A=
 github.com/cplieger/go/textsafe v1.0.0-dev.1 h1:NqiLs9uk4eOoXXkTQo0O8lMtYddo3XZuCuyx/ruB66w=
 github.com/cplieger/go/textsafe v1.0.0-dev.1/go.mod h1:5IH0ZWTC+U864nzWGtcwGkp+PtA5hrlcfY2zLY/TexM=
 pgregory.net/rapid v1.3.0 h1:vBvO0VSqti75J1jjYqpgPNBLKMd1+gxa9fYo7vk/Exc=
