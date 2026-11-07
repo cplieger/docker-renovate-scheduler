@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/measure"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
 )
@@ -37,10 +38,13 @@ type daemon struct {
 	health   *health.Latch
 	verifier *baseDirVerifier
 	stamp    *scheduler.Stamp
-	tokens   *appTokenMinter // nil: Renovate uses its own RENOVATE_TOKEN
-	newCmd   scheduler.CommandRunner
-	runOnce  func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult
-	fatal    chan error
+	// completed records every complete full run, to seed metrics after a restart.
+	completed *scheduler.Stamp
+	metrics   *runMetrics
+	tokens    *appTokenMinter // nil: Renovate uses its own RENOVATE_TOKEN
+	newCmd    scheduler.CommandRunner
+	runOnce   func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult
+	fatal     chan error
 	// Only the executor accesses the failing-since times and halted. Each is the
 	// start of the first run in an unbroken series of tolerable failures, zero
 	// after a good run. Full passes and scoped runs keep their own, so the
@@ -91,12 +95,27 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 
 	logAuthMode(app, runTimeout, timeout)
 
+	completed := scheduler.NewStamp(completedStampPath())
+	reg := measure.NewRegistry(metricsPrefix)
+	last, known := completed.Last()
+	metrics := newRunMetrics(reg, marker, modeName(scheduleEnabled), authName(app), last, known)
+	metricsAddr := metricsListenAddr()
+	stopMetrics, err := serveMetrics(ctx, metricsAddr, reg)
+	if err != nil {
+		slog.Error("cannot listen on METRICS_LISTEN_ADDR", "value", metricsAddr, "error", err)
+		_ = ln.Close()
+		return daemonStopped(err)
+	}
+	defer stopMetrics()
+
 	d := &daemon{
 		queue:     trigger.NewQueue[runPayload](queueCapacity),
 		marker:    marker,
 		health:    health.NewLatch(marker),
 		verifier:  verifier,
 		stamp:     stamp,
+		completed: completed,
+		metrics:   metrics,
 		tokens:    newAppTokenMinter(app),
 		newCmd:    newCmd,
 		runOnce:   runRenovateOnce,
@@ -130,6 +149,7 @@ func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, in
 			slog.Info("triggered run queued", "repos", p.Repos)
 		},
 		OnRejected: func(p runPayload, err error) {
+			d.metrics.rejectedRun(err)
 			slog.Warn("trigger request rejected", "repos", p.Repos, "reason", err)
 		},
 	}
@@ -213,6 +233,7 @@ func startTicker(ctx context.Context, d *daemon, interval time.Duration, enabled
 func (d *daemon) tick(trig string) {
 	j := trigger.NewJob(trig, runPayload{})
 	if err := d.queue.Submit(j); err != nil {
+		d.metrics.rejectedRun(err)
 		slog.Warn("scheduled run skipped", "trigger", trig, "reason", err)
 		return
 	}
@@ -348,18 +369,24 @@ type runVerdict struct {
 	tolerated bool
 }
 
-// finish ends every completed run: it sets health from the verdict, writes
-// the run's one run finished record and finishes the job, so the record, the
-// health marker and the run client's exit code cannot disagree. A tolerated
-// failure leaves health as it was (keepHealth).
+// finish ends every completed run: it sets health and the metrics from the
+// verdict, writes the run's one run finished record and finishes the job, so
+// the record, the metrics, the health marker and the run client's exit code
+// cannot disagree. A tolerated failure leaves health as it was (keepHealth).
 func (d *daemon) finish(j *trigger.Job[runPayload], start time.Time, v runVerdict) {
 	if v.tolerated {
 		d.keepHealth()
 	} else {
 		d.health.Set(v.ok)
 	}
-	elapsed := time.Since(start)
-	slog.Info(runFinishedMsg, "trigger", j.Trigger, "scope", scopeOf(j), "result", v.result,
+	at := time.Now()
+	elapsed := at.Sub(start)
+	scope := scopeOf(j)
+	if v.result == resultComplete && scope == scopeFull {
+		d.recordComplete()
+	}
+	d.metrics.observe(scope, v, elapsed, at, *d.failingSinceFor(j))
+	slog.Info(runFinishedMsg, "trigger", j.Trigger, keyScope, scope, "result", v.result,
 		"ok", boolDigit(v.ok), "tolerated", boolDigit(v.tolerated),
 		"exit_code", v.exitCode, "duration_ms", elapsed.Milliseconds())
 	j.Finish(trigger.Result{OK: v.ok, Duration: elapsed, Reason: v.reason})
@@ -367,9 +394,33 @@ func (d *daemon) finish(j *trigger.Job[runPayload], start time.Time, v runVerdic
 
 func scopeOf(j *trigger.Job[runPayload]) string {
 	if len(j.Payload.Repos) > 0 {
-		return "scoped"
+		return scopeScoped
 	}
-	return "full"
+	return scopeFull
+}
+
+func modeName(scheduleEnabled bool) string {
+	if scheduleEnabled {
+		return "built-in"
+	}
+	return "external"
+}
+
+func authName(app *appConfig) string {
+	if app == nil {
+		return "token"
+	}
+	return "app"
+}
+
+// recordComplete persists a complete full run, so the last-success series
+// starts from it after a restart. Failures are not recorded: they would
+// erase the last success the record seeds.
+func (d *daemon) recordComplete() {
+	if err := d.completed.Record(true); err != nil {
+		slog.Warn("cannot record the complete run; the last-success metric restarts at 0",
+			"path", completedStampPath(), "error", err)
+	}
 }
 
 // boolDigit writes a verdict as 1 or 0, because a log rule unwraps it as a number.
@@ -422,7 +473,7 @@ func (d *daemon) recovered(j *trigger.Job[runPayload]) {
 	if since.IsZero() {
 		return
 	}
-	slog.Info("renovate runs recovered", "trigger", j.Trigger, "scope", scopeOf(j),
+	slog.Info("renovate runs recovered", "trigger", j.Trigger, keyScope, scopeOf(j),
 		"failing_for", time.Since(*since).Round(time.Second))
 	*since = time.Time{}
 }

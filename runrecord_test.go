@@ -160,8 +160,14 @@ var runPaths = []runPath{
 func runThrough(t *testing.T, p *runPath) (trigger.Outcome, []map[string]string, bool) {
 	t.Helper()
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	read := logLines(t)
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
+	return runOn(t, d, p)
+}
+
+// runOn drives one path through d's executor, as runThrough does.
+func runOn(t *testing.T, d *daemon, p *runPath) (trigger.Outcome, []map[string]string, bool) {
+	t.Helper()
+	read := logLines(t)
 	d.health.Set(true)
 	if p.setup != nil {
 		p.setup(t, d)
@@ -261,12 +267,17 @@ func TestRunDaemonErrorReturnsLogDaemonStopped(t *testing.T) {
 			t.Setenv("RENOVATE_BASE_DIR", file)
 			return testSocketPath(t)
 		}},
+		{name: "metrics address malformed", setup: func(t *testing.T) string {
+			t.Setenv("METRICS_LISTEN_ADDR", "not-a-port")
+			return testSocketPath(t)
+		}},
 		{name: "process group survives", setup: testSocketPath, run: runContainedDaemon},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 			t.Setenv("RUN_INTERVAL", "off")
+			t.Setenv("METRICS_LISTEN_ADDR", "")
 			for _, k := range []string{envAppID, envAppInstallationID, envAppKeyFile, envAppKeyInline} {
 				t.Setenv(k, "")
 			}
@@ -275,7 +286,9 @@ func TestRunDaemonErrorReturnsLogDaemonStopped(t *testing.T) {
 			run := c.run
 			if run == nil {
 				run = func(t *testing.T, sock string) error {
-					return runDaemon(t.Context(), sock, recordingRunner("true", nil))
+					ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+					defer cancel()
+					return runDaemon(ctx, sock, recordingRunner("true", nil))
 				}
 			}
 			if err := run(t, sock); err == nil {

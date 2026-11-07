@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/cplieger/go/envx"
 	"github.com/cplieger/go/filesafe"
@@ -27,6 +28,9 @@ const (
 	// The owner-only socket limits trigger authority to the container user.
 	socketPath = "/tmp/docker-renovate-scheduler.sock"
 	stampName  = ".docker-renovate-scheduler-last-run"
+	// completedStampName seeds the full scope's last-success series after a
+	// restart.
+	completedStampName = ".docker-renovate-scheduler-last-complete"
 )
 
 func setupLogger() {
@@ -36,6 +40,21 @@ func setupLogger() {
 	if !recognized {
 		slog.Warn("unrecognized LOG_LEVEL, using default", "value", raw, "default", "info")
 	}
+}
+
+// metricsListenAddr reads METRICS_LISTEN_ADDR with whitespace and invisible
+// runes trimmed from its edges: an untrimmed " :9470" fails as a host lookup
+// the operator cannot see. Nothing else is checked; the bind is the check.
+func metricsListenAddr() string {
+	return strings.TrimFunc(envx.String("METRICS_LISTEN_ADDR"), func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) ||
+			unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r)
+	})
+}
+
+// completedStampPath records every complete full run, beside stampPath.
+func completedStampPath() string {
+	return filepath.Join(baseDir(), completedStampName)
 }
 
 func baseDir() string {

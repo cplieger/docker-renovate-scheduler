@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/measure"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
 )
@@ -31,6 +32,8 @@ func newBareDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, strin
 		health:    health.NewLatch(marker),
 		verifier:  newBaseDirVerifier(),
 		stamp:     scheduler.NewStamp(stampFile),
+		completed: scheduler.NewStamp(filepath.Join(dir, completedStampName)),
+		metrics:   testMetrics(marker),
 		newCmd:    runner,
 		runOnce:   runRenovateOnce,
 		stampPath: stampFile,
@@ -38,6 +41,11 @@ func newBareDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, strin
 		fatal:     make(chan error, 1),
 	}
 	return d, markerPath
+}
+
+// testMetrics returns run metrics on a registry of their own.
+func testMetrics(marker *health.Marker) *runMetrics {
+	return newRunMetrics(measure.NewRegistry(metricsPrefix), marker, "external", "token", scheduler.RunRecord{}, false)
 }
 
 // maxSunPath is the longest usable unix-socket path: Linux sun_path is

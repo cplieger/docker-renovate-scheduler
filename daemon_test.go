@@ -624,7 +624,7 @@ func TestExecutor_PreflightTimeoutDoesNotClaimBaseDirUnwritable(t *testing.T) {
 // submission (queue full) is logged and skipped — the tick must not panic or
 // block; the next interval provides freshness.
 func TestTick_SkipsWhenQueueRejects(t *testing.T) {
-	d := &daemon{queue: trigger.NewQueue[runPayload](0)} // zero capacity: every submit is rejected
+	d := &daemon{queue: trigger.NewQueue[runPayload](0), metrics: testMetrics(health.NewMarker(filepath.Join(t.TempDir(), "marker")))} // zero capacity: every submit is rejected
 	done := make(chan struct{})
 	go func() { defer close(done); d.tick("interval") }()
 	select {
@@ -1011,6 +1011,8 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 		health:    health.NewLatch(marker),
 		verifier:  newBaseDirVerifier(),
 		stamp:     scheduler.NewStamp(stampPath()),
+		completed: scheduler.NewStamp(completedStampPath()),
+		metrics:   testMetrics(marker),
 		newCmd:    recordingRunner("true", nil),
 		runOnce:   runOnce,
 		stampPath: stampPath(),
@@ -1119,6 +1121,8 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 		health:    health.NewLatch(marker),
 		verifier:  newBaseDirVerifier(),
 		stamp:     scheduler.NewStamp(stampPath()),
+		completed: scheduler.NewStamp(completedStampPath()),
+		metrics:   testMetrics(marker),
 		newCmd:    recordingRunner("true", nil),
 		runOnce:   runOnce,
 		stampPath: stampPath(),
