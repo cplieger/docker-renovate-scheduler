@@ -292,7 +292,7 @@ func TestProbeBaseDirWrite(t *testing.T) {
 		cause := errors.New("delete child denied")
 		res := filesafe.ProbeResult{
 			Name:   ".probe",
-			Stage:  filesafe.ProbeStageRemove,
+			Phase:  filesafe.ProbePhaseRemove,
 			Leaked: true,
 			Err:    cause,
 		}

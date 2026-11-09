@@ -196,7 +196,7 @@ type appTokenMinter struct {
 	apiBase        string
 	appID          int
 	installationID int
-	baseDelay      time.Duration
+	baseDelay      time.Duration // zero: httpclient's default
 }
 
 func newAppTokenMinter(cfg *appConfig) *appTokenMinter {
@@ -207,13 +207,12 @@ func newAppTokenMinter(cfg *appConfig) *appTokenMinter {
 		now: time.Now,
 		client: &http.Client{
 			Timeout:       tokenRequestTimeout,
-			CheckRedirect: httpclient.RedirectPolicyFunc(httpclient.WithSameOrigin(true)),
+			CheckRedirect: httpclient.RedirectPolicy(httpclient.WithSameOrigin(true)),
 		},
 		key:            cfg.key,
 		apiBase:        githubAPIBase,
 		appID:          cfg.appID,
 		installationID: cfg.installationID,
-		baseDelay:      httpclient.DefaultBaseDelay,
 	}
 }
 

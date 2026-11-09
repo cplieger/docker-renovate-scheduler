@@ -771,7 +771,7 @@ func TestExecute_TokenOutageIsToleratedForTheGrace(t *testing.T) {
 		})
 	d.tokens.baseDelay = time.Millisecond
 	d.health.Set(true)
-	run := func() trigger.Outcome {
+	run := func() trigger.Result {
 		t.Helper()
 		j := newJob("interval", nil, nil)
 		d.execute(t.Context(), t.Context().Err, j)

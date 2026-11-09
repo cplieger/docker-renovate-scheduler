@@ -21,12 +21,12 @@ func TestProbe_WedgedBuiltinLoopFailsFreshness(t *testing.T) {
 	}
 
 	t.Setenv("RUN_INTERVAL", "1m") // max age = 2m + 1s, marker is 1h old
-	if code := health.ProbeCheck(marker, probeOptions()...); code == 0 {
+	if health.Inspect(marker, probeOptions()...).Healthy() {
 		t.Error("stale marker probed healthy in built-in mode; the wedged-loop deadman is not armed")
 	}
 
 	t.Setenv("RUN_INTERVAL", "off")
-	if code := health.ProbeCheck(marker, probeOptions()...); code != 0 {
+	if !health.Inspect(marker, probeOptions()...).Healthy() {
 		t.Error("old marker probed unhealthy in external mode; idle containers must stay healthy")
 	}
 }
@@ -51,12 +51,12 @@ func TestProbe_BuiltinFreshnessUsesPublishedBoundary(t *testing.T) {
 	t.Setenv("RUN_INTERVAL", "1m")
 	t.Setenv("RUN_TIMEOUT", "10s")
 	tests := []struct {
-		name     string
-		age      time.Duration
-		wantCode int
+		name        string
+		age         time.Duration
+		wantHealthy bool
 	}{
-		{name: "inside_boundary_stays_healthy", age: 2*time.Minute + 5*time.Second, wantCode: 0},
-		{name: "outside_boundary_is_unhealthy", age: 2*time.Minute + 15*time.Second, wantCode: 1},
+		{name: "inside_boundary_stays_healthy", age: 2*time.Minute + 5*time.Second, wantHealthy: true},
+		{name: "outside_boundary_is_unhealthy", age: 2*time.Minute + 15*time.Second, wantHealthy: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -68,8 +68,8 @@ func TestProbe_BuiltinFreshnessUsesPublishedBoundary(t *testing.T) {
 			if err := os.Chtimes(marker, aged, aged); err != nil {
 				t.Fatalf("age marker: %v", err)
 			}
-			if got := health.ProbeCheck(marker, probeOptions()...); got != tt.wantCode {
-				t.Errorf("health.ProbeCheck(marker aged %v) = %d, want %d", tt.age, got, tt.wantCode)
+			if got := health.Inspect(marker, probeOptions()...).Healthy(); got != tt.wantHealthy {
+				t.Errorf("health.Inspect(marker aged %v).Healthy() = %v, want %v", tt.age, got, tt.wantHealthy)
 			}
 		})
 	}

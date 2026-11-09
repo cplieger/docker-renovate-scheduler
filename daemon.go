@@ -133,7 +133,8 @@ func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, in
 			slog.Warn("trigger request rejected", "repos", p.Repos, "reason", err)
 		},
 	}
-	srv.Serve(ln)
+	served := make(chan struct{})
+	go func() { defer close(served); _ = srv.Serve(ctx, ln) }()
 
 	tickerDone := startTicker(ctx, d, interval, scheduleEnabled, remaining)
 
@@ -170,7 +171,7 @@ func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, in
 		}
 	}
 	<-tickerDone
-	srv.Wait()
+	<-served
 	slog.Info("shutdown complete")
 	return fatalErr
 }
@@ -216,7 +217,7 @@ func (d *daemon) runJobs(shutdownCtx context.Context) {
 		case d.halted:
 			slog.Warn("run cancelled: a prior run's process group survived the kill sweep",
 				"trigger", j.Trigger, "repos", j.Payload.Repos)
-			j.Finish(trigger.Outcome{OK: false, Reason: containmentLostReason})
+			j.Finish(trigger.Result{OK: false, Reason: containmentLostReason})
 		case shutdownCtx.Err() != nil:
 			cancelJobForShutdown(j, "queued", 0)
 		default:
@@ -229,7 +230,7 @@ const shutdownCancelReason = trigger.CancelledReason
 
 func cancelJobForShutdown(j *trigger.Job[runPayload], stage string, elapsed time.Duration) {
 	slog.Warn("run cancelled by shutdown", "stage", stage, "trigger", j.Trigger, "repos", j.Payload.Repos)
-	j.Finish(trigger.Outcome{OK: false, Duration: elapsed, Reason: shutdownCancelReason})
+	j.Finish(trigger.Result{OK: false, Duration: elapsed, Reason: shutdownCancelReason})
 }
 
 func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigger.Job[runPayload]) {
@@ -244,7 +245,7 @@ func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigg
 		if !errors.Is(err, context.DeadlineExceeded) {
 			d.recordScheduled(j.Trigger, false)
 		}
-		j.Finish(trigger.Outcome{OK: false, Duration: time.Since(start), Reason: "base directory preflight failed"})
+		j.Finish(trigger.Result{OK: false, Duration: time.Since(start), Reason: "base directory preflight failed"})
 		return
 	}
 
@@ -266,7 +267,7 @@ func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigg
 		d.recordScheduled(j.Trigger, false)
 		slog.Error("halting run admission: renovate run process group survived the kill sweep",
 			"trigger", j.Trigger)
-		j.Finish(trigger.Outcome{OK: false, Duration: time.Since(start), Reason: containmentLostReason})
+		j.Finish(trigger.Result{OK: false, Duration: time.Since(start), Reason: containmentLostReason})
 		d.fatal <- errContainmentLost
 		return
 	}
@@ -287,7 +288,7 @@ func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigg
 	if tolerated {
 		reason = toleratedReason
 	}
-	j.Finish(trigger.Outcome{OK: ok || tolerated, Duration: time.Since(start), Reason: reason})
+	j.Finish(trigger.Result{OK: ok || tolerated, Duration: time.Since(start), Reason: reason})
 }
 
 func (d *daemon) failingSinceFor(j *trigger.Job[runPayload]) *time.Time {
@@ -340,13 +341,13 @@ func (d *daemon) authorize(ctx context.Context, j *trigger.Job[runPayload], star
 			slog.Warn("renovate run skipped: github app token unavailable", "trigger", j.Trigger, "error", err)
 			d.keepHealth()
 			d.recordScheduled(j.Trigger, false)
-			j.Finish(trigger.Outcome{OK: true, Duration: time.Since(start), Reason: toleratedReason})
+			j.Finish(trigger.Result{OK: true, Duration: time.Since(start), Reason: toleratedReason})
 			return p, false
 		}
 		slog.Error("github app token request failed", "trigger", j.Trigger, "error", err)
 		d.health.Set(false)
 		d.recordScheduled(j.Trigger, false)
-		j.Finish(trigger.Outcome{OK: false, Duration: time.Since(start), Reason: mintFailedReason})
+		j.Finish(trigger.Result{OK: false, Duration: time.Since(start), Reason: mintFailedReason})
 		return p, false
 	}
 	slog.Info("github app installation token issued", "trigger", j.Trigger,

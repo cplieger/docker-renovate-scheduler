@@ -40,7 +40,7 @@ func newTestDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, conte
 }
 
 // submitWait submits a job and returns its outcome.
-func submitWait(t *testing.T, d *daemon, j *trigger.Job[runPayload]) trigger.Outcome {
+func submitWait(t *testing.T, d *daemon, j *trigger.Job[runPayload]) trigger.Result {
 	t.Helper()
 	if err := d.queue.Submit(j); err != nil {
 		t.Fatalf("submit() = %v, want nil", err)
@@ -50,7 +50,7 @@ func submitWait(t *testing.T, d *daemon, j *trigger.Job[runPayload]) trigger.Out
 		return out
 	case <-time.After(5 * time.Second):
 		t.Fatal("job result not delivered within 5s")
-		return trigger.Outcome{}
+		return trigger.Result{}
 	}
 }
 
@@ -119,7 +119,7 @@ func TestExecutor_RepositoryErrorsFailOnlyAfterTheGrace(t *testing.T) {
 	d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
 		return outcome
 	}
-	run := func(repos ...string) trigger.Outcome {
+	run := func(repos ...string) trigger.Result {
 		t.Helper()
 		j := newJob("external", repos, nil)
 		d.execute(t.Context(), t.Context().Err, j)
@@ -413,7 +413,7 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("in-flight result not delivered")
 	}
-	if d.marker.CheckHealthy() {
+	if d.marker.Healthy() {
 		t.Error("health marker became healthy after shutdown began (the draining run's completion must not overwrite the shutdown state)")
 	}
 	select {
@@ -575,7 +575,7 @@ func TestStartTicker_StampBecomingDueBeforeSetupFiresStartup(t *testing.T) {
 				if j.Trigger != tt.wantTrigger {
 					t.Errorf("startTicker(remaining=%v) first trigger = %q, want %q", tt.remaining, j.Trigger, tt.wantTrigger)
 				}
-				j.Finish(trigger.Outcome{OK: true})
+				j.Finish(trigger.Result{OK: true})
 				cancel()
 				<-done
 			})
@@ -841,7 +841,7 @@ func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
 	if invocations != 1 {
 		t.Errorf("runOnce invoked %d times, want 1: no run may start after a surviving group", invocations)
 	}
-	if d.marker.CheckHealthy() {
+	if d.marker.Healthy() {
 		t.Error("health marker healthy after containment loss, want unhealthy")
 	}
 	select {
