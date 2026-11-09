@@ -164,14 +164,14 @@ func serveMetrics(ctx context.Context, addr string, reg *measure.Registry, healt
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", reg.Handler())
 	mux.Handle("GET /healthz", healthz)
-	srv := httpserver.New(mux,
-		httpserver.WithReadTimeout(metricsReadTimeout),
-		httpserver.WithWriteTimeout(metricsWriteTimeout))
+	srv := httpserver.New(mux)
+	srv.ReadTimeout = metricsReadTimeout
+	srv.WriteTimeout = metricsWriteTimeout
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := httpserver.Run(ctx, srv, ln, nil); err != nil {
+		if err := httpserver.Run(ctx, srv, ln); err != nil {
 			slog.Error("metrics listener stopped", "address", addr, "error", err)
 		}
 	}()

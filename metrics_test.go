@@ -213,7 +213,7 @@ func TestDaemonRefusesAMetricsAddressItCannotBind(t *testing.T) {
 			if naming != 1 {
 				t.Errorf("ERROR lines naming METRICS_LISTEN_ADDR = %d, want 1:\n%s", naming, strings.Join(read(), "\n"))
 			}
-			if health.NewMarker(healthMarkerPath).CheckHealthy() {
+			if health.NewMarker(healthMarkerPath).Healthy() {
 				t.Error("marker healthy after a refused start, want unhealthy")
 			}
 		})

@@ -192,12 +192,12 @@ func TestHealthzAgreesWithTheHealthSubcommand(t *testing.T) {
 				rec := httptest.NewRecorder()
 				newHealthz(marker, runLease(interval, scheduleEnabled, loadRunTimeout())).
 					ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-				probe := health.ProbeCheck(path, probeOptions()...)
+				probeHealthy := health.Inspect(path, probeOptions()...).Healthy()
 				if rec.Code != tc.wantCode {
 					t.Errorf("/healthz = %d, want %d", rec.Code, tc.wantCode)
 				}
-				if (probe == 0) != (rec.Code == http.StatusOK) {
-					t.Errorf("/healthz = %d but the health subcommand exits %d: the two readers disagree", rec.Code, probe)
+				if probeHealthy != (rec.Code == http.StatusOK) {
+					t.Errorf("/healthz = %d but the health subcommand reads healthy = %v: the two readers disagree", rec.Code, probeHealthy)
 				}
 			})
 		}

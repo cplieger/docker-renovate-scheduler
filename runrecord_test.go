@@ -157,7 +157,7 @@ var runPaths = []runPath{
 // runThrough drives one path through the executor from a healthy daemon and
 // returns the job's outcome, the run finished records it wrote, and whether
 // health ended healthy.
-func runThrough(t *testing.T, p *runPath) (trigger.Outcome, []map[string]string, bool) {
+func runThrough(t *testing.T, p *runPath) (trigger.Result, []map[string]string, bool) {
 	t.Helper()
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
@@ -165,7 +165,7 @@ func runThrough(t *testing.T, p *runPath) (trigger.Outcome, []map[string]string,
 }
 
 // runOn drives one path through d's executor, as runThrough does.
-func runOn(t *testing.T, d *daemon, p *runPath) (trigger.Outcome, []map[string]string, bool) {
+func runOn(t *testing.T, d *daemon, p *runPath) (trigger.Result, []map[string]string, bool) {
 	t.Helper()
 	read := logLines(t)
 	d.health.Set(true)
