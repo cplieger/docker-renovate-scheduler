@@ -142,12 +142,12 @@ func baseDirProbeResultError(dir string, res filesafe.ProbeResult) error {
 	}
 	if res.Writable() {
 		if res.Leaked {
-			return fmt.Errorf("base dir %q probe %q failed to %s and leaked its file: %w", dir, res.Name, res.Stage, res.Err)
+			return fmt.Errorf("base dir %q probe %q failed to %s and leaked its file: %w", dir, res.Name, res.Phase, res.Err)
 		}
 		slog.Warn("base dir probe wrote and flushed but could not clean up",
-			"path", dir, "stage", res.Stage, "name", res.Name,
+			"path", dir, "stage", res.Phase, "name", res.Name,
 			"leaked", res.Leaked, "error", res.Err)
 		return nil
 	}
-	return fmt.Errorf("base dir %q not writable, failed to %s: %w", dir, res.Stage, res.Err)
+	return fmt.Errorf("base dir %q not writable, failed to %s: %w", dir, res.Phase, res.Err)
 }

@@ -335,7 +335,7 @@ func TestRunClient_LogsDocumentedLifecycle(t *testing.T) {
 	if accepted >= started || started >= complete {
 		t.Errorf("runClient() lifecycle order = %v, want accepted before started before complete", msgs)
 	}
-	for _, msg := range []string{"triggered run accepted", "triggered run started", "triggered run complete"} {
+	for _, msg := range []capture.Message{"triggered run accepted", "triggered run started", "triggered run complete"} {
 		if !rec.AttrContains(msg, "repos", "owner/repo") {
 			t.Errorf("runClient() %q record = %v, want a repos attr naming owner/repo", msg, msgs)
 		}

@@ -439,10 +439,10 @@ func TestRunRenovateOnce_LifecycleRecordsCarryCorrelationAttributes(t *testing.T
 			if got := rec.CountLevel(tt.terminalLevel, tt.terminalMsg); got != 1 {
 				t.Errorf("%s records matching %q = %d, want 1; captured: %v", tt.terminalLevel, tt.terminalMsg, got, rec.Messages())
 			}
-			if got, ok := rec.AttrValueExact(tt.terminalMsg, "trigger"); !ok || got != tt.trigger {
+			if got, ok := rec.AttrValueExact(capture.Message(tt.terminalMsg), "trigger"); !ok || got != tt.trigger {
 				t.Errorf("terminal record trigger = (%q, %v), want (%q, true)", got, ok, tt.trigger)
 			}
-			durationAttr, ok := rec.Attr(tt.terminalMsg, "duration_ms")
+			durationAttr, ok := rec.Attr(capture.Message(tt.terminalMsg), "duration_ms")
 			if !ok || durationAttr.Kind() != slog.KindInt64 {
 				t.Errorf("terminal record duration_ms = (%v, %v), want an int64 attribute", durationAttr, ok)
 			}
