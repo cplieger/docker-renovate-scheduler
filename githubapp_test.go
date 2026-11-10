@@ -69,9 +69,9 @@ func writeKeyFile(t *testing.T, pkcs8 bool) string {
 	return path
 }
 
-// verifyJWT checks token's RS256 signature against the test key's public half
-// and returns its header and claims.
-func verifyJWT(t *testing.T, token string) (header, claims map[string]any) {
+// verifyJWT checks that token's header names RS256 and that its signature
+// verifies against the test key's public half, and returns its claims.
+func verifyJWT(t *testing.T, token string) (claims map[string]any) {
 	t.Helper()
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
@@ -85,6 +85,7 @@ func verifyJWT(t *testing.T, token string) (header, claims map[string]any) {
 	if err := rsa.VerifyPKCS1v15(&testAppKey().PublicKey, crypto.SHA256, digest[:], sig); err != nil {
 		t.Fatalf("JWT signature does not verify with the App's public key: %v", err)
 	}
+	var header map[string]any
 	for i, out := range []*map[string]any{&header, &claims} {
 		raw, err := base64.RawURLEncoding.DecodeString(parts[i])
 		if err != nil {
@@ -94,7 +95,10 @@ func verifyJWT(t *testing.T, token string) (header, claims map[string]any) {
 			t.Fatalf("parse JWT part %d: %v", i, err)
 		}
 	}
-	return header, claims
+	if header["alg"] != "RS256" {
+		t.Fatalf("JWT header alg = %v, want RS256", header["alg"])
+	}
+	return claims
 }
 
 // handlerTransport answers the App source's requests in process with a
@@ -201,7 +205,7 @@ func TestLoadAppConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("app key JWT() error = %v", err)
 			}
-			if _, claims := verifyJWT(t, jwt); claims["iss"] != "4242" {
+			if claims := verifyJWT(t, jwt); claims["iss"] != "4242" {
 				t.Errorf("app key JWT iss = %v, want %s's value \"4242\"", claims["iss"], envAppID)
 			}
 		})
@@ -495,7 +499,7 @@ func TestExecute_AppModeMintsWithTheAppIDAndTheFullGrant(t *testing.T) {
 	if !ok {
 		t.Fatalf("Authorization = %q, want a Bearer JWT", gotAuth)
 	}
-	if _, claims := verifyJWT(t, jwt); claims["iss"] != "4242" {
+	if claims := verifyJWT(t, jwt); claims["iss"] != "4242" {
 		t.Errorf("bearer JWT iss = %v, want %s's value \"4242\"", claims["iss"], envAppID)
 	}
 	var body map[string]any
