@@ -114,16 +114,6 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	completed := scheduler.NewStamp(completedStampPath())
 	reg, metrics := newMetricsRegistry(marker, modeName(scheduleEnabled), authName(app), completed)
 	metricsAddr := metricsListenAddr()
-	lease := runLease(interval, scheduleEnabled, runTimeout)
-	healthz := newHealthz(marker, lease)
-	stopMetrics, err := serveMetrics(ctx, metricsAddr, reg, healthz)
-	if err != nil {
-		slog.Error("cannot listen on METRICS_LISTEN_ADDR", "value", metricsAddr, "error", err)
-		_ = ln.Close()
-		return daemonStopped(err)
-	}
-	defer stopMetrics()
-
 	d := &daemon{
 		queue:          trigger.NewQueue[runPayload](queueCapacity),
 		marker:         marker,
@@ -138,10 +128,20 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		now:            time.Now,
 		stampPath:      stampPath(),
 		timeout:        runTimeout,
-		lease:          lease,
+		lease:          runLease(interval, scheduleEnabled, runTimeout, app != nil),
 		installationID: installationID,
 		fatal:          make(chan error, 1),
 	}
+	// /healthz reads the daemon's own lease, the one its rate-limit wait
+	// refreshes on, so the two cannot disagree.
+	stopMetrics, err := serveMetrics(ctx, metricsAddr, reg, newHealthz(marker, d.lease))
+	if err != nil {
+		slog.Error("cannot listen on METRICS_LISTEN_ADDR", "value", metricsAddr, "error", err)
+		_ = ln.Close()
+		return daemonStopped(err)
+	}
+	defer stopMetrics()
+
 	return d.run(ctx, ln, socketPath, interval, scheduleEnabled, remaining)
 }
 

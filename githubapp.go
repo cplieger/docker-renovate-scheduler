@@ -61,6 +61,16 @@ type appConfig struct {
 // partial or unusable settings return an error so the daemon stops at start.
 // No error quotes a setting's value: a miswired container can hold a token or
 // the key itself in any of them.
+// appConfigured reports whether any GitHub App setting is set, the test
+// loadAppConfig makes before it validates them. The health probe uses it to
+// size the lease without reading the key: a set but invalid configuration
+// stops the daemon before it writes a health file.
+func appConfigured() bool {
+	return strings.TrimSpace(envx.String(envAppID)) != "" ||
+		strings.TrimSpace(envx.String(envAppInstallationID)) != "" ||
+		envx.String(envAppKeyFile) != ""
+}
+
 func loadAppConfig() (*appConfig, error) {
 	if envx.String(envAppKeyInline) != "" {
 		return nil, fmt.Errorf("%s is not read: put the private key in a file and set %s to its path", envAppKeyInline, envAppKeyFile)
@@ -74,7 +84,7 @@ func loadAppConfig() (*appConfig, error) {
 		return nil, notPositiveInt(envAppInstallationID)
 	}
 	keyPath := envx.String(envAppKeyFile)
-	if !idSet && !instSet && keyPath == "" {
+	if !appConfigured() {
 		return nil, nil
 	}
 	switch {

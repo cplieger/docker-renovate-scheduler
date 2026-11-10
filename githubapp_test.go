@@ -947,7 +947,9 @@ func TestExecute_ARateLimitWaitKeepsHealthAsItWas(t *testing.T) {
 		// wait's end keeps the marker fresh through the run.
 		runLasts = 1100 * time.Millisecond
 	)
-	lease := runLease(interval, true, runTimeout)
+	// The wait refreshes on whatever lease the daemon holds. The token-mode
+	// figure keeps it shorter than the wait, so this runs on the real clock.
+	lease := runLease(interval, true, runTimeout, false)
 	tests := []struct {
 		name    string
 		marker  string
@@ -1032,39 +1034,29 @@ func TestExecute_ARateLimitWaitKeepsHealthAsItWas(t *testing.T) {
 	}
 }
 
-// TestRunDaemon_TheProbeStaysHealthyThroughARateLimitWait boots App mode on
-// the built-in schedule with a 1.5s lease. After a good startup run, the next
-// run's token request is rate-limited for longer than the lease, and the
-// health probe must read healthy until the wait ends. Not parallel: it
-// replaces newTokenSource and uses healthMarkerPath.
-func TestRunDaemon_TheProbeStaysHealthyThroughARateLimitWait(t *testing.T) {
+// TestRunDaemon_HealthzAllowsTheTokenRequestInAppMode boots App mode on the
+// built-in schedule and ages the healthy marker its startup run left: past the
+// token-mode lease but inside the token request's budget /healthz answers 200,
+// and past that it reports a stuck schedule. The handler reads the daemon's own
+// lease, the one its rate-limit wait refreshes on, so this also covers that
+// wiring. Not parallel: it replaces newTokenSource and uses healthMarkerPath.
+func TestRunDaemon_HealthzAllowsTheTokenRequestInAppMode(t *testing.T) {
 	const (
-		interval   = 100 * time.Millisecond
-		runTimeout = 1300 * time.Millisecond
-		retryAfter = 3 * time.Second
+		interval   = time.Hour
+		runTimeout = 30 * time.Minute
+		tokenLease = 2*interval + runTimeout
 	)
-	lease := runLease(interval, true, runTimeout)
+	addr := freeAddr(t)
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	t.Setenv("RUN_INTERVAL", interval.String())
 	t.Setenv("RUN_TIMEOUT", runTimeout.String())
-	t.Setenv("METRICS_LISTEN_ADDR", "")
+	t.Setenv("METRICS_LISTEN_ADDR", addr)
 	t.Setenv(envAppID, strconv.Itoa(testAppID))
 	t.Setenv(envAppInstallationID, strconv.Itoa(testInstallation))
 	t.Setenv(envAppKeyFile, writeKeyFile(t, false))
 	t.Setenv(envAppKeyInline, "")
 	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
-	limited, waited := make(chan struct{}), make(chan struct{})
-	var asked atomic.Int32
 	github := handlerTransport(func(w http.ResponseWriter, _ *http.Request) {
-		switch asked.Add(1) {
-		case 2:
-			close(limited)
-			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
-			writeJSON(w, http.StatusTooManyRequests, `{"message":"You have exceeded a secondary rate limit"}`)
-			return
-		case 3:
-			close(waited)
-		}
 		writeJSON(w, http.StatusCreated, tokenBody())
 	})
 	built := newTokenSource
@@ -1074,53 +1066,41 @@ func TestRunDaemon_TheProbeStaysHealthyThroughARateLimitWait(t *testing.T) {
 	t.Cleanup(func() { newTokenSource = built })
 
 	cancel, done, runErr := startDaemonForTest(t, recordingRunner("true", nil))
-	select {
-	case <-limited:
-	case <-done:
-		t.Fatalf("runDaemon returned before the rate-limited token request: %v", *runErr)
-	case <-time.After(10 * time.Second):
-		t.Fatal("no second token request within 10s")
-	}
-	start := time.Now()
-	probe := time.NewTicker(50 * time.Millisecond)
-	defer probe.Stop()
-	deadline := time.After(retryAfter + 5*time.Second)
-	var probes, wrong int
-	var firstAt time.Duration
-	var first health.Freshness
-probing:
-	for {
+	booted := time.After(10 * time.Second)
+	for !health.Inspect(healthMarkerPath).Healthy() {
 		select {
-		case <-waited:
-			break probing
 		case <-done:
-			t.Fatalf("runDaemon returned during the rate-limit wait: %v", *runErr)
-		case <-deadline:
-			t.Fatal("no token request after GitHub's wait")
-		case <-probe.C:
-			f := health.Inspect(healthMarkerPath, probeOptions()...)
-			probes++
-			if !f.Healthy() {
-				if wrong == 0 {
-					firstAt, first = time.Since(start), f
-				}
-				wrong++
-			}
+			t.Fatalf("runDaemon returned before its startup run finished: %v", *runErr)
+		case <-booted:
+			t.Fatal("the startup run left no healthy marker within 10s")
+		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	waitedFor := time.Since(start)
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, tc := range []struct {
+		name string
+		age  time.Duration
+		want int
+	}{
+		{name: "inside the token request's budget", age: tokenLease + time.Minute, want: http.StatusOK},
+		{name: "past it", age: tokenLease + tokenMintBudget + time.Minute, want: http.StatusServiceUnavailable},
+	} {
+		aged := time.Now().Add(-tc.age)
+		if err := os.Chtimes(healthMarkerPath, aged, aged); err != nil {
+			t.Fatal(err)
+		}
+		code, _, body := getHealthz(t, client, "http://"+addr+"/healthz")
+		if code != tc.want {
+			t.Errorf("GET /healthz on a healthy marker %s old (%s) = %d %q, want %d", tc.age, tc.name, code, body.Reasons, tc.want)
+		}
+		if tc.want != http.StatusOK && (len(body.Reasons) != 1 || body.Reasons[0] != reasonStuck) {
+			t.Errorf("GET /healthz %s lists %q, want only %q", tc.name, body.Reasons, reasonStuck)
+		}
+	}
 	cancel()
 	awaitDaemonStopped(t, done)
-
 	if err := *runErr; err != nil {
 		t.Errorf("runDaemon() = %v, want nil", err)
-	}
-	if waitedFor <= lease {
-		t.Fatalf("the wait lasted %s, within the %s lease, so it tests nothing", waitedFor, lease)
-	}
-	if wrong > 0 {
-		t.Errorf("the health probe read unhealthy on %d of %d probes during the wait; the first, %s in: %s (marker age %s, max %s)",
-			wrong, probes, firstAt.Round(50*time.Millisecond), first.Reason(), first.Age.Round(10*time.Millisecond), first.MaxAge)
 	}
 }
 

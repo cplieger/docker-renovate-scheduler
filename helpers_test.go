@@ -146,3 +146,13 @@ func seedStamp(t *testing.T, path string, ts time.Time, outcome string) {
 		t.Fatalf("seed stamp file %s: %v", path, err)
 	}
 }
+
+// clearAppEnv unsets every GitHub App setting for the test, so a shell or CI
+// job that carries App settings cannot switch the code under test into App
+// mode.
+func clearAppEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{envAppID, envAppInstallationID, envAppKeyFile, envAppKeyInline} {
+		t.Setenv(key, "")
+	}
+}

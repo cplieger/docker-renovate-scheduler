@@ -215,7 +215,7 @@ func TestHeadersNameTheOneSidedAlerts(t *testing.T) {
 }
 
 // TestPromQLNoRecentRunWindowIsTwiceTheDefaultRunCycle keeps the metric rule
-// at the log rule's window: twice RUN_INTERVAL plus RUN_TIMEOUT.
+// at the log rule's window: twice the sum of RUN_INTERVAL and RUN_TIMEOUT.
 func TestPromQLNoRecentRunWindowIsTwiceTheDefaultRunCycle(t *testing.T) {
 	want := 2 * (defaultInterval + defaultRunTimeout)
 	expr, ok := ruleExprs(t, "alerts/promql.yaml")["RenovateNoRecentRun"]

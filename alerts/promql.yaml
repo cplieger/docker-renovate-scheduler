@@ -3,10 +3,10 @@
 # is the alternative to alerts/logql.yaml: load one of the two, not both. The
 # rules read the page served when METRICS_LISTEN_ADDR is set; scrape it as job
 # `renovate`. Thresholds and severity labels are starting points. The 14h
-# window (50400 seconds) is twice RUN_INTERVAL plus RUN_TIMEOUT at the
-# defaults; resize it to your schedule. RenovateDown exists only in this file;
-# in alerts/logql.yaml, RenovateDaemonStopped covers a stopped scheduler. Notes
-# are in docs/monitoring.md.
+# window (50400 seconds) is twice the sum of RUN_INTERVAL and RUN_TIMEOUT at
+# the defaults; resize it to your schedule. RenovateDown exists only in this
+# file; in alerts/logql.yaml, RenovateDaemonStopped covers a stopped scheduler.
+# Notes are in docs/monitoring.md.
 groups:
   - name: renovate
     rules:
