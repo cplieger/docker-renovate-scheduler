@@ -62,18 +62,16 @@ func seriesKey(name string, labels ...string) string {
 }
 
 // daemonEnv sets the environment runDaemon reads to an external-mode daemon
-// with token auth on a fresh base dir, and returns the base dir.
-func daemonEnv(t *testing.T, metricsAddr string) string {
+// with token auth on a fresh base dir.
+func daemonEnv(t *testing.T, metricsAddr string) {
 	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("RENOVATE_BASE_DIR", dir)
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	t.Setenv("RUN_INTERVAL", "off")
 	t.Setenv("METRICS_LISTEN_ADDR", metricsAddr)
 	for _, k := range []string{envAppID, envAppInstallationID, envAppKeyFile, envAppKeyInline} {
 		t.Setenv(k, "")
 	}
 	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
-	return dir
 }
 
 // startDaemon runs runDaemon until the test ends and waits until its trigger
