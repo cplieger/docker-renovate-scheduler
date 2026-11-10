@@ -497,11 +497,11 @@ func TestDefaultCommandRunner_CancelSendsSIGTERMNotSIGKILL(t *testing.T) {
 // groupMember is a SIGTERM-ignoring process that has JOINED the runner child's
 // process group while remaining a direct child of the TEST binary, so the test
 // itself reaps it. A reaper goroutine collects it the instant it dies and
-// records when, which is the instant the process group actually became empty.
+// closes reaped.
 type groupMember struct {
 	pid    int
 	cmd    *exec.Cmd
-	reaped chan time.Time
+	reaped chan struct{}
 }
 
 // startTermIgnoringGroupMember adds a SIGTERM-ignoring process to pgid's
@@ -534,8 +534,7 @@ func startTermHonoringGroupMember(t *testing.T, pgid int) *groupMember {
 // startGroupMember starts `sh -c script` as a direct child of the TEST binary
 // joined into pgid's process group, waits for the readiness file the script
 // creates at "$1" (failing with readyMsg if it never appears), and asserts
-// the join. A reaper goroutine collects the member the instant it dies and
-// records when.
+// the join. A reaper goroutine collects the member the instant it dies.
 //
 // It joins the group as a direct child of the TEST binary rather than being
 // forked as a descendant of the runner's own child, and that is what makes
@@ -556,10 +555,10 @@ func startGroupMember(t *testing.T, pgid int, script, readyMsg string) *groupMem
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start group member: %v", err)
 	}
-	m := &groupMember{pid: cmd.Process.Pid, cmd: cmd, reaped: make(chan time.Time, 1)}
+	m := &groupMember{pid: cmd.Process.Pid, cmd: cmd, reaped: make(chan struct{})}
 	go func() {
 		_ = cmd.Wait()
-		m.reaped <- time.Now()
+		close(m.reaped)
 	}()
 	t.Cleanup(func() { _ = syscall.Kill(m.pid, syscall.SIGKILL) })
 
@@ -576,17 +575,13 @@ func startGroupMember(t *testing.T, pgid int, script, readyMsg string) *groupMem
 	return m
 }
 
-// awaitReap waits for the reaper goroutine to collect the member and returns
-// the instant it did, which is also when the process group emptied in every
-// fixture whose member outlives the runner's own child.
-func (m *groupMember) awaitReap(t *testing.T) time.Time {
+// awaitReap waits for the reaper goroutine to collect the member.
+func (m *groupMember) awaitReap(t *testing.T) {
 	t.Helper()
 	select {
-	case at := <-m.reaped:
-		return at
+	case <-m.reaped:
 	case <-time.After(30 * time.Second):
 		t.Fatal("group member was never reaped")
-		return time.Time{}
 	}
 }
 
