@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"net/http"
 	"time"
 
@@ -11,7 +12,7 @@ const healthMarkerPath = health.DefaultPath
 
 func probeOptions() []health.ProbeOption {
 	interval, scheduleEnabled := loadInterval()
-	lease := runLease(interval, scheduleEnabled, loadRunTimeout())
+	lease := runLease(interval, scheduleEnabled, loadRunTimeout(), appConfigured())
 	if lease <= 0 {
 		return nil
 	}
@@ -19,18 +20,24 @@ func probeOptions() []health.ProbeOption {
 }
 
 // runLease is how old the marker may grow before the schedule counts as
-// stuck: two intervals plus one run timeout. External mode arms none (0).
-func runLease(interval time.Duration, scheduleEnabled bool, runTimeout time.Duration) time.Duration {
+// stuck: two intervals plus one run's budget, RUN_TIMEOUT, and in GitHub App
+// mode the token request's tokenMintBudget before it. External mode arms none
+// (0).
+func runLease(interval time.Duration, scheduleEnabled bool, runTimeout time.Duration, appMode bool) time.Duration {
 	if !scheduleEnabled {
 		return 0
 	}
-	return health.Lease{Interval: interval, Cycles: 2, Timeout: runTimeout, Attempts: 1}.Duration()
+	run := runTimeout
+	if appMode {
+		run = min(runTimeout, math.MaxInt64-tokenMintBudget) + tokenMintBudget
+	}
+	return health.Lease{Interval: interval, Cycles: 2, Timeout: run, Attempts: 1}.Duration()
 }
 
 // Reasons /healthz lists. Fixed sentences, because the route answers with no login.
 const (
 	reasonRunFailed = "the last run failed, no run has finished since a start with a run due, or the container is stopping"
-	reasonStuck     = "no run has finished within two run intervals plus one run timeout, so the schedule may be stuck"
+	reasonStuck     = "no run has finished within two run intervals plus one run's time budget, so the schedule may be stuck"
 )
 
 // newHealthz serves the verdict the health subcommand reads from marker while

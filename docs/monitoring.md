@@ -57,7 +57,7 @@ Each completed run writes one `run finished` record at INFO. A run cancelled by 
 | `ok` | 1 or 0, as the `run` command reports it, so a tolerated failure is 1 |
 | `tolerated` | 1 when the run failed in a way an outage causes and the failure is still tolerated, else 0 |
 | `exit_code` | Renovate's exit code, or -1 when Renovate did not run or a signal ended it |
-| `duration_ms` | How long the run took |
+| `duration_ms` | How long the run took, including any wait for a rate-limited GitHub App token |
 
 When the scheduler stops with an error, it writes one `daemon stopped` record at ERROR and exits. Its `error` field names the cause, such as invalid GitHub App settings, an unwritable base directory, an address `METRICS_LISTEN_ADDR` cannot use, or a process that survived a run. A normal shutdown writes none.
 
@@ -69,16 +69,21 @@ These lines are for reading a run by hand. No alert rule reads them.
 | --- | --- | --- |
 | `container started` | INFO | `mode`, `interval`, `timeout`, `base_dir`, `startup_run` |
 | `metrics listener started` | INFO | `address` |
+| `metrics listener stopped` | ERROR | `address`, `error`. `/metrics` and `/healthz` stop answering, while the scheduler keeps running |
 | `github auth mode` | INFO | `mode` (`app` or `token`), and `app_id` and `installation_id` for an App |
-| `run timeout capped to the installation token's life` | INFO | `run_timeout`, `effective`. App mode only |
+| `run timeout capped to the installation token's life` | INFO | `trigger`, `run_timeout`, `effective`. App mode only, before a run whose token expires before `RUN_TIMEOUT` would |
 | `github app configuration invalid` | ERROR | `error`, `hint`. The container stops |
-| `github app installation resolved` | INFO | `installation_id`, `account`. Logged once when `GITHUB_APP_INSTALLATION_ID` is unset |
+| `github app installation resolved` | INFO | `installation_id`. Logged when `GITHUB_APP_INSTALLATION_ID` is unset, with the first token, and again with the first token after a reinstall gives the installation a new ID |
 | `github app installation token issued` | INFO | `trigger`, `installation_id`, `expires_at` |
-| `github app token request failed` | ERROR | `trigger`, `error`. The run fails and Renovate does not start |
-| `renovate run skipped: github app token unavailable` | WARN, or ERROR once such failures have lasted 2h | `trigger`, `error`, `failing_for`. GitHub did not answer the token request, see [Repository errors](#repository-errors) |
+| `github app token request failed` | ERROR | `trigger`, `error`, `hint`. The run fails and Renovate does not start |
+| `renovate run delayed: github app token rate-limited` | WARN | `trigger`, `error`, `retry_after`. GitHub rate-limited the token request; the run asks again after `retry_after` and starts then. The wait is not a failure |
+| `renovate run skipped: github app token unavailable` | WARN, or ERROR once such failures have lasted 2h | `trigger`, `error`, `failing_for`. GitHub kept failing or did not answer the token request, see [Repository errors](#repository-errors) |
+| `forgeapi credential refresh` | INFO or WARN | `family`, `instance`, `state`, `status`, `failure`. One line per token request the scheduler sends, after its retries, with the final status, `0` when GitHub never answered; WARN when no token came of it |
+| `forgeapi request` | WARN | `op`, `status`, `kind`, `attempt`, `error` and forgeapi's other request fields. One line per failed request to GitHub during a token request or installation lookup, each retry included; a request that succeeds logs below WARN |
 | `startup run skipped: the last scheduled run succeeded within the interval` | INFO | `last_success`, `interval` |
 | `renovate run starting` | INFO | `trigger`, `repos`, `timeout` |
 | `renovate run complete` | INFO | `trigger`, `duration_ms` |
+| `cannot record the complete run; the last-success metric restarts at 0` | WARN | `path`, `error`. The record on `/data` that brings `last_success_timestamp_seconds` back after a restart was not written |
 | `renovate run failed` | ERROR | `trigger`, `duration_ms`, `error`, and `likely_cause` and `fix` after a heap exhaustion |
 | `renovate run ended in a repository error` | WARN, or ERROR once such failures have lasted 2h | `trigger`, `duration_ms`, `error`, `likely_cause`, `fix`, `failing_for`. See [Repository errors](#repository-errors) |
 | `renovate runs recovered` | INFO | `trigger`, `scope`, `failing_for`. The first good run after repository errors or token outages |
@@ -125,7 +130,7 @@ The scheduler runs Renovate with `RENOVATE_EXIT_CODE_FOR_ERRORS=true` unless you
 | 7 | an external host error, a lockfile error or missing credentials, such as a platform outage or a clone or push the platform refused |
 | 8 | an unknown error |
 
-A platform outage causes most of these, so one is not yet a failure. The scheduler logs `renovate run ended in a repository error` at WARN with that `likely_cause`, leaves health as it was, and the `run` command exits 0. A GitHub App token request that GitHub does not answer is treated the same way, logged as `renovate run skipped: github app token unavailable`. A rejected key or a missing installation still fails at once. So does an outage that stops Renovate before its first repository, during its own start-up calls to the platform: Renovate exits 1 then, like any other Renovate failure.
+A platform outage causes most of these, so one is not yet a failure. The scheduler logs `renovate run ended in a repository error` at WARN with that `likely_cause`, leaves health as it was, and the `run` command exits 0. A GitHub App token request that GitHub keeps failing or does not answer is treated the same way, logged as `renovate run skipped: github app token unavailable`. A rate-limited token request is not a failure at all: the run waits out the rate limit and then starts, logged as `renovate run delayed: github app token rate-limited`. A rejected key or a missing installation still fails at once. So does an outage that stops Renovate before its first repository, during its own start-up calls to the platform: Renovate exits 1 then, like any other Renovate failure.
 
 Each of these lines carries `failing_for`, how long such failures have lasted. Once that reaches 2 hours with no good run in between, the same line is written at ERROR instead, and that run fails: health turns unhealthy, the `run` command exits 1 and `RenovateRunFailed` fires. Each failing run after it fails too, until a good one. The first failing run of a series is always a warning, however long it ran. At an hourly cadence the third failing run is the first to fail, or the second when the built-in schedule's first two failing runs take an hour or more together. With the 6-hour default it is the second. Full runs and runs scoped to repositories keep separate clocks, so frequent good scoped runs cannot reset the full run's clock: its ERROR line and exit code still report the fault. Health follows the last run, though, so a good scoped run turns it healthy again. A restart starts the clock again. The first good run after such failures logs `renovate runs recovered` with how long they lasted.
 
@@ -138,7 +143,7 @@ Renovate's `Repository finished` line names the repository and its `result`, suc
 | `/healthz` | `GET`, `HEAD` | `METRICS_LISTEN_ADDR`, unset by default | none | `200 {"status":"ok"}`, or `503 {"status":"unhealthy","reasons":[...]}` |
 | `/metrics` | `GET` | the same port | none, so keep the port on your network | Prometheus text format |
 
-**What healthy means.** The last completed run succeeded, or failed in a way that is still tolerated, and the container is not shutting down. With the built-in schedule, the container is also unhealthy from start until a due startup run succeeds. It is unhealthy too when no run has finished for twice `RUN_INTERVAL` plus `RUN_TIMEOUT`, 13 hours at the defaults. `/healthz` names which of these failed in `reasons`. GitHub being unreachable makes the container unhealthy only once the failures it causes have lasted 2 hours. [How it works](how-it-works.md#health) explains how the container decides.
+**What healthy means.** The last completed run succeeded, or failed in a way that is still tolerated, and the container is not shutting down. With the built-in schedule, the container is also unhealthy from start until a due startup run succeeds. It is unhealthy too when no run has finished for twice `RUN_INTERVAL` plus `RUN_TIMEOUT`, 13 hours at the defaults. In GitHub App mode each run starts with a token request of up to 2 minutes, so that time is 2 minutes longer. A run waiting out a GitHub App token rate limit keeps a healthy file fresh, so the wait does not count as a stopped schedule, and an absent file stays absent. `/healthz` names which of these failed in `reasons`. GitHub being unreachable makes the container unhealthy only once the failures it causes have lasted 2 hours. [How it works](how-it-works.md#health) explains how the container decides.
 
 **Docker health.** The image checks itself every 30 seconds with `docker-renovate-scheduler health`, which reads the health file the scheduler updates after each run. Docker marks the container unhealthy after 3 failures, and allows 10 minutes after a start. Docker's health status notifies nobody on its own, and Docker does not restart an unhealthy container.
 

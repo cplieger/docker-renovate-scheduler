@@ -531,22 +531,13 @@ func startTermHonoringGroupMember(t *testing.T, pgid int) *groupMember {
 		"group member never started")
 }
 
-// startGroupMember starts `sh -c script` as a direct child of the TEST binary
-// joined into pgid's process group, waits for the readiness file the script
-// creates at "$1" (failing with readyMsg if it never appears), and asserts
-// the join. A reaper goroutine collects the member the instant it dies.
-//
-// It joins the group as a direct child of the TEST binary rather than being
-// forked as a descendant of the runner's own child, and that is what makes
-// every group-death assertion here deterministic. A descendant is orphaned the
-// moment the group leader exits and reparents to PID 1 — and a zombie is STILL
-// a process-group member as far as kill(2) is concerned, so
-// runProcessGroupGone cannot see the group empty until the ambient reaper
-// collects it. That probe IS the runner's group-death observation, so a fixture
-// built on an orphaned descendant measures the ambient reaper instead of the
-// code under test: it fails outright wherever PID 1 does not reap (any
-// app-as-PID-1 container) and flakes on a loaded CI runner, where the reap can
-// miss the bounded window. A direct child is reaped here, at a known instant.
+// startGroupMember starts `sh -c script` as a direct child of the test binary
+// joined into pgid's group, waits for the readiness file at "$1" (failing with
+// readyMsg), asserts the join, and reaps the member the instant it dies. A
+// descendant of the runner's child would be orphaned to PID 1 when the leader
+// exits, and its zombie still counts as a group member for kill(2), so
+// runProcessGroupGone would measure the ambient reaper: failing where PID 1
+// never reaps and flaking on a loaded runner.
 func startGroupMember(t *testing.T, pgid int, script, readyMsg string) *groupMember {
 	t.Helper()
 	readyPath := t.TempDir() + "/member-ready"
@@ -665,17 +656,11 @@ func TestDefaultCommandRunner_CancelOnExitedChildReportsProcessDone(t *testing.T
 	}
 }
 
-// TestDefaultCommandRunner_CancelSignalsTheWholeProcessGroup pins the target of
-// the Cancel closure's SIGTERM: the run's process GROUP, so the package-manager
-// toolchains Renovate installs at runtime stop with it instead of continuing to
-// write the base directory after the run timeout fired. os/exec's own WaitDelay
-// SIGKILL reaches the direct child only, so a signal aimed at the leader alone
-// leaves those processes for the post-timeout sweep — or, on the paths that do
-// not sweep, running against the next FIFO job's base directory.
-//
-// Read from the member's exit signal rather than from timing: SIGTERM means the
-// group was addressed, and a member that is never signalled at all outlives the
-// cancel entirely.
+// TestDefaultCommandRunner_CancelSignalsTheWholeProcessGroup pins Cancel's
+// SIGTERM to the run's process group, so the toolchains Renovate installs stop
+// with it rather than writing the base directory after the timeout: os/exec's
+// WaitDelay SIGKILL reaches the direct child only. It reads the member's exit
+// signal rather than timing: SIGTERM means the group was addressed.
 func TestDefaultCommandRunner_CancelSignalsTheWholeProcessGroup(t *testing.T) {
 	t.Parallel()
 	cmd, markReaped := startTermHonoringChild(t)
@@ -693,23 +678,13 @@ func TestDefaultCommandRunner_CancelSignalsTheWholeProcessGroup(t *testing.T) {
 	}
 }
 
-// TestRunRenovateOnce_TimeoutSweepObservesGroupDeath is the regression test
-// for the sweep's observation phase: kill(2) only queues SIGKILL, so a
-// forced cleanup that returns on signal submission alone can release the
-// executor to the next FIFO job while a package-manager descendant is still
-// alive against the same base directory. The leader spawns a TERM-ignoring
-// descendant (models a package manager that shrugs off the Cancel SIGTERM)
-// and then outlives the run timeout; when runRenovateOnce returns, the
-// descendant must ALREADY be gone — no post-return polling window — because
-// sweepRunProcessGroup must not return until the whole group has died.
-//
-// Unlike fixtures that keep the survivor as a test-owned group member, this
-// fixture keeps it as a DESCENDANT of the run child. The instantaneous
-// "already gone" assertion is what catches a submit-and-return sweep, and a
-// test-owned member would have to be reaped by a goroutine here, whose
-// scheduling cannot be ordered against the sweep's return. The cost is that
-// this one test needs an ambient reaper for the orphaned descendant's zombie,
-// so it passes under CI's init but not in a container whose PID 1 never reaps.
+// TestRunRenovateOnce_TimeoutSweepObservesGroupDeath: kill(2) only queues
+// SIGKILL, so sweepRunProcessGroup must not return until the group has died.
+// A TERM-ignoring descendant outlives the timeout and must already be gone
+// when runRenovateOnce returns. It stays a descendant of the run child, since
+// a test-owned member's reaper goroutine cannot be ordered against the sweep's
+// return; so it needs an ambient reaper for the orphan's zombie, and passes
+// under CI's init but not where PID 1 never reaps.
 func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
 	t.Parallel()
 	descPath := t.TempDir() + "/desc.pid"

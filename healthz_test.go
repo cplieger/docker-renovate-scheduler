@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -66,7 +67,7 @@ func TestServeMetricsServesHealthz(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "healthy")
 	marker := health.NewMarker(path)
 	// A 1h interval and a 30m run timeout: a lease of two intervals plus one timeout.
-	lease := runLease(time.Hour, true, 30*time.Minute)
+	lease := runLease(time.Hour, true, 30*time.Minute, false)
 	addr := freeAddr(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	stop, err := serveMetrics(ctx, addr, measure.NewRegistry(metricsPrefix), newHealthz(marker, lease))
@@ -148,12 +149,66 @@ func TestServeMetricsServesHealthz(t *testing.T) {
 	})
 }
 
+// TestTheLeaseInAppModeCoversTheTokenRequest pins the lease to one run of the
+// work loop: in GitHub App mode a run may spend tokenMintBudget on its token
+// before RUN_TIMEOUT starts, so a marker that old is still healthy there, while
+// in token mode, whose runs ask for no token, it is stuck. /healthz and the
+// health subcommand agree in both modes. Serial: it sets the environment.
+func TestTheLeaseInAppModeCoversTheTokenRequest(t *testing.T) {
+	const interval, runTimeout = time.Minute, 30 * time.Minute
+	// A run that starts as the second interval ends, spends the whole token
+	// budget and then most of RUN_TIMEOUT.
+	const age = 2*interval + tokenMintBudget + runTimeout - 30*time.Second
+	for _, tc := range []struct {
+		name     string
+		app      bool
+		keyGone  bool
+		wantCode int
+	}{
+		{name: "GitHub App mode", app: true, wantCode: http.StatusOK},
+		// The daemon read its key at start, so the probe must not depend on
+		// the file still being there.
+		{name: "GitHub App mode after the key file is gone", app: true, keyGone: true, wantCode: http.StatusOK},
+		{name: "token mode", wantCode: http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("RUN_INTERVAL", interval.String())
+			t.Setenv("RUN_TIMEOUT", runTimeout.String())
+			clearAppEnv(t)
+			if tc.app {
+				key := writeKeyFile(t, false)
+				if tc.keyGone {
+					if err := os.Remove(key); err != nil {
+						t.Fatal(err)
+					}
+				}
+				t.Setenv(envAppID, strconv.Itoa(testAppID))
+				t.Setenv(envAppKeyFile, key)
+			}
+			path := filepath.Join(t.TempDir(), "healthy")
+			marker := health.NewMarker(path)
+			setMarker(t, marker, path, "aged", age)
+
+			rec := httptest.NewRecorder()
+			newHealthz(marker, runLease(interval, true, runTimeout, tc.app)).
+				ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+			if rec.Code != tc.wantCode {
+				t.Errorf("/healthz on a healthy marker %s old = %d, want %d", age, rec.Code, tc.wantCode)
+			}
+			if probeHealthy := health.Inspect(path, probeOptions()...).Healthy(); probeHealthy != (rec.Code == http.StatusOK) {
+				t.Errorf("/healthz = %d but the health subcommand reads healthy = %v: the two readers disagree", rec.Code, probeHealthy)
+			}
+		})
+	}
+}
+
 // TestHealthzAgreesWithTheHealthSubcommand pins one verdict for two readers:
 // for a fresh, a failed, a not yet stale and a stale marker, /healthz answers
 // 200 exactly when the health subcommand exits 0. With the schedule on, the
 // lease is two run intervals plus one run timeout; with RUN_INTERVAL=off there
 // is none. Serial: it sets the environment both readers parse.
 func TestHealthzAgreesWithTheHealthSubcommand(t *testing.T) {
+	clearAppEnv(t)
 	for _, env := range []struct {
 		interval, timeout string
 		lease             time.Duration
@@ -190,7 +245,7 @@ func TestHealthzAgreesWithTheHealthSubcommand(t *testing.T) {
 				setMarker(t, marker, path, tc.state, tc.age)
 
 				rec := httptest.NewRecorder()
-				newHealthz(marker, runLease(interval, scheduleEnabled, loadRunTimeout())).
+				newHealthz(marker, runLease(interval, scheduleEnabled, loadRunTimeout(), false)).
 					ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 				probeHealthy := health.Inspect(path, probeOptions()...).Healthy()
 				if rec.Code != tc.wantCode {

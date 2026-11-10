@@ -4,7 +4,8 @@
 # at INFO, so keep LOG_LEVEL at info (Renovate reads the same setting). Change
 # the `container` selector to the label your log collector sets. Thresholds,
 # windows and severity labels are starting points. The 14h windows are twice
-# RUN_INTERVAL plus RUN_TIMEOUT at the defaults; resize them to your schedule.
+# the sum of RUN_INTERVAL and RUN_TIMEOUT at the defaults; resize them to your
+# schedule.
 # RenovateDaemonStopped exists only in this file; in alerts/promql.yaml,
 # RenovateDown covers a stopped scheduler. Notes are in docs/monitoring.md.
 groups:

@@ -29,8 +29,7 @@ The image removes the `docker` command-line tool from Renovate's base image, so 
 | [`github.com/cplieger/go/health`](https://github.com/cplieger/go/tree/main/health) | the file-based healthcheck and the `/healthz` answer |
 | [`github.com/cplieger/go/httpserver`](https://github.com/cplieger/go/tree/main/httpserver) | the optional metrics listener's timeouts and shutdown |
 | [`github.com/cplieger/go/measure`](https://github.com/cplieger/go/tree/main/measure) | the optional metrics page |
-| [`github.com/cplieger/go/httpclient`](https://github.com/cplieger/go/tree/main/httpclient) | retries for the GitHub App token request |
-| [`github.com/cplieger/go/textsafe`](https://github.com/cplieger/go/tree/main/textsafe) | sanitizing, redacting and capping GitHub API error text before it is logged |
+| [`github.com/cplieger/forgeapi`](https://github.com/cplieger/forgeapi) | the GitHub App token request: signing, retries, and redacting and capping GitHub's error text before it is logged |
 | [`github.com/cplieger/go/scheduler`](https://github.com/cplieger/go/tree/main/scheduler) | interval parsing, the run loop, the command runner and the socket queue |
 | [`github.com/cplieger/go/slogx`](https://github.com/cplieger/go/tree/main/slogx) | the logging setup, logfmt with UTC times |
 

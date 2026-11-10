@@ -243,7 +243,7 @@ func TestLogQLNoRecentRunCountsOnlyCompleteFullRuns(t *testing.T) {
 
 // TestLogQLWindowsAreTwiceTheDefaultRunCycle keeps the state rule's range equal
 // to the heartbeat's, so a failed run is still the latest record when the
-// heartbeat takes over, at twice RUN_INTERVAL plus RUN_TIMEOUT.
+// heartbeat takes over, at twice the sum of RUN_INTERVAL and RUN_TIMEOUT.
 func TestLogQLWindowsAreTwiceTheDefaultRunCycle(t *testing.T) {
 	want := 2 * (defaultInterval + defaultRunTimeout)
 	for _, name := range []string{"RenovateRunFailed", "RenovateNoRecentRun"} {
