@@ -1,31 +1,24 @@
 package main
 
 import (
-	"bytes"
+	"cmp"
 	"context"
-	"crypto"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
-	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/cplieger/forgeapi/v2"
+	"github.com/cplieger/forgeapi/v2/creds"
 	"github.com/cplieger/go/envx"
-	"github.com/cplieger/go/httpclient"
-	"github.com/cplieger/go/textsafe"
 )
 
 // The scheduler's GitHub App settings stay outside RENOVATE_* so Renovate
@@ -39,28 +32,29 @@ const (
 )
 
 const (
-	githubAPIBase   = "https://api.github.com"
-	githubAPIVer    = "2022-11-28"
+	githubWebBase = "https://github.com"
+	// githubAPIHost is where forgeapi sends github.com's token requests.
+	githubAPIHost   = "api.github.com"
 	maxKeyFileBytes = 64 << 10
-	maxAPIBodyBytes = 1 << 20
-	// GitHub rejects an exp more than 10 minutes ahead of ITS clock; 9 minutes
-	// plus the 60 s iat backdate tolerates a minute of skew either way.
-	jwtBackdate = 60 * time.Second
-	jwtLifetime = 9 * time.Minute
-	// installationTokenLife is GitHub's fixed lifetime for an installation token.
+	// A mint gets up to four attempts, the last ending within two minutes.
+	tokenMintBudget  = 2 * time.Minute
+	tokenMintRetries = 3
+	// tokenExpiryMargin is how long before its token's expiry a run is stopped.
+	tokenExpiryMargin = 2 * time.Minute
+	// installationTokenLife is GitHub's documented token life. Measured on the
+	// host's clock it bounds expires_at, which is on GitHub's, so a host clock
+	// behind GitHub's cannot stretch a run past its token:
+	// https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app
 	installationTokenLife = time.Hour
-	tokenRequestTimeout   = 30 * time.Second
-	tokenMintBudget       = 2 * time.Minute
-	tokenMintAttempts     = 4
-	tokenExpiryMargin     = 2 * time.Minute
 )
 
 // appConfig is the validated GitHub App configuration. A nil *appConfig means
 // the App settings are absent and Renovate uses its own token.
 type appConfig struct {
-	key            *rsa.PrivateKey
+	key            *creds.AppKey
+	proxy          string // the proxy the token requests leave through, "" for a direct dial
 	appID          int
-	installationID int // 0 resolves the App's single installation at first use
+	installationID int64 // 0 resolves the App's single installation at first use
 }
 
 // loadAppConfig reads the App settings. Absent settings return (nil, nil);
@@ -92,23 +86,73 @@ func loadAppConfig() (*appConfig, error) {
 		return nil, notPositiveInt(envAppID)
 	case instSet && instID <= 0:
 		return nil, notPositiveInt(envAppInstallationID)
-	case strings.ContainsAny(keyPath, "\r\n") || strings.Contains(keyPath, "-----BEGIN"):
-		return nil, fmt.Errorf("%s holds key material, not a path: put the key in a file and set %s to that file's path", envAppKeyFile, envAppKeyFile)
 	}
-	key, err := readAppKey(keyPath)
+	key, err := readAppKey(keyPath, appID)
 	if err != nil {
 		return nil, err
 	}
-	return &appConfig{key: key, appID: appID, installationID: instID}, nil
+	proxy, err := githubAPIProxy()
+	if err != nil {
+		return nil, err
+	}
+	return &appConfig{key: key, proxy: proxy, appID: appID, installationID: int64(instID)}, nil
+}
+
+// githubAPIProxy answers the proxy the token requests leave through, "" for a
+// direct dial: HTTPS_PROXY unless NO_PROXY exempts GitHub's API, as net/http's
+// default transport reads them, since forgeapi reads neither. A value that is
+// no proxy URL is refused, where net/http would dial directly or misread it.
+// net/http reads the variables once per process.
+func githubAPIProxy() (string, error) {
+	raw := cmp.Or(envx.String("HTTPS_PROXY"), envx.String("https_proxy"))
+	if raw == "" {
+		return "", nil
+	}
+	// No error quotes the value, which can hold the proxy's password.
+	refused := errors.New("HTTPS_PROXY (or https_proxy) does not hold a proxy URL")
+	if !isProxyURL(raw) {
+		return "", refused
+	}
+	u, err := http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Scheme: "https", Host: githubAPIHost}})
+	if err != nil {
+		return "", refused
+	}
+	if u == nil {
+		return "", nil
+	}
+	return u.String(), nil
+}
+
+// isProxyURL reports whether raw names a proxy forgeapi dials: an http,
+// https or SOCKS5 URL with a host, a port or none (its scheme's default),
+// and nothing after it, or net/http's bare host[:port] form, read as http.
+func isProxyURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		u, err = url.Parse("http://" + raw)
+	}
+	if err != nil || u.Hostname() == "" || strings.TrimPrefix(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	if port := u.Port(); port != "" {
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			return false
+		}
+	}
+	return slices.Contains([]string{"http", "https", "socks5", "socks5h"}, u.Scheme)
 }
 
 func notPositiveInt(key string) error {
 	return fmt.Errorf("%s must be a positive integer", key)
 }
 
-// readAppKey parses an RSA private key from a PEM file in PKCS#1 (GitHub's
-// download format) or PKCS#8. Errors name neither the path nor the content.
-func readAppKey(path string) (*rsa.PrivateKey, error) {
+// readAppKey reads the App's private key file, GitHub's PKCS#1 download or
+// PKCS#8, as the key of the App GitHub names by appID. Errors name neither the
+// path nor the content.
+func readAppKey(path string, appID int) (*creds.AppKey, error) {
+	if strings.ContainsAny(path, "\r\n") || strings.Contains(path, "-----BEGIN") {
+		return nil, fmt.Errorf("%s holds key material, not a path: put the key in a file and set %s to that file's path", envAppKeyFile, envAppKeyFile)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, keyFileError("open", err)
@@ -121,29 +165,9 @@ func readAppKey(path string) (*rsa.PrivateKey, error) {
 	if len(raw) > maxKeyFileBytes {
 		return nil, fmt.Errorf("%s: the file is larger than %d bytes, not a private key", envAppKeyFile, maxKeyFileBytes)
 	}
-	block, _ := pem.Decode(raw)
-	if block == nil {
-		return nil, fmt.Errorf("%s: the file holds no PEM block", envAppKeyFile)
-	}
-	var key *rsa.PrivateKey
-	switch block.Type {
-	case "RSA PRIVATE KEY":
-		key, err = x509.ParsePKCS1PrivateKey(block.Bytes)
-	case "PRIVATE KEY":
-		var parsed any
-		parsed, err = x509.ParsePKCS8PrivateKey(block.Bytes)
-		if err == nil {
-			var ok bool
-			if key, ok = parsed.(*rsa.PrivateKey); !ok {
-				return nil, fmt.Errorf("%s: the file holds a key that is not RSA", envAppKeyFile)
-			}
-		}
-	default:
-		// The block label is file content, so the error does not quote it.
-		return nil, fmt.Errorf("%s: unsupported PEM block, want \"RSA PRIVATE KEY\" (PKCS#1) or \"PRIVATE KEY\" (PKCS#8)", envAppKeyFile)
-	}
+	key, err := creds.ParseAppKeyPEM(strconv.Itoa(appID), raw)
 	if err != nil {
-		return nil, fmt.Errorf("%s: the file is not a valid RSA private key", envAppKeyFile)
+		return nil, fmt.Errorf("%s: %w", envAppKeyFile, err)
 	}
 	return key, nil
 }
@@ -157,207 +181,81 @@ func keyFileError(op string, err error) error {
 	return fmt.Errorf("%s: cannot %s the file: %w", envAppKeyFile, op, err)
 }
 
-// signAppJWT returns the RS256 JSON Web Token that authenticates as the App.
-func signAppJWT(key *rsa.PrivateKey, appID int, now time.Time) (string, error) {
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
-	claims, err := json.Marshal(struct {
-		Iss string `json:"iss"`
-		Iat int64  `json:"iat"`
-		Exp int64  `json:"exp"`
-	}{
-		Iss: strconv.Itoa(appID),
-		Iat: now.Add(-jwtBackdate).Unix(),
-		Exp: now.Add(jwtLifetime).Unix(),
-	})
-	if err != nil {
-		return "", err
+// newAppSource builds the token source of app's installation on github.com,
+// asking for the installation's full grant, since Renovate needs whatever the
+// App holds. opts follow appSourceOptions, so they win.
+func newAppSource(app *appConfig, opts ...forgeapi.Option) (*creds.AppSource, error) {
+	install := creds.OnlyInstallation()
+	if app.installationID != 0 {
+		install = creds.InstallationByID(app.installationID)
 	}
-	signingInput := header + "." + base64.RawURLEncoding.EncodeToString(claims)
-	digest := sha256.Sum256([]byte(signingInput))
-	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
-	if err != nil {
-		return "", fmt.Errorf("sign app JWT: %w", err)
-	}
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+	return creds.NewAppSource(forgeapi.Connection{WebBaseURL: githubWebBase, Proxy: app.proxy}, app.key,
+		creds.AppSourceConfig{Installation: install, Grant: creds.FullGrant()},
+		slices.Concat(appSourceOptions(app), opts)...)
 }
 
-// installationToken is one minted token. value is a credential: never log it.
-type installationToken struct {
-	expiresAt time.Time
-	value     string
-}
-
-// appTokenMinter exchanges the App's JWT for an installation token. Only the
-// executor goroutine calls mint, so installationID needs no lock.
-type appTokenMinter struct {
-	now            func() time.Time
-	client         *http.Client
-	key            *rsa.PrivateKey
-	apiBase        string
-	appID          int
-	installationID int
-	baseDelay      time.Duration // zero: httpclient's default
-}
-
-func newAppTokenMinter(cfg *appConfig) *appTokenMinter {
-	if cfg == nil {
-		return nil
+// appSourceOptions is the scheduler's mint budget and, behind a proxy, leave
+// to reach a proxy on a private address.
+func appSourceOptions(app *appConfig) []forgeapi.Option {
+	opts := []forgeapi.Option{
+		forgeapi.WithRetries(tokenMintRetries),
+		forgeapi.WithOperationTimeout(tokenMintBudget),
 	}
-	return &appTokenMinter{
-		now: time.Now,
-		client: &http.Client{
-			Timeout:       tokenRequestTimeout,
-			CheckRedirect: httpclient.RedirectPolicy(httpclient.WithSameOrigin(true)),
-		},
-		key:            cfg.key,
-		apiBase:        githubAPIBase,
-		appID:          cfg.appID,
-		installationID: cfg.installationID,
+	if app.proxy != "" {
+		// The operator named the proxy in the environment, and the proxy, not
+		// this process, dials GitHub, so the address policy only judges the proxy.
+		opts = append(opts, forgeapi.WithPrivateAddresses(true))
 	}
-}
-
-// mint returns a fresh installation token, resolving the installation first
-// when GITHUB_APP_INSTALLATION_ID was not set.
-func (m *appTokenMinter) mint(ctx context.Context) (installationToken, error) {
-	ctx, cancel := context.WithTimeout(ctx, tokenMintBudget)
-	defer cancel()
-	jwt, err := signAppJWT(m.key, m.appID, m.now())
-	if err != nil {
-		return installationToken{}, err
-	}
-	if m.installationID == 0 {
-		id, err := m.resolveInstallation(ctx, jwt)
-		if err != nil {
-			return installationToken{}, err
-		}
-		m.installationID = id
-	}
-	var resp struct {
-		ExpiresAt time.Time `json:"expires_at"`
-		Token     string    `json:"token"`
-	}
-	path := fmt.Sprintf("/app/installations/%d/access_tokens", m.installationID)
-	if err := m.call(ctx, http.MethodPost, path, jwt, &resp); err != nil {
-		return installationToken{}, err
-	}
-	if resp.Token == "" || resp.ExpiresAt.IsZero() {
-		return installationToken{}, errors.New("POST " + path + ": response carries no token or expires_at")
-	}
-	return installationToken{value: resp.Token, expiresAt: resp.ExpiresAt}, nil
-}
-
-func (m *appTokenMinter) resolveInstallation(ctx context.Context, jwt string) (int, error) {
-	var list []struct {
-		Account struct {
-			Login string `json:"login"`
-		} `json:"account"`
-		ID int `json:"id"`
-	}
-	if err := m.call(ctx, http.MethodGet, "/app/installations?per_page=100", jwt, &list); err != nil {
-		return 0, err
-	}
-	switch len(list) {
-	case 0:
-		return 0, errors.New("the GitHub App has no installation: install it on the account Renovate serves")
-	case 1:
-		slog.Info("github app installation resolved",
-			"installation_id", list[0].ID, "account", list[0].Account.Login)
-		return list[0].ID, nil
-	}
-	accounts := make([]string, 0, len(list))
-	for _, inst := range list {
-		accounts = append(accounts, fmt.Sprintf("%s=%d", inst.Account.Login, inst.ID))
-	}
-	return 0, fmt.Errorf("the GitHub App has %d installations (%s): set %s",
-		len(list), strings.Join(accounts, ", "), envAppInstallationID)
+	return opts
 }
 
 // transientMintError reports whether a failed mint is one a GitHub outage
-// causes: a server or network failure that outlasted the retries, a connection
-// GitHub dropped, or the mint's own budget running out. A rejected key, a
-// missing installation or a malformed response stays a hard failure.
+// causes: a server or network failure that outlasted the retries, a rate
+// limit, or the mint's own budget running out. A rejected key, a missing
+// installation or a refusal GitHub gives no class stays a hard failure.
 func transientMintError(err error) bool {
-	return httpclient.IsTransient(err) || errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	fe, ok := errors.AsType[*forgeapi.Error](err)
+	return ok && fe.Retryable
 }
 
-// call makes one REST request with retries on transport errors and 5xx, and
-// decodes a 2xx body into out. Error text carries GitHub's message only,
-// never a response body, which for the token endpoint holds the token.
-func (m *appTokenMinter) call(ctx context.Context, method, path, jwt string, out any) error {
-	_, err := httpclient.Do(ctx, func(ctx context.Context) (struct{}, error) {
-		return struct{}{}, m.attempt(ctx, method, path, jwt, out)
-	}, httpclient.WithMaxAttempts(tokenMintAttempts), httpclient.WithBaseDelay(m.baseDelay),
-		httpclient.WithLabel("github app "+method+" "+path))
-	return err
+// rateLimitWait is how long the App source holds mints after a rate limit:
+// GitHub's stated wait, or forgeapi's own where GitHub stated none; zero where
+// err is no rate limit.
+func rateLimitWait(err error) time.Duration {
+	if fe, ok := errors.AsType[*forgeapi.Error](err); ok && fe.Kind == forgeapi.KindRateLimited {
+		return fe.RetryAfter
+	}
+	return 0
 }
 
-func (m *appTokenMinter) attempt(ctx context.Context, method, path, jwt string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, m.apiBase+path, http.NoBody)
-	if err != nil {
-		return httpclient.Permanent(err)
+// mintHint is the failure line's pointer for a failed mint: GITHUB_APP_ID for
+// a rejected key, GITHUB_APP_INSTALLATION_ID for a missing installation, and
+// the GitHub App section of docs/configuration.md for any other failure.
+func mintHint(err error) string {
+	fe, _ := errors.AsType[*forgeapi.Error](err)
+	switch {
+	case fe != nil && fe.Kind == forgeapi.KindUnauthorized:
+		return "check " + envAppID + " and that the private key belongs to that App"
+	case fe != nil && fe.Kind == forgeapi.KindNotFound:
+		return "check " + envAppInstallationID + " and that the App is installed"
 	}
-	req.Header.Set("Authorization", "Bearer "+jwt)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", githubAPIVer)
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, httpclient.LogSafeError(err))
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, err := httpclient.ReadLimitedBody(resp.Body, maxAPIBodyBytes)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		apiErr := &githubAPIError{method: method, path: path, status: resp.StatusCode, message: githubMessage(body, jwt)}
-		if resp.StatusCode >= 500 {
-			return httpclient.MarkTransient(apiErr)
-		}
-		return httpclient.Permanent(apiErr)
-	}
-	if err := json.NewDecoder(bytes.NewReader(body)).Decode(out); err != nil {
-		return httpclient.Permanent(fmt.Errorf("%s %s: malformed response body", method, path))
-	}
-	return nil
+	return "see docs/configuration.md, 'GitHub App authentication'"
 }
 
-// githubAPIError is a non-2xx answer from GitHub's REST API.
-type githubAPIError struct {
-	method  string
-	path    string
-	message string
-	status  int
-}
-
-func (e *githubAPIError) Error() string {
-	msg := fmt.Sprintf("%s %s: HTTP %d", e.method, e.path, e.status)
-	if e.message != "" {
-		msg += ": " + e.message
+// runTimeoutFor caps runTimeout so a run started now stops
+// tokenExpiryMargin before its token's expiry: Renovate reads its token once
+// at start, so a run cannot switch to a fresh one. It fails where the token
+// leaves no time for a run.
+func runTimeoutFor(runTimeout time.Duration, expiry time.Time) (time.Duration, error) {
+	left := time.Until(expiry)
+	if left < tokenExpiryMargin+time.Second {
+		return 0, fmt.Errorf("the installation token expires at %s, under %s from now, so no run fits before it",
+			expiry.UTC().Format(time.RFC3339), tokenExpiryMargin+time.Second)
 	}
-	switch e.status {
-	case http.StatusUnauthorized:
-		msg += " (check " + envAppID + " and that the private key belongs to that App)"
-	case http.StatusNotFound:
-		msg += " (check " + envAppInstallationID + " and that the App is installed)"
-	}
-	return msg
-}
-
-const maxGitHubMessage = 200
-
-// githubMessage extracts GitHub's error "message" as one line with secret
-// redacted, bounded, or "" when the body is not GitHub's error shape: a
-// server can echo the request's JWT.
-func githubMessage(body []byte, secret string) string {
-	var e struct {
-		Message string `json:"message"`
-	}
-	if json.Unmarshal(body, &e) != nil {
-		return ""
-	}
-	msg, _ := textsafe.RedactSingleLineCapped(e.Message, maxGitHubMessage, "...", secret)
-	return msg
+	return min(runTimeout, (left - tokenExpiryMargin).Truncate(time.Second)), nil
 }
 
 // withRenovateToken appends the minted token after env so os/exec's
@@ -371,7 +269,7 @@ func withRenovateToken(env []string, token string) []string {
 
 // logAuthMode records at start which credential Renovate runs with. It omits
 // the key file path, which a miswired setting can turn into a credential.
-func logAuthMode(app *appConfig, runTimeout, effective time.Duration) {
+func logAuthMode(app *appConfig) {
 	if app == nil {
 		slog.Info("github auth mode", "mode", "token",
 			"source", "RENOVATE_TOKEN or Renovate's own configuration")
@@ -379,26 +277,8 @@ func logAuthMode(app *appConfig, runTimeout, effective time.Duration) {
 	}
 	installation := "resolved at the first run"
 	if app.installationID != 0 {
-		installation = strconv.Itoa(app.installationID)
+		installation = strconv.FormatInt(app.installationID, 10)
 	}
 	slog.Info("github auth mode", "mode", "app", "app_id", app.appID,
 		"installation_id", installation)
-	if effective < runTimeout {
-		slog.Info("run timeout capped to the installation token's life",
-			"run_timeout", runTimeout, "effective", effective)
-	}
-}
-
-// appRunCeiling is the longest run a fresh installation token outlives. The
-// token lasts installationTokenLife from before the mint request, and the run
-// starts at most tokenMintBudget later.
-const appRunCeiling = installationTokenLife - tokenMintBudget - tokenExpiryMargin
-
-// runTimeoutFor caps a run in App mode at appRunCeiling: Renovate reads its
-// token once at start, so a run cannot switch to a fresh one.
-func runTimeoutFor(app *appConfig, runTimeout time.Duration) time.Duration {
-	if app == nil {
-		return runTimeout
-	}
-	return min(runTimeout, appRunCeiling)
 }

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cplieger/forgeapi/v2/creds"
 	"github.com/cplieger/go/health"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
@@ -40,27 +41,39 @@ type daemon struct {
 	// completed records every complete full run, to seed metrics after a restart.
 	completed *scheduler.Stamp
 	metrics   *runMetrics
-	tokens    *appTokenMinter // nil: Renovate uses its own RENOVATE_TOKEN
+	tokens    *creds.AppSource // nil: Renovate uses its own RENOVATE_TOKEN
 	newCmd    scheduler.CommandRunner
 	runOnce   func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult
 	now       func() time.Time // a run's start time
 	fatal     chan error
 	// Only the executor accesses the failing-since times and halted. Each is the
-	// start of the first run in an unbroken series of tolerable failures, zero
-	// after a good run. Full passes and scoped runs keep their own, so the
-	// frequent scoped runs a webhook sends cannot reset a fault only the full
-	// pass meets.
+	// instant the first run of an unbroken series of tolerable failures counts
+	// from (authorize), zero after a good run. Full passes and scoped runs keep
+	// their own, so the frequent scoped runs a webhook sends cannot reset a
+	// fault only the full pass meets.
 	failingSince       time.Time
 	scopedFailingSince time.Time
 	stampPath          string
 	timeout            time.Duration
-	halted             bool
+	lease              time.Duration // runLease: the marker age /healthz and the probe allow, 0 in external mode
+	// installationID is the installation last resolved, which only the
+	// executor reads and writes.
+	installationID int64
+	halted         bool
 }
+
+// newTokenSource is a seam so a test can answer runDaemon's token requests in
+// process.
+var newTokenSource = newAppSource
 
 func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandRunner) error {
 	warnIfRootlessCacheUnwritable()
 
 	app, err := loadAppConfig()
+	var tokens *creds.AppSource
+	if err == nil && app != nil {
+		tokens, err = newTokenSource(app)
+	}
 	if err != nil {
 		slog.Error("github app configuration invalid", "error", err,
 			"hint", "see docs/configuration.md, 'GitHub App authentication'")
@@ -85,7 +98,6 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 
 	interval, scheduleEnabled := loadInterval()
 	runTimeout := loadRunTimeout()
-	timeout := runTimeoutFor(app, runTimeout)
 
 	stamp := scheduler.NewStamp(stampPath())
 	var remaining time.Duration
@@ -93,12 +105,17 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		remaining = stamp.Remaining(interval, time.Now(), scheduler.RetryFailed)
 	}
 
-	logAuthMode(app, runTimeout, timeout)
+	logAuthMode(app)
+	var installationID int64
+	if app != nil {
+		installationID = app.installationID
+	}
 
 	completed := scheduler.NewStamp(completedStampPath())
 	reg, metrics := newMetricsRegistry(marker, modeName(scheduleEnabled), authName(app), completed)
 	metricsAddr := metricsListenAddr()
-	healthz := newHealthz(marker, runLease(interval, scheduleEnabled, runTimeout))
+	lease := runLease(interval, scheduleEnabled, runTimeout)
+	healthz := newHealthz(marker, lease)
 	stopMetrics, err := serveMetrics(ctx, metricsAddr, reg, healthz)
 	if err != nil {
 		slog.Error("cannot listen on METRICS_LISTEN_ADDR", "value", metricsAddr, "error", err)
@@ -108,20 +125,22 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	defer stopMetrics()
 
 	d := &daemon{
-		queue:     trigger.NewQueue[runPayload](queueCapacity),
-		marker:    marker,
-		health:    health.NewLatch(marker),
-		verifier:  verifier,
-		stamp:     stamp,
-		completed: completed,
-		metrics:   metrics,
-		tokens:    newAppTokenMinter(app),
-		newCmd:    newCmd,
-		runOnce:   runRenovateOnce,
-		now:       time.Now,
-		stampPath: stampPath(),
-		timeout:   timeout,
-		fatal:     make(chan error, 1),
+		queue:          trigger.NewQueue[runPayload](queueCapacity),
+		marker:         marker,
+		health:         health.NewLatch(marker),
+		verifier:       verifier,
+		stamp:          stamp,
+		completed:      completed,
+		metrics:        metrics,
+		tokens:         tokens,
+		newCmd:         newCmd,
+		runOnce:        runRenovateOnce,
+		now:            time.Now,
+		stampPath:      stampPath(),
+		timeout:        runTimeout,
+		lease:          lease,
+		installationID: installationID,
+		fatal:          make(chan error, 1),
 	}
 	return d.run(ctx, ln, socketPath, interval, scheduleEnabled, remaining)
 }
@@ -252,7 +271,7 @@ func (d *daemon) runJobs(shutdownCtx context.Context) {
 		case shutdownCtx.Err() != nil:
 			cancelJobForShutdown(j, "queued", 0)
 		default:
-			d.execute(runCtx, shutdownCtx.Err, j)
+			d.execute(runCtx, shutdownCtx.Done(), j)
 		}
 	}
 }
@@ -264,7 +283,10 @@ func cancelJobForShutdown(j *trigger.Job[runPayload], stage string, elapsed time
 	j.Finish(trigger.Result{OK: false, Duration: elapsed, Reason: shutdownCancelReason})
 }
 
-func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigger.Job[runPayload]) {
+// execute runs j. shutdown closes when the daemon begins to stop, which
+// cancels j if Renovate has not started; runCtx, which shutdown does not
+// cancel, is the context the run itself gets.
+func (d *daemon) execute(runCtx context.Context, shutdown <-chan struct{}, j *trigger.Job[runPayload]) {
 	j.Start()
 	start := d.now()
 
@@ -279,17 +301,17 @@ func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigg
 		return
 	}
 
-	p, authorized := d.authorize(runCtx, j, start)
+	p, timeout, failStart, authorized := d.authorize(runCtx, shutdown, j, start)
 	if !authorized {
 		return
 	}
 
-	if stopping() != nil {
+	if stopping(shutdown) {
 		cancelJobForShutdown(j, "preflight", time.Since(start))
 		return
 	}
 
-	res := d.runOnce(runCtx, d.timeout, j.Trigger, p, d.newCmd)
+	res := d.runOnce(runCtx, timeout, j.Trigger, p, d.newCmd)
 	if res.outcome == runContained {
 		d.halted = true
 		// A contained scheduled run leaves the next boot due.
@@ -304,7 +326,7 @@ func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigg
 	tolerated := false
 	if res.outcome == runRepositoryError {
 		var failing time.Duration
-		tolerated, failing = d.tolerate(j, start)
+		tolerated, failing = d.tolerate(j, failStart)
 		logRepositoryError(runCtx, j, res, failing, tolerated)
 	}
 	if ok {
@@ -312,7 +334,7 @@ func (d *daemon) execute(runCtx context.Context, stopping func() error, j *trigg
 	}
 	// The stamp keeps the real result, so a restart during an outage retries at boot.
 	d.recordScheduled(j.Trigger, ok)
-	reason := failureReason(res.outcome, d.timeout)
+	reason := failureReason(res.outcome, timeout, timeout < d.timeout)
 	if tolerated {
 		reason = toleratedReason
 	}
@@ -439,8 +461,9 @@ func (d *daemon) failingSinceFor(j *trigger.Job[runPayload]) *time.Time {
 }
 
 // tolerate reports whether a failure an outage can cause passes as a warning
-// (the first of a series, and any within failureGrace of that run's start)
-// and how long runs have failed. A tolerated failure keeps health's state
+// (the first of a series, and any within failureGrace of the series' start)
+// and how long runs have failed. start is the instant this run's failures
+// count from (authorize). A tolerated failure keeps health's state
 // (keepHealth).
 func (d *daemon) tolerate(j *trigger.Job[runPayload], start time.Time) (tolerated bool, failingFor time.Duration) {
 	since := d.failingSinceFor(j)
@@ -479,9 +502,8 @@ func (d *daemon) recovered(j *trigger.Job[runPayload]) {
 	*since = time.Time{}
 }
 
-// keepHealth leaves health as it was after a tolerated failure, refreshing a
-// healthy marker: a run did happen, so the built-in lease must not lapse
-// during an outage shorter than failureGrace.
+// keepHealth refreshes a healthy marker and never creates one, for a live
+// executor that has no new verdict to set.
 func (d *daemon) keepHealth() {
 	if d.marker.Healthy() {
 		d.health.Set(true)
@@ -490,22 +512,38 @@ func (d *daemon) keepHealth() {
 
 const mintFailedReason = "failed: no GitHub App installation token (see the container log stream)"
 
-// authorize returns the job's payload, carrying a fresh installation token in
-// App mode. On a mint failure it finishes the job as failed and returns false.
-func (d *daemon) authorize(ctx context.Context, j *trigger.Job[runPayload], start time.Time) (runPayload, bool) {
+// authorize returns the job's payload, its run timeout, and the instant the
+// run's failures count from in failureGrace (tolerate). In App mode the
+// payload carries a fresh installation token and the timeout ends before it
+// does; a rate-limited mint delays the run until the App source's wait has
+// passed, and a first failure after that wait counts from its end. On any
+// other mint failure, or a shutdown during the wait, it finishes the job and
+// returns false.
+func (d *daemon) authorize(ctx context.Context, shutdown <-chan struct{}, j *trigger.Job[runPayload], start time.Time) (runPayload, time.Duration, time.Time, bool) {
 	p := j.Payload
 	if d.tokens == nil {
-		return p, true
+		return p, d.timeout, start, true
 	}
-	tok, err := d.tokens.mint(ctx)
+	failStart := start
+	tok, timeout, err := d.runToken(ctx)
+	for wait := rateLimitWait(err); wait > 0; wait = rateLimitWait(err) {
+		slog.Warn("renovate run delayed: github app token rate-limited", "trigger", j.Trigger, "error", err,
+			"retry_after", wait)
+		if !d.waitOutRateLimit(shutdown, wait) {
+			cancelJobForShutdown(j, "token wait", time.Since(start))
+			return p, 0, failStart, false
+		}
+		failStart = time.Now()
+		tok, timeout, err = d.runToken(ctx)
+	}
 	if err != nil {
 		d.recordScheduled(j.Trigger, false)
 		if !transientMintError(err) {
-			slog.Error("github app token request failed", "trigger", j.Trigger, "error", err)
+			slog.Error("github app token request failed", "trigger", j.Trigger, "error", err, "hint", mintHint(err))
 			d.finish(j, start, runVerdict{result: resultTokenFailed, reason: mintFailedReason, exitCode: noExitCode})
-			return p, false
+			return p, 0, failStart, false
 		}
-		tolerated, failing := d.tolerate(j, start)
+		tolerated, failing := d.tolerate(j, failStart)
 		slog.Log(ctx, failureLevel(tolerated), "renovate run skipped: github app token unavailable",
 			"trigger", j.Trigger, "error", err, "failing_for", failing)
 		v := runVerdict{result: resultTokenUnavailable, reason: mintFailedReason, exitCode: noExitCode}
@@ -513,19 +551,94 @@ func (d *daemon) authorize(ctx context.Context, j *trigger.Job[runPayload], star
 			v.reason, v.ok, v.tolerated = toleratedReason, true, true
 		}
 		d.finish(j, start, v)
-		return p, false
+		return p, 0, failStart, false
 	}
 	slog.Info("github app installation token issued", "trigger", j.Trigger,
-		"installation_id", d.tokens.installationID, "expires_at", tok.expiresAt)
-	p.Env = withRenovateToken(p.Env, tok.value)
-	return p, true
+		"installation_id", d.installationID, "expires_at", tok.Expiry)
+	if timeout < d.timeout {
+		slog.Info("run timeout capped to the installation token's life", "trigger", j.Trigger,
+			"run_timeout", d.timeout, "effective", timeout)
+	}
+	p.Env = withRenovateToken(p.Env, tok.Token.Reveal())
+	return p, timeout, failStart, true
 }
 
-func failureReason(outcome runOutcome, timeout time.Duration) string {
+// runToken mints the run's token and answers it with the run timeout that
+// ends before it does, then logs the installation it was minted for when that
+// differs from the last one, such as a reinstall's. The ID is read after the
+// mint because a mint after a refusal can look the installation up again.
+func (d *daemon) runToken(ctx context.Context) (creds.InstallationToken, time.Duration, error) {
+	asked := time.Now()
+	tok, err := d.tokens.Mint(ctx)
+	if err != nil {
+		return creds.InstallationToken{}, 0, err
+	}
+	id, err := d.tokens.Resolve(ctx)
+	if err != nil {
+		return creds.InstallationToken{}, 0, err
+	}
+	if id != d.installationID {
+		slog.Info("github app installation resolved", "installation_id", id)
+		d.installationID = id
+	}
+	expiry := tok.Expiry
+	if local := asked.Add(installationTokenLife); local.Before(expiry) {
+		expiry = local
+	}
+	timeout, err := runTimeoutFor(d.timeout, expiry)
+	if err != nil {
+		return creds.InstallationToken{}, 0, err
+	}
+	return tok, timeout, nil
+}
+
+// waitOutRateLimit reports whether wait passed before shutdown closed. It
+// calls keepHealth at the start, every half lease and at the end, because the
+// lease counts from the marker's last write: GitHub's wait can outlast it, and
+// the run after the wait needs a fresh write to finish inside the lease.
+func (d *daemon) waitOutRateLimit(shutdown <-chan struct{}, wait time.Duration) bool {
+	d.keepHealth()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	var refresh <-chan time.Time
+	if period := d.lease / 2; period > 0 {
+		ticker := time.NewTicker(period)
+		defer ticker.Stop()
+		refresh = ticker.C
+	}
+	for {
+		select {
+		case <-timer.C:
+			d.keepHealth()
+			return true
+		case <-shutdown:
+			return false
+		case <-refresh:
+			d.keepHealth()
+		}
+	}
+}
+
+// stopping reports whether shutdown has closed, without waiting.
+func stopping(shutdown <-chan struct{}) bool {
+	select {
+	case <-shutdown:
+		return true
+	default:
+		return false
+	}
+}
+
+// failureReason is the job result's reason for outcome. tokenCapped says the
+// run's timeout is the installation token's life rather than RUN_TIMEOUT.
+func failureReason(outcome runOutcome, timeout time.Duration, tokenCapped bool) string {
 	switch outcome {
 	case runStartFailed:
 		return "failed: renovate could not be started (see the container log stream)"
 	case runTimedOut:
+		if tokenCapped {
+			return fmt.Sprintf("failed: run exceeded the GitHub App installation token's life (%s)", timeout)
+		}
 		return fmt.Sprintf("failed: run exceeded RUN_TIMEOUT (%s)", timeout)
 	case runRepositoryError:
 		return escalatedReason

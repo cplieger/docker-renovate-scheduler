@@ -54,9 +54,21 @@ Set these three settings on the container:
       - "./github-app.pem:/run/secrets/github-app.pem:ro"
 ```
 
-Before each run, the scheduler signs a short-lived token with the private key and exchanges it at GitHub's REST API for an installation token. That run's Renovate gets it as `RENOVATE_TOKEN`. It replaces any `RENOVATE_TOKEN` set on the container or passed with `docker exec -e`. It also wins over a token in `config.js`, because Renovate prefers environment variables to its config file. A request that fails with a server error is retried with growing waits, up to four attempts. When GitHub keeps failing or does not answer, the run is skipped with a warning until that has lasted 2 hours, as [Repository errors](monitoring.md#repository-errors) explains. Otherwise the run fails with `github app token request failed` and Renovate does not start.
+Before each run, the scheduler signs a short-lived token with the private key and exchanges it at GitHub's REST API for an installation token. That run's Renovate gets it as `RENOVATE_TOKEN`. It replaces any `RENOVATE_TOKEN` set on the container or passed with `docker exec -e`. It also wins over a token in `config.js`, because Renovate prefers environment variables to its config file.
 
-The settings are checked at start. The container stops with `github app configuration invalid` when the key file is missing or unreadable, when it holds no RSA private key, or when only one of the two required settings is set. It also stops when `GITHUB_APP_PRIVATE_KEY_FILE` holds the key itself instead of a path.
+A request that fails with a server error is retried with growing waits, up to four attempts, the last ending within two minutes. When GitHub keeps failing or does not answer, the run is skipped with a warning until that has lasted 2 hours, as [Repository errors](monitoring.md#repository-errors) explains.
+
+When GitHub rate-limits the request, the run is delayed instead: the scheduler logs `renovate run delayed: github app token rate-limited`, asks GitHub again once the wait GitHub asked for has passed, or after 1 minute, doubling up to 15, when GitHub named none, and starts Renovate when a token arrives. Runs queued behind it wait their turn. The delay is not a failure: when no failure came before it, a failure after it counts from the end of the wait. A shutdown during the wait cancels the run.
+
+Any other failure fails the run with `github app token request failed`, and Renovate does not start. After a refusal that only a person can fix, such as a rejected key or a missing or suspended installation, the runs in the next 5 minutes fail the same way without asking GitHub again. That wait doubles, up to an hour, while GitHub keeps refusing. A wrong key file or `GITHUB_APP_ID` needs a container restart once fixed, because the scheduler reads both at start.
+
+A suspension lifted on GitHub is picked up by the first run after the wait, with no restart. So is a reinstall when `GITHUB_APP_INSTALLATION_ID` is unset. When it is set, a reinstall gets a new installation ID: set the new one and restart the container. After a refusal GitHub gives no known reason for, that wait starts at 1 minute and doubles up to 15.
+
+The token requests go through the proxy in `HTTPS_PROXY` (or `https_proxy`), unless `NO_PROXY` (or `no_proxy`) exempts `api.github.com`, by that name, by `github.com` or with `*`. `HTTP_PROXY` is not used, because every token request is HTTPS. The proxy may sit on a private address. A proxy URL may carry a user and password, which no log line or error quotes.
+
+A proxy with no port is reached on its scheme's default: 80 for `http`, 443 for `https`, 1080 for `socks5` and `socks5h`. A value that is not an `http`, `https`, `socks5` or `socks5h` URL, or a bare `host` or `host:port` (read as `http`), stops the container at start with `github app configuration invalid`. Renovate reads the same variables for its own requests.
+
+The settings are checked at start. The container stops with `github app configuration invalid` when the key file is missing or unreadable, when it holds no RSA private key of at least 2048 bits, or when only one of the two required settings is set. It also stops when `GITHUB_APP_PRIVATE_KEY_FILE` holds the key itself instead of a path.
 
 These errors never quote a setting's value or the key file's content, in case a token or the key ended up in the wrong place. The `github auth mode` line at start says which mode is in use and does not name the key file. Leave all three settings unset to keep `RENOVATE_TOKEN`.
 
@@ -73,7 +85,7 @@ The App needs no webhook. Renovate's [GitHub App guide](https://docs.renovatebot
 
 Some things still need a personal token. GitHub's container and package registries accept only a [personal access token (classic)](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic), so a `ghcr.io` host rule for private images keeps one with `read:packages`. Registry pulls do not count against the GraphQL limit.
 
-A run must finish while its token is valid. Renovate reads its token once, at start, so the scheduler cannot renew it during a run. In App mode a run therefore stops after at most 56 minutes, even when `RUN_TIMEOUT` is longer. That leaves room for the token request and a margin before the hour ends. The start log then says `run timeout capped to the installation token's life`.
+A run must finish while its token is valid. Renovate reads its token once, at start, so the scheduler cannot renew it during a run. In App mode a run therefore stops 2 minutes before its token expires, even when `RUN_TIMEOUT` is longer. For GitHub's one-hour tokens that is about 58 minutes after the token request. The scheduler measures that hour on the container's clock from the token request, so a clock running behind GitHub's cannot stretch a run past its token. Such a run first logs `run timeout capped to the installation token's life`.
 
 ## The built-in schedule
 

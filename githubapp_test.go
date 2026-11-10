@@ -11,21 +11,26 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
-	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
-	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/forgeapi/v2"
+	"github.com/cplieger/forgeapi/v2/creds"
+	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/measure"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
 	"github.com/cplieger/go/slogx/capture"
@@ -92,40 +97,32 @@ func verifyJWT(t *testing.T, token string) (header, claims map[string]any) {
 	return header, claims
 }
 
-func TestSignAppJWT_ClaimsAndSignatureVerifyWithThePublicKey(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0)
+// handlerTransport answers the App source's requests in process with a
+// handler, so a test reads what the source sent and decides GitHub's answer.
+type handlerTransport http.HandlerFunc
 
-	token, err := signAppJWT(testAppKey(), testAppID, now)
-	if err != nil {
-		t.Fatalf("signAppJWT() error = %v", err)
-	}
-
-	header, claims := verifyJWT(t, token)
-	if header["alg"] != "RS256" || header["typ"] != "JWT" {
-		t.Errorf("JWT header = %v, want alg RS256 and typ JWT", header)
-	}
-	if claims["iss"] != "4242" {
-		t.Errorf("JWT iss = %v, want the App ID \"4242\"", claims["iss"])
-	}
-	if got := claims["iat"]; got != float64(1_800_000_000-60) {
-		t.Errorf("JWT iat = %v, want now-60s = %d", got, 1_800_000_000-60)
-	}
-	if got := claims["exp"]; got != float64(1_800_000_000+540) {
-		t.Errorf("JWT exp = %v, want now+9m = %d (GitHub refuses more than 10m)", got, 1_800_000_000+540)
-	}
+func (h handlerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	h(rec, r)
+	resp := rec.Result()
+	resp.Request = r
+	return resp, nil
 }
 
-// fakeGitHub serves handler and returns a minter aimed at it, with a short
-// backoff so retry tests stay fast.
-func fakeGitHub(t *testing.T, installationID int, handler http.HandlerFunc) *appTokenMinter {
+// fakeGitHub returns the scheduler's App source for installationID, built as
+// production builds it, answered by handler; opts follow the scheduler's.
+func fakeGitHub(t *testing.T, installationID int64, handler http.HandlerFunc, opts ...forgeapi.Option) *creds.AppSource {
 	t.Helper()
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
-	m := newAppTokenMinter(&appConfig{key: testAppKey(), appID: testAppID, installationID: installationID})
-	m.apiBase = srv.URL
-	m.client = srv.Client()
-	m.baseDelay = 20 * time.Millisecond
-	return m
+	key, err := creds.NewAppKey(strconv.Itoa(testAppID), testAppKey())
+	if err != nil {
+		t.Fatalf("NewAppKey: %v", err)
+	}
+	src, err := newAppSource(&appConfig{key: key, appID: testAppID, installationID: installationID},
+		slices.Concat([]forgeapi.Option{forgeapi.WithWireTransport(handlerTransport(handler))}, opts)...)
+	if err != nil {
+		t.Fatalf("newAppSource: %v", err)
+	}
+	return src
 }
 
 func writeJSON(w http.ResponseWriter, status int, body string) {
@@ -135,224 +132,11 @@ func writeJSON(w http.ResponseWriter, status int, body string) {
 }
 
 func tokenBody() string {
-	return `{"token":"` + testToken + `","expires_at":"` + testTokenExpiry + `","permissions":{"contents":"write"}}`
+	return tokenBodyExpiring(testTokenExpiry)
 }
 
-func TestMint_ExchangesASignedJWTForTheInstallationToken(t *testing.T) {
-	var gotPath, gotMethod, gotAuth, gotAccept string
-	m := fakeGitHub(t, testInstallation, func(w http.ResponseWriter, r *http.Request) {
-		gotMethod, gotPath = r.Method, r.URL.Path
-		gotAuth, gotAccept = r.Header.Get("Authorization"), r.Header.Get("Accept")
-		writeJSON(w, http.StatusCreated, tokenBody())
-	})
-
-	tok, err := m.mint(t.Context())
-	if err != nil {
-		t.Fatalf("mint() error = %v", err)
-	}
-
-	if tok.value != testToken {
-		t.Errorf("mint() token = %q, want %q", tok.value, testToken)
-	}
-	if want, _ := time.Parse(time.RFC3339, testTokenExpiry); !tok.expiresAt.Equal(want) {
-		t.Errorf("mint() expiresAt = %v, want %v", tok.expiresAt, want)
-	}
-	if gotMethod != http.MethodPost || gotPath != "/app/installations/77/access_tokens" {
-		t.Errorf("request = %s %s, want POST /app/installations/77/access_tokens", gotMethod, gotPath)
-	}
-	if gotAccept != "application/vnd.github+json" {
-		t.Errorf("Accept = %q, want application/vnd.github+json", gotAccept)
-	}
-	jwt, ok := strings.CutPrefix(gotAuth, "Bearer ")
-	if !ok {
-		t.Fatalf("Authorization = %q, want a Bearer JWT", gotAuth)
-	}
-	if _, claims := verifyJWT(t, jwt); claims["iss"] != "4242" {
-		t.Errorf("bearer JWT iss = %v, want \"4242\"", claims["iss"])
-	}
-}
-
-func TestMint_FailsWithoutRetryOnClientErrors(t *testing.T) {
-	tests := []struct {
-		name     string
-		status   int
-		body     string
-		wantText []string
-	}{
-		{
-			"401 bad credentials", http.StatusUnauthorized, `{"message":"A JSON web token could not be decoded"}`,
-			[]string{"HTTP 401", "A JSON web token could not be decoded", "GITHUB_APP_ID"},
-		},
-		{
-			"404 unknown installation", http.StatusNotFound, `{"message":"Not Found"}`,
-			[]string{"HTTP 404", "Not Found", "GITHUB_APP_INSTALLATION_ID"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var calls atomic.Int32
-			m := fakeGitHub(t, testInstallation, func(w http.ResponseWriter, _ *http.Request) {
-				calls.Add(1)
-				writeJSON(w, tt.status, tt.body)
-			})
-
-			_, err := m.mint(t.Context())
-			if err == nil {
-				t.Fatalf("mint() error = nil, want an HTTP %d failure", tt.status)
-			}
-			for _, want := range tt.wantText {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("mint() error = %q, want it to contain %q", err, want)
-				}
-			}
-			if got := calls.Load(); got != 1 {
-				t.Errorf("requests = %d, want 1 (a client error is not retried)", got)
-			}
-		})
-	}
-}
-
-func TestMint_RetriesServerErrorsWithBackoff(t *testing.T) {
-	var mu sync.Mutex
-	var seen []time.Time
-	m := fakeGitHub(t, testInstallation, func(w http.ResponseWriter, _ *http.Request) {
-		mu.Lock()
-		seen = append(seen, time.Now())
-		n := len(seen)
-		mu.Unlock()
-		if n <= 2 {
-			writeJSON(w, http.StatusBadGateway, `{"message":"Server Error"}`)
-			return
-		}
-		writeJSON(w, http.StatusCreated, tokenBody())
-	})
-
-	tok, err := m.mint(t.Context())
-	if err != nil {
-		t.Fatalf("mint() error = %v, want success on the third attempt", err)
-	}
-	if tok.value != testToken {
-		t.Errorf("mint() token = %q, want %q", tok.value, testToken)
-	}
-	if len(seen) != 3 {
-		t.Fatalf("requests = %d, want 3 (two 502s, then 201)", len(seen))
-	}
-	// Equal jitter waits at least half the delay: 10ms, then 20ms.
-	if gap := seen[1].Sub(seen[0]); gap < 10*time.Millisecond {
-		t.Errorf("first retry came %v after the failure, want a backoff of at least 10ms", gap)
-	}
-	if gap := seen[2].Sub(seen[1]); gap < 20*time.Millisecond {
-		t.Errorf("second retry came %v after the failure, want a doubled backoff of at least 20ms", gap)
-	}
-}
-
-func TestMint_GivesUpAfterPersistentServerErrors(t *testing.T) {
-	var calls atomic.Int32
-	m := fakeGitHub(t, testInstallation, func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
-		writeJSON(w, http.StatusServiceUnavailable, `{"message":"unavailable"}`)
-	})
-	m.baseDelay = time.Millisecond
-
-	_, err := m.mint(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "HTTP 503") {
-		t.Fatalf("mint() error = %v, want the final HTTP 503", err)
-	}
-	if got := calls.Load(); got != 4 {
-		t.Errorf("requests = %d, want 4 attempts", got)
-	}
-}
-
-func TestMint_RejectsAMalformedBodyWithoutEchoingIt(t *testing.T) {
-	tests := []struct {
-		name string
-		body string
-	}{
-		{"truncated JSON", `{"token":"` + testToken},
-		{"no token field", `{"expires_at":"` + testTokenExpiry + `"}`},
-		{"no expiry", `{"token":"` + testToken + `"}`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			m := fakeGitHub(t, testInstallation, func(w http.ResponseWriter, _ *http.Request) {
-				writeJSON(w, http.StatusCreated, tt.body)
-			})
-
-			_, err := m.mint(t.Context())
-			if err == nil {
-				t.Fatalf("mint() error = nil for body %q, want a failure", tt.body)
-			}
-			if strings.Contains(err.Error(), testToken) {
-				t.Errorf("mint() error = %q, which carries the token from the body", err)
-			}
-		})
-	}
-}
-
-func TestMint_ResolvesTheSingleInstallationWhenNoIDIsSet(t *testing.T) {
-	var posted string
-	m := fakeGitHub(t, 0, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/app/installations" {
-			writeJSON(w, http.StatusOK, `[{"id":91,"account":{"login":"octo"}}]`)
-			return
-		}
-		posted = r.URL.Path
-		writeJSON(w, http.StatusCreated, tokenBody())
-	})
-
-	if _, err := m.mint(t.Context()); err != nil {
-		t.Fatalf("mint() error = %v", err)
-	}
-	if posted != "/app/installations/91/access_tokens" {
-		t.Errorf("token request path = %q, want the resolved installation 91", posted)
-	}
-}
-
-func TestMint_RefusesToGuessBetweenSeveralInstallations(t *testing.T) {
-	m := fakeGitHub(t, 0, func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, `[{"id":1,"account":{"login":"a"}},{"id":2,"account":{"login":"b"}}]`)
-	})
-
-	_, err := m.mint(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "a=1, b=2") || !strings.Contains(err.Error(), envAppInstallationID) {
-		t.Fatalf("mint() error = %v, want one naming both installations and %s", err, envAppInstallationID)
-	}
-}
-
-func TestMint_NeverFollowsARedirectToAnotherPortOnTheSameHost(t *testing.T) {
-	var leaked atomic.Int32
-	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "" {
-			leaked.Add(1)
-		}
-		writeJSON(w, http.StatusCreated, tokenBody())
-	}))
-	t.Cleanup(other.Close)
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
-	}))
-	t.Cleanup(api.Close)
-	m := newAppTokenMinter(&appConfig{key: testAppKey(), appID: testAppID, installationID: testInstallation})
-	m.apiBase = api.URL
-	m.baseDelay = time.Millisecond
-
-	_, err := m.mint(t.Context())
-	if err == nil {
-		t.Errorf("mint() error = nil, want the redirect to another origin refused")
-	}
-	if got := leaked.Load(); got != 0 {
-		t.Errorf("requests carrying the bearer JWT to another port = %d, want 0", got)
-	}
-}
-
-func TestMint_RefusesARedirectThatOnlyChangesTheIPv6ZoneCase(t *testing.T) {
-	m := newAppTokenMinter(&appConfig{key: testAppKey(), appID: testAppID, installationID: testInstallation})
-	from := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "https://[fe80::1%25eth0]:8443/app/installations/7/access_tokens", nil)
-	to := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "https://[fe80::1%25ETH0]:8443/app/installations/7/access_tokens", nil)
-
-	if err := m.client.CheckRedirect(to, []*http.Request{from}); err == nil {
-		t.Errorf("CheckRedirect(%s after %s) = nil, want the zone change refused", to.URL, from.URL)
-	}
+func tokenBodyExpiring(expiry string) string {
+	return `{"token":"` + testToken + `","expires_at":"` + expiry + `","permissions":{"contents":"write"}}`
 }
 
 func TestLoadAppConfig(t *testing.T) {
@@ -374,7 +158,7 @@ func TestLoadAppConfig(t *testing.T) {
 		{name: "negative installation ID", env: map[string]string{envAppID: "1", envAppInstallationID: "-3", envAppKeyFile: "@key"}, wantErr: "positive integer"},
 		{name: "inline key is refused", env: map[string]string{envAppKeyInline: "-----BEGIN RSA PRIVATE KEY-----"}, wantErr: "put the private key in a file"}, // gitleaks:allow (PEM header only, no key)
 		{name: "missing key file", env: map[string]string{envAppID: "1", envAppKeyFile: "/nonexistent/app.pem"}, wantErr: "no such file"},
-		{name: "key file that is not PEM", env: map[string]string{envAppID: "1", envAppKeyFile: "@garbage"}, wantErr: "no PEM block"},
+		{name: "key file that is not PEM", env: map[string]string{envAppID: "1", envAppKeyFile: "@garbage"}, wantErr: envAppKeyFile + ": " + forgeapi.CodeAppKeyInvalid},
 		{name: "PEM pasted as the key file path", env: map[string]string{envAppID: "1", envAppKeyFile: "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n"}, wantErr: "holds key material"},
 	}
 	for _, tt := range tests {
@@ -410,8 +194,15 @@ func TestLoadAppConfig(t *testing.T) {
 			if (app != nil) != tt.wantApp {
 				t.Fatalf("loadAppConfig() app = %v, want app mode %v", app, tt.wantApp)
 			}
-			if app != nil && !app.key.Equal(testAppKey()) {
-				t.Error("loadAppConfig() parsed a different key from the one written")
+			if app == nil {
+				return
+			}
+			jwt, err := app.key.JWT(t.Context())
+			if err != nil {
+				t.Fatalf("app key JWT() error = %v", err)
+			}
+			if _, claims := verifyJWT(t, jwt); claims["iss"] != "4242" {
+				t.Errorf("app key JWT iss = %v, want %s's value \"4242\"", claims["iss"], envAppID)
 			}
 		})
 	}
@@ -441,7 +232,7 @@ func TestReadAppKey_ErrorNeverEchoesTheFileContent(t *testing.T) {
 				t.Fatalf("write key file: %v", err)
 			}
 
-			_, err := readAppKey(path)
+			_, err := readAppKey(path, testAppID)
 			if err == nil {
 				t.Fatal("readAppKey() error = nil for an unusable key file, want a failure")
 			}
@@ -452,11 +243,12 @@ func TestReadAppKey_ErrorNeverEchoesTheFileContent(t *testing.T) {
 	}
 }
 
-// bootAppDaemon starts the daemon in App mode with a valid key at keyPath,
-// waits for its start line, stops it, and returns everything it logged. Not
-// parallel: it swaps the global slog default and uses healthMarkerPath.
-func bootAppDaemon(t *testing.T, keyPath string) string {
-	t.Helper()
+// TestRunDaemon_AppModeStartNeverLogsTheKeyPath boots the daemon in App mode
+// with a key file whose path holds a token-shaped string. Not parallel: it
+// swaps the global slog default and uses healthMarkerPath.
+func TestRunDaemon_AppModeStartNeverLogsTheKeyPath(t *testing.T) {
+	const tokenShaped = "ghp_misplaced-secret-value"
+	keyPath := filepath.Join(t.TempDir(), tokenShaped)
 	block := &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(testAppKey())}
 	if err := os.WriteFile(keyPath, pem.EncodeToMemory(block), 0o600); err != nil {
 		t.Fatalf("write key file: %v", err)
@@ -486,34 +278,13 @@ func bootAppDaemon(t *testing.T, keyPath string) string {
 	if err := *runErr; err != nil {
 		t.Fatalf("runDaemon() = %v, want nil", err)
 	}
-	return logged()
-}
 
-func TestRunDaemon_AppModeStartNeverLogsTheKeyPath(t *testing.T) {
-	const tokenShaped = "ghp_misplaced-secret-value"
-
-	logged := bootAppDaemon(t, filepath.Join(t.TempDir(), tokenShaped))
-
-	if !strings.Contains(logged, `msg="github auth mode" mode=app`) {
-		t.Fatalf("log lacks the App auth-mode line, so the test did not reach it:\n%s", logged)
+	if !strings.Contains(logged(), `msg="github auth mode" mode=app`) {
+		t.Fatalf("log lacks the App auth-mode line, so the test did not reach it:\n%s", logged())
 	}
-	if strings.Contains(logged, tokenShaped) {
-		t.Errorf("log quotes the key file path, which here holds a credential:\n%s", logged)
+	if strings.Contains(logged(), tokenShaped) {
+		t.Errorf("log quotes the key file path, which here holds a credential:\n%s", logged())
 	}
-}
-
-func TestRunDaemon_AppModeCapsTheRunTimeout(t *testing.T) {
-	logged := bootAppDaemon(t, filepath.Join(t.TempDir(), "app.pem"))
-
-	for line := range strings.Lines(logged) {
-		if strings.Contains(line, `msg="container started"`) {
-			if !strings.Contains(line, " timeout=56m0s ") {
-				t.Errorf("start line = %q, want timeout=56m0s for RUN_TIMEOUT=1h in App mode", line)
-			}
-			return
-		}
-	}
-	t.Fatalf("log lacks the start line:\n%s", logged)
 }
 
 // TestRunDaemon_UnreadableKeyFileFailsAtStart pins that a broken App setting
@@ -610,59 +381,134 @@ func TestRunDaemon_MisplacedSecretNeverReachesTheLog(t *testing.T) {
 	}
 }
 
-func TestRunTimeoutFor_CapsAppRunsBeforeTheTokenExpires(t *testing.T) {
-	app := &appConfig{appID: testAppID}
-	tests := []struct {
-		app  *appConfig
-		name string
-		in   time.Duration
-		want time.Duration
-	}{
-		{name: "token mode keeps a long timeout", in: 2 * time.Hour, want: 2 * time.Hour},
-		{name: "app mode caps the default hour", app: app, in: time.Hour, want: 56 * time.Minute},
-		{name: "app mode keeps a shorter timeout", app: app, in: 30 * time.Minute, want: 30 * time.Minute},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := runTimeoutFor(tt.app, tt.in); got != tt.want {
-				t.Errorf("runTimeoutFor(app=%v, %s) = %s, want %s", tt.app != nil, tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestLogAuthMode_ReportsTheRunTimeoutCap is not parallel: it swaps the global
-// slog default.
-func TestLogAuthMode_ReportsTheRunTimeoutCap(t *testing.T) {
-	const capped = "run timeout capped to the installation token's life"
-	app := &appConfig{appID: testAppID}
+func TestRunTimeoutFor_StopsTheRunBeforeTheTokenExpires(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		runTimeout time.Duration
-		want       int
+		life       time.Duration
+		want       time.Duration
+		wantErr    bool
 	}{
-		{name: "an hour is capped", runTimeout: time.Hour, want: 1},
-		{name: "half an hour is not", runTimeout: 30 * time.Minute, want: 0},
+		{name: "an hour's token caps a two-hour timeout 2m before it expires", runTimeout: 2 * time.Hour, life: time.Hour, want: 58 * time.Minute},
+		{name: "a shorter timeout stays", runTimeout: 30 * time.Minute, life: time.Hour, want: 30 * time.Minute},
+		{name: "a token expiring inside the margin leaves no run", runTimeout: time.Hour, life: 90 * time.Second, wantErr: true},
+		{name: "a token leaving under a second past the margin leaves no run", runTimeout: time.Hour, life: tokenExpiryMargin + 500*time.Millisecond, wantErr: true},
+		{name: "a token leaving a second past the margin leaves a one-second run", runTimeout: time.Hour, life: tokenExpiryMargin + time.Second, want: time.Second},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// The bubble's clock stands still, so the expiry is exactly tt.life away.
+			synctest.Test(t, func(t *testing.T) {
+				got, err := runTimeoutFor(tt.runTimeout, time.Now().Add(tt.life))
+				if (err != nil) != tt.wantErr {
+					t.Fatalf("runTimeoutFor(%s, now+%s) error = %v, want error %v", tt.runTimeout, tt.life, err, tt.wantErr)
+				}
+				if err != nil && !strings.Contains(err.Error(), "under 2m1s from now") {
+					t.Errorf("runTimeoutFor(%s, now+%s) error = %q, want it to name the refusal's bound, 2m1s", tt.runTimeout, tt.life, err)
+				}
+				if got != tt.want {
+					t.Errorf("runTimeoutFor(%s, now+%s) = %s, want %s", tt.runTimeout, tt.life, got, tt.want)
+				}
+			})
+		})
+	}
+}
+
+// appModeDaemon returns a daemon whose App source is answered by handler.
+func appModeDaemon(t *testing.T, runner scheduler.CommandRunner, handler http.HandlerFunc, opts ...forgeapi.Option) *daemon {
+	t.Helper()
+	d, _ := newBareDaemon(t, runner)
+	d.tokens = fakeGitHub(t, testInstallation, handler, opts...)
+	d.installationID = testInstallation
+	return d
+}
+
+// TestExecute_CapsTheRunTimeoutAtTheMintedTokensExpiry is not parallel: it
+// swaps the global slog default.
+func TestExecute_CapsTheRunTimeoutAtTheMintedTokensExpiry(t *testing.T) {
+	const capped = "run timeout capped to the installation token's life"
+	tests := []struct {
+		name       string
+		runTimeout time.Duration
+		life       time.Duration
+		want       time.Duration
+		wantCapped int
+	}{
+		{name: "an hour outlasts a 30-minute token", runTimeout: time.Hour, life: 30 * time.Minute, want: 28 * time.Minute, wantCapped: 1},
+		{name: "ten minutes fits inside it", runTimeout: 10 * time.Minute, life: 30 * time.Minute, want: 10 * time.Minute, wantCapped: 0},
+		// A host clock 5 minutes behind GitHub's reads a fresh token's hour as 65 minutes.
+		{name: "a token stating 65 minutes is held to GitHub's hour on the host's clock", runTimeout: 2 * time.Hour, life: 65 * time.Minute, want: 58 * time.Minute, wantCapped: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 			rec := capture.Default(t)
+			expiry := time.Now().Add(tt.life).UTC().Truncate(time.Second)
+			d := appModeDaemon(t, recordingRunner("true", nil), func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusCreated, tokenBodyExpiring(expiry.Format(time.RFC3339)))
+			})
+			d.timeout = tt.runTimeout
+			var got time.Duration
+			d.runOnce = func(_ context.Context, timeout time.Duration, _ string, _ runPayload, _ scheduler.CommandRunner) runResult {
+				got = timeout
+				return runResult{outcome: runComplete}
+			}
 
-			logAuthMode(app, tt.runTimeout, runTimeoutFor(app, tt.runTimeout))
+			j := newJob("interval", nil, nil)
+			d.execute(t.Context(), t.Context().Done(), j)
+			<-j.Result()
 
-			if got := rec.CountLevel(slog.LevelInfo, capped); got != tt.want {
-				t.Errorf("logAuthMode(RUN_TIMEOUT=%s) logged %q %d times, want %d", tt.runTimeout, capped, got, tt.want)
+			if got > tt.want || got < tt.want-5*time.Second {
+				t.Errorf("run timeout = %s, want %s: the shortest of RUN_TIMEOUT, the token's expiry and an hour from the mint, less %s", got, tt.want, tokenExpiryMargin)
+			}
+			if n := rec.CountLevel(slog.LevelInfo, capped); n != tt.wantCapped {
+				t.Errorf("%q logged %d times, want %d", capped, n, tt.wantCapped)
 			}
 		})
 	}
 }
 
-// appModeDaemon returns a daemon whose minter is aimed at handler.
-func appModeDaemon(t *testing.T, runner scheduler.CommandRunner, handler http.HandlerFunc) *daemon {
-	t.Helper()
-	d, _ := newBareDaemon(t, runner)
-	d.tokens = fakeGitHub(t, testInstallation, handler)
-	return d
+func TestExecute_AppModeMintsWithTheAppIDAndTheFullGrant(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	var gotMethod, gotPath, gotAuth string
+	var gotBody []byte
+	d := appModeDaemon(t, recordingRunner("true", nil), func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+		if r.Body != nil {
+			gotBody, _ = io.ReadAll(r.Body)
+		}
+		writeJSON(w, http.StatusCreated, tokenBody())
+	})
+
+	j := newJob("interval", nil, nil)
+	d.execute(t.Context(), t.Context().Done(), j)
+	if out := <-j.Result(); !out.OK {
+		t.Fatalf("run outcome ok = false (reason %q), want a minted token and a run", out.Reason)
+	}
+
+	if gotMethod != http.MethodPost || gotPath != "/app/installations/77/access_tokens" {
+		t.Errorf("request = %s %s, want POST /app/installations/77/access_tokens", gotMethod, gotPath)
+	}
+	jwt, ok := strings.CutPrefix(gotAuth, "Bearer ")
+	if !ok {
+		t.Fatalf("Authorization = %q, want a Bearer JWT", gotAuth)
+	}
+	if _, claims := verifyJWT(t, jwt); claims["iss"] != "4242" {
+		t.Errorf("bearer JWT iss = %v, want %s's value \"4242\"", claims["iss"], envAppID)
+	}
+	var body map[string]any
+	if len(bytes.TrimSpace(gotBody)) > 0 {
+		if err := json.Unmarshal(gotBody, &body); err != nil {
+			t.Fatalf("token request body %q is not JSON: %v", gotBody, err)
+		}
+	}
+	for _, field := range []string{"permissions", "repositories", "repository_ids"} {
+		if _, narrowed := body[field]; narrowed {
+			t.Errorf("token request body carries %q, want the installation's full grant", field)
+		}
+	}
 }
 
 func TestExecute_AppModeRunsRenovateWithTheMintedToken(t *testing.T) {
@@ -671,7 +517,7 @@ func TestExecute_AppModeRunsRenovateWithTheMintedToken(t *testing.T) {
 		func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusCreated, tokenBody()) })
 
 	j := newJob("external", nil, []string{"RENOVATE_TOKEN=pat-from-the-exec", "PATH=" + os.Getenv("PATH")})
-	d.execute(t.Context(), t.Context().Err, j)
+	d.execute(t.Context(), t.Context().Done(), j)
 
 	if out := <-j.Result(); !out.OK {
 		t.Errorf("run outcome ok = false (reason %q), want the child to see the minted token over the forwarded PAT", out.Reason)
@@ -689,7 +535,7 @@ func TestExecute_AppModeWithoutAForwardedEnvKeepsTheDaemonEnvironment(t *testing
 		func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusCreated, tokenBody()) })
 
 	j := newJob("interval", nil, nil)
-	d.execute(t.Context(), t.Context().Err, j)
+	d.execute(t.Context(), t.Context().Done(), j)
 
 	if out := <-j.Result(); !out.OK {
 		t.Errorf("run outcome ok = false (reason %q), want the child to see the minted token and the daemon's environment", out.Reason)
@@ -701,62 +547,237 @@ func TestExecute_TokenModeLeavesTheForwardedTokenAlone(t *testing.T) {
 	d, _ := newBareDaemon(t, shellAssertRunner(`[ "$RENOVATE_TOKEN" = "pat-from-the-exec" ]`))
 
 	j := newJob("external", nil, []string{"RENOVATE_TOKEN=pat-from-the-exec", "PATH=" + os.Getenv("PATH")})
-	d.execute(t.Context(), t.Context().Err, j)
+	d.execute(t.Context(), t.Context().Done(), j)
 
 	if out := <-j.Result(); !out.OK {
 		t.Errorf("run outcome ok = false (reason %q), want the child to see the forwarded PAT unchanged", out.Reason)
 	}
 }
 
-func TestExecute_TokenFailureFailsTheRunWithoutStartingRenovate(t *testing.T) {
+// TestExecute_ResolvesTheSingleInstallationWhenNoIDIsSet is not parallel: it
+// swaps the global slog default.
+func TestExecute_ResolvesTheSingleInstallationWhenNoIDIsSet(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	var started [][]string
-	d := appModeDaemon(t, recordingRunner("true", &started),
-		func(w http.ResponseWriter, _ *http.Request) {
-			writeJSON(w, http.StatusUnauthorized, `{"message":"Bad credentials"}`)
+	rec := capture.Default(t)
+	var posted []string
+	d, _ := newBareDaemon(t, recordingRunner("true", nil))
+	d.tokens = fakeGitHub(t, 0, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/app/installations" {
+			writeJSON(w, http.StatusOK, `[{"id":91,"account":{"login":"octo"}}]`)
+			return
+		}
+		posted = append(posted, r.URL.Path)
+		writeJSON(w, http.StatusCreated, tokenBody())
+	})
+
+	for range 2 {
+		j := newJob("interval", nil, nil)
+		d.execute(t.Context(), t.Context().Done(), j)
+		if out := <-j.Result(); !out.OK {
+			t.Fatalf("run outcome ok = false (reason %q), want the resolved installation's token", out.Reason)
+		}
+	}
+
+	if want := []string{"/app/installations/91/access_tokens", "/app/installations/91/access_tokens"}; !slices.Equal(posted, want) {
+		t.Errorf("token requests = %q, want %q", posted, want)
+	}
+	if got := rec.CountExact("github app installation resolved"); got != 1 {
+		t.Errorf("'github app installation resolved' lines = %d, want 1 for one lookup", got)
+	}
+}
+
+// TestExecute_AReinstallAfterASuspensionLogsTheNewInstallation covers a
+// suspended installation the owner replaces with a reinstall: the first run
+// after the re-probe wait mints for the new installation, and its lines name
+// that one. Not parallel: it swaps the global slog default.
+func TestExecute_AReinstallAfterASuspensionLogsTheNewInstallation(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	synctest.Test(t, func(t *testing.T) {
+		rec := capture.Default(t)
+		var mu sync.Mutex
+		installed, minted := "1", ""
+		d, _ := newBareDaemon(t, recordingRunner("true", nil))
+		d.tokens = fakeGitHub(t, 0, func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+			if r.Method == http.MethodGet && r.URL.Path == "/app/installations" {
+				writeJSON(w, http.StatusOK, `[{"id":`+installed+`,"account":{"login":"octo"}}]`)
+				return
+			}
+			if r.URL.Path != "/app/installations/2/access_tokens" {
+				writeJSON(w, http.StatusForbidden, `{"message":"This installation has been suspended"}`)
+				return
+			}
+			minted = "2"
+			writeJSON(w, http.StatusCreated, tokenBody())
 		})
-	d.health.Set(true)
+		run := func() trigger.Result {
+			t.Helper()
+			j := newJob("interval", nil, nil)
+			d.execute(t.Context(), t.Context().Done(), j)
+			return <-j.Result()
+		}
+
+		if out := run(); out.OK || out.Reason != mintFailedReason {
+			t.Fatalf("run on the suspended installation = ok %v reason %q, want a failure with %q", out.OK, out.Reason, mintFailedReason)
+		}
+		mu.Lock()
+		installed = "2"
+		mu.Unlock()
+		// forgeapi's re-probe wait after a first terminal refusal is 5 minutes.
+		time.Sleep(5*time.Minute + time.Second)
+		if out := run(); !out.OK {
+			t.Fatalf("run after the reinstall = ok false (reason %q), want a token for the new installation", out.Reason)
+		}
+
+		if minted != "2" {
+			t.Fatalf("no token minted for installation 2, so the run did not reach the reinstall")
+		}
+		if got := rec.AttrValuesExact("github app installation token issued", "installation_id"); !slices.Equal(got, []string{minted}) {
+			t.Errorf("issued lines' installation_id = %q, want [%q], the installation the token was minted for", got, minted)
+		}
+		if got := rec.AttrValuesExact("github app installation resolved", "installation_id"); !slices.Equal(got, []string{"2"}) {
+			t.Errorf("resolved lines' installation_id = %q, want [\"2\"]: one line, for the installation a token was minted for", got)
+		}
+	})
+}
+
+// TestExecute_TokenFailureFailsTheRunWithoutStartingRenovate covers the
+// refusals only a human can repair. Not parallel: it swaps the global slog
+// default.
+func TestExecute_TokenFailureFailsTheRunWithoutStartingRenovate(t *testing.T) {
+	tests := []struct {
+		handler  http.HandlerFunc
+		name     string
+		wantHint string
+	}{
+		{
+			name:     "a rejected key",
+			wantHint: envAppID,
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusUnauthorized, `{"message":"Bad credentials"}`)
+			},
+		},
+		{
+			name:     "a missing installation",
+			wantHint: envAppInstallationID,
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusNotFound, `{"message":"Not Found"}`)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+			rec := capture.Default(t)
+			var started [][]string
+			d := appModeDaemon(t, recordingRunner("true", &started), tt.handler)
+			d.health.Set(true)
+
+			j := newJob("interval", nil, nil)
+			d.execute(t.Context(), t.Context().Done(), j)
+
+			out := <-j.Result()
+			if out.OK || out.Reason != mintFailedReason {
+				t.Errorf("outcome = ok %v reason %q, want a failure with reason %q", out.OK, out.Reason, mintFailedReason)
+			}
+			if len(started) != 0 {
+				t.Errorf("renovate started %d times, want 0 without a token", len(started))
+			}
+			if d.marker.Healthy() {
+				t.Error("health marker healthy after a token failure, want unhealthy")
+			}
+			if !rec.AttrContains("github app token request failed", "hint", tt.wantHint) {
+				t.Errorf("the failure line's hint does not name %s", tt.wantHint)
+			}
+		})
+	}
+}
+
+// TestExecute_SeveralInstallationsFailTheRunNamingEach is not parallel: it
+// swaps the global slog default.
+func TestExecute_SeveralInstallationsFailTheRunNamingEach(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	rec := capture.Default(t)
+	d, _ := newBareDaemon(t, recordingRunner("true", nil))
+	d.tokens = fakeGitHub(t, 0, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, `[{"id":1,"account":{"login":"a"}},{"id":2,"account":{"login":"b"}}]`)
+	})
 
 	j := newJob("interval", nil, nil)
-	d.execute(t.Context(), t.Context().Err, j)
+	d.execute(t.Context(), t.Context().Done(), j)
 
-	out := <-j.Result()
-	if out.OK || out.Reason != mintFailedReason {
+	if out := <-j.Result(); out.OK || out.Reason != mintFailedReason {
 		t.Errorf("outcome = ok %v reason %q, want a failure with reason %q", out.OK, out.Reason, mintFailedReason)
 	}
-	if len(started) != 0 {
-		t.Errorf("renovate started %d times, want 0 without a token", len(started))
+	for _, account := range []string{"a (1)", "b (2)"} {
+		if !rec.AttrContains("github app token request failed", "error", account) {
+			t.Errorf("the failure line's error does not name the installation %q", account)
+		}
 	}
-	if d.marker.Healthy() {
-		t.Error("health marker healthy after a token failure, want unhealthy")
+	if !rec.AttrContains("github app token request failed", "hint", envAppInstallationID) {
+		t.Errorf("the failure line's hint does not name %s", envAppInstallationID)
 	}
 }
 
 // TestTransientMintError separates what a GitHub outage causes from a fault
-// that waiting does not fix.
+// that waiting does not fix, over the answers GitHub gives a token request.
 func TestTransientMintError(t *testing.T) {
 	t.Parallel()
-	rejected := &githubAPIError{method: "POST", path: "/p", status: http.StatusUnauthorized}
 	tests := []struct {
-		name string
-		err  error
-		want bool
+		header http.Header
+		name   string
+		status int
+		want   bool
 	}{
-		{"server error after the retries", httpclient.MarkTransient(&githubAPIError{status: http.StatusBadGateway}), true},
-		{"the mint budget ran out", fmt.Errorf("mint: %w", context.DeadlineExceeded), true},
-		{"a connection GitHub dropped", fmt.Errorf("POST /p: %w", io.EOF), true},
-		{"a body cut short", fmt.Errorf("POST /p: %w", io.ErrUnexpectedEOF), true},
-		{"a rejected key", httpclient.Permanent(rejected), false},
-		{"a key that cannot sign", errors.New("sign the JWT: bad key"), false},
+		{name: "a server error after the retries", status: http.StatusServiceUnavailable, want: true},
+		{name: "a secondary rate limit", status: http.StatusTooManyRequests, want: true},
+		{name: "a spent primary rate limit", status: http.StatusForbidden, header: http.Header{"X-Ratelimit-Remaining": {"0"}}, want: true},
+		{name: "a rejected key", status: http.StatusUnauthorized},
+		{name: "a missing installation", status: http.StatusNotFound},
+		{name: "a suspended installation", status: http.StatusForbidden},
+		{name: "a refused grant", status: http.StatusUnprocessableEntity},
+		{name: "an unclassified refusal", status: http.StatusBadRequest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := transientMintError(tt.err); got != tt.want {
-				t.Errorf("transientMintError(%v) = %v, want %v", tt.err, got, tt.want)
+			src := fakeGitHub(t, testInstallation, func(w http.ResponseWriter, _ *http.Request) {
+				maps.Copy(w.Header(), tt.header)
+				writeJSON(w, tt.status, `{"message":"refused"}`)
+			}, forgeapi.WithRetries(0))
+
+			_, err := src.Mint(t.Context())
+			if err == nil {
+				t.Fatalf("Mint() error = nil for HTTP %d, want a failure", tt.status)
+			}
+			if got := transientMintError(err); got != tt.want {
+				t.Errorf("transientMintError(%v) = %v, want %v", err, got, tt.want)
 			}
 		})
 	}
+	t.Run("a GitHub that never answers", func(t *testing.T) {
+		t.Parallel()
+		src := fakeGitHub(t, testInstallation, nil, forgeapi.WithWireTransport(hangingTransport{}),
+			forgeapi.WithRetries(0), forgeapi.WithOperationTimeout(300*time.Millisecond))
+
+		_, err := src.Mint(t.Context())
+		if err == nil {
+			t.Fatal("Mint() error = nil from a GitHub that never answers, want the budget's end")
+		}
+		if !transientMintError(err) {
+			t.Errorf("transientMintError(%v) = false, want true: the mint's budget ran out", err)
+		}
+	})
+}
+
+// hangingTransport accepts every request and never answers it, as a GitHub
+// holding the connection open does.
+type hangingTransport struct{}
+
+func (hangingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	<-r.Context().Done()
+	return nil, r.Context().Err()
 }
 
 // TestExecute_TokenOutageIsToleratedForTheGrace covers a GitHub outage that
@@ -768,13 +789,12 @@ func TestExecute_TokenOutageIsToleratedForTheGrace(t *testing.T) {
 	d := appModeDaemon(t, recordingRunner("true", &started),
 		func(w http.ResponseWriter, _ *http.Request) {
 			writeJSON(w, http.StatusServiceUnavailable, `{"message":"unavailable"}`)
-		})
-	d.tokens.baseDelay = time.Millisecond
+		}, forgeapi.WithRetries(0))
 	d.health.Set(true)
 	run := func() trigger.Result {
 		t.Helper()
 		j := newJob("interval", nil, nil)
-		d.execute(t.Context(), t.Context().Err, j)
+		d.execute(t.Context(), t.Context().Done(), j)
 		return <-j.Result()
 	}
 
@@ -794,6 +814,385 @@ func TestExecute_TokenOutageIsToleratedForTheGrace(t *testing.T) {
 	}
 	if len(started) != 0 {
 		t.Errorf("renovate started %d times, want 0 without a token", len(started))
+	}
+}
+
+// rateLimitedGitHub answers the first limited token requests 429 with
+// Retry-After: 30, and every later one with a token, recording when each
+// request arrived.
+func rateLimitedGitHub(limited int) (http.HandlerFunc, func() []time.Time) {
+	var mu sync.Mutex
+	var asked []time.Time
+	handler := func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		asked = append(asked, time.Now())
+		n := len(asked)
+		mu.Unlock()
+		if n <= limited {
+			w.Header().Set("Retry-After", "30")
+			writeJSON(w, http.StatusTooManyRequests, `{"message":"You have exceeded a secondary rate limit"}`)
+			return
+		}
+		writeJSON(w, http.StatusCreated, tokenBody())
+	}
+	return handler, func() []time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(asked)
+	}
+}
+
+// TestExecute_RateLimitedMintDelaysTheRunUntilGitHubsWait covers a
+// rate-limited token request: the same run mints again once GitHub's wait has
+// passed, sending nothing before it, and then starts Renovate. Not parallel:
+// it swaps the global slog default.
+func TestExecute_RateLimitedMintDelaysTheRunUntilGitHubsWait(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	synctest.Test(t, func(t *testing.T) {
+		rec := capture.Default(t)
+		handler, asked := rateLimitedGitHub(1)
+		d := appModeDaemon(t, nil, handler)
+		var runs int
+		d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
+			runs++
+			return runResult{outcome: runComplete}
+		}
+
+		j := newJob("interval", nil, nil)
+		d.execute(t.Context(), t.Context().Done(), j)
+
+		if out := <-j.Result(); !out.OK || out.Reason != "" {
+			t.Errorf("outcome = ok %v reason %q, want the delayed run's success", out.OK, out.Reason)
+		}
+		if runs != 1 {
+			t.Errorf("renovate started %d times, want once after GitHub's wait", runs)
+		}
+		got := asked()
+		if len(got) != 2 {
+			t.Fatalf("token requests = %d, want 2: the limited one and one after the wait", len(got))
+		}
+		if waited := got[1].Sub(got[0]); waited < 30*time.Second {
+			t.Errorf("second token request sent %s after the first, want no sooner than GitHub's 30s", waited)
+		}
+		if wait, ok := rec.Attr("renovate run delayed: github app token rate-limited", "retry_after"); !ok || wait.Duration() != 30*time.Second {
+			t.Errorf("delayed line retry_after = %v (found %v), want GitHub's 30s", wait, ok)
+		}
+		if n := rec.CountExact("renovate run skipped: github app token unavailable"); n != 0 {
+			t.Errorf("skipped lines = %d, want 0: a rate limit delays the run", n)
+		}
+		if !d.failingSince.IsZero() {
+			t.Errorf("failingSince = %v, want zero: a wait is no failure", d.failingSince)
+		}
+	})
+}
+
+// TestExecute_ShutdownDuringARateLimitWaitCancelsTheRun is not parallel: it
+// swaps the global slog default.
+func TestExecute_ShutdownDuringARateLimitWaitCancelsTheRun(t *testing.T) {
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	synctest.Test(t, func(t *testing.T) {
+		rec := capture.Default(t)
+		handler, asked := rateLimitedGitHub(1)
+		d := appModeDaemon(t, nil, handler)
+		reg := measure.NewRegistry(metricsPrefix)
+		d.metrics = newRunMetrics(reg, d.marker, "external", "app", scheduler.RunRecord{}, false)
+		var runs int
+		d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
+			runs++
+			return runResult{outcome: runComplete}
+		}
+		shutdown, stop := context.WithCancel(t.Context())
+		defer stop()
+
+		j := newJob("interval", nil, nil)
+		go d.execute(context.WithoutCancel(shutdown), shutdown.Done(), j)
+		synctest.Wait()
+		stop()
+
+		if out := <-j.Result(); out.OK || out.Reason != shutdownCancelReason {
+			t.Errorf("outcome = ok %v reason %q, want the shutdown's cancel %q", out.OK, out.Reason, shutdownCancelReason)
+		}
+		if runs != 0 || len(asked()) != 1 {
+			t.Errorf("renovate started %d times after %d token requests, want none after the limited one", runs, len(asked()))
+		}
+		if !rec.AttrContains("run cancelled by shutdown", "stage", "token wait") {
+			t.Error("no 'run cancelled by shutdown' line with stage \"token wait\"")
+		}
+		if n := rec.CountExact(runFinishedMsg); n != 0 {
+			t.Errorf("%q lines = %d, want 0: a run cancelled during the wait never completed", runFinishedMsg, n)
+		}
+		for key, v := range series(t, reg) {
+			if strings.Contains(key, "_runs_total{") && v != 0 {
+				t.Errorf("%s = %v, want 0 after a run cancelled during the wait", key, v)
+			}
+		}
+	})
+}
+
+// TestExecute_ARateLimitWaitKeepsHealthAsItWas covers a wait that outlasts
+// the built-in schedule's lease, then a run lasting most of its timeout:
+// /healthz answers through both as before the run, 200 for a healthy marker
+// written near the lease's end and 503 for an absent one. It runs on the real
+// clock, because the lease reads the marker file's modification time.
+func TestExecute_ARateLimitWaitKeepsHealthAsItWas(t *testing.T) {
+	const (
+		interval   = 100 * time.Millisecond
+		runTimeout = 1200 * time.Millisecond
+		retryAfter = 2 * time.Second
+		// age lapses the marker inside the wait's first half lease, before the
+		// first periodic refresh.
+		age = time.Second
+		// runLasts plus the time since the wait's last half-lease refresh,
+		// 600ms before its end, passes the lease, so only a refresh at the
+		// wait's end keeps the marker fresh through the run.
+		runLasts = 1100 * time.Millisecond
+	)
+	lease := runLease(interval, true, runTimeout)
+	tests := []struct {
+		name    string
+		marker  string
+		outcome runOutcome
+		want    int
+	}{
+		{name: "a healthy marker stays fresh", marker: "aged", outcome: runComplete, want: http.StatusOK},
+		{name: "an absent marker stays absent", marker: "failed", outcome: runFailed, want: http.StatusServiceUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+			waited := make(chan struct{})
+			var asked atomic.Int32
+			d, markerPath := newBareDaemon(t, nil)
+			d.tokens = fakeGitHub(t, testInstallation, func(w http.ResponseWriter, _ *http.Request) {
+				switch asked.Add(1) {
+				case 1:
+					w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+					writeJSON(w, http.StatusTooManyRequests, `{"message":"You have exceeded a secondary rate limit"}`)
+					return
+				case 2:
+					close(waited)
+				}
+				writeJSON(w, http.StatusCreated, tokenBody())
+			}, forgeapi.WithRetries(0))
+			d.installationID = testInstallation
+			d.timeout = runTimeout
+			var ran time.Duration
+			d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
+				began := time.Now()
+				time.Sleep(runLasts)
+				ran = time.Since(began)
+				return runResult{outcome: tt.outcome}
+			}
+			d.lease = lease
+			setMarker(t, d.marker, markerPath, tt.marker, age)
+			healthz := newHealthz(d.marker, lease)
+			start := time.Now()
+
+			j := newJob("interval", nil, nil)
+			done := make(chan struct{})
+			go func() { defer close(done); d.execute(t.Context(), t.Context().Done(), j) }()
+			probe := time.NewTicker(50 * time.Millisecond)
+			defer probe.Stop()
+			var probes, wrong, firstCode int
+			var waitedFor, firstAt time.Duration
+			var firstBody string
+			endOfWait := waited
+		probing:
+			for {
+				select {
+				case <-endOfWait:
+					waitedFor, endOfWait = time.Since(start), nil
+				case <-done:
+					break probing
+				case <-probe.C:
+					rec := httptest.NewRecorder()
+					healthz.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+					probes++
+					if rec.Code != tt.want {
+						if wrong == 0 {
+							firstAt, firstCode, firstBody = time.Since(start), rec.Code, rec.Body.String()
+						}
+						wrong++
+					}
+				}
+			}
+			<-j.Result()
+
+			if waitedFor <= lease {
+				t.Fatalf("the wait lasted %s, within the %s lease, so it tests nothing", waitedFor, lease)
+			}
+			if ran >= lease {
+				t.Fatalf("the run after the wait lasted %s, past the %s lease, so no refresh could keep the marker fresh", ran, lease)
+			}
+			if wrong > 0 {
+				t.Errorf("/healthz answered other than %d on %d of %d probes during the wait and the run after it; the first, %s in: %d %s",
+					tt.want, wrong, probes, firstAt.Round(50*time.Millisecond), firstCode, firstBody)
+			}
+		})
+	}
+}
+
+// TestRunDaemon_TheProbeStaysHealthyThroughARateLimitWait boots App mode on
+// the built-in schedule with a 1.5s lease. After a good startup run, the next
+// run's token request is rate-limited for longer than the lease, and the
+// health probe must read healthy until the wait ends. Not parallel: it
+// replaces newTokenSource and uses healthMarkerPath.
+func TestRunDaemon_TheProbeStaysHealthyThroughARateLimitWait(t *testing.T) {
+	const (
+		interval   = 100 * time.Millisecond
+		runTimeout = 1300 * time.Millisecond
+		retryAfter = 3 * time.Second
+	)
+	lease := runLease(interval, true, runTimeout)
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	t.Setenv("RUN_INTERVAL", interval.String())
+	t.Setenv("RUN_TIMEOUT", runTimeout.String())
+	t.Setenv("METRICS_LISTEN_ADDR", "")
+	t.Setenv(envAppID, strconv.Itoa(testAppID))
+	t.Setenv(envAppInstallationID, strconv.Itoa(testInstallation))
+	t.Setenv(envAppKeyFile, writeKeyFile(t, false))
+	t.Setenv(envAppKeyInline, "")
+	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
+	limited, waited := make(chan struct{}), make(chan struct{})
+	var asked atomic.Int32
+	github := handlerTransport(func(w http.ResponseWriter, _ *http.Request) {
+		switch asked.Add(1) {
+		case 2:
+			close(limited)
+			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+			writeJSON(w, http.StatusTooManyRequests, `{"message":"You have exceeded a secondary rate limit"}`)
+			return
+		case 3:
+			close(waited)
+		}
+		writeJSON(w, http.StatusCreated, tokenBody())
+	})
+	built := newTokenSource
+	newTokenSource = func(app *appConfig, opts ...forgeapi.Option) (*creds.AppSource, error) {
+		return built(app, append(opts, forgeapi.WithWireTransport(github), forgeapi.WithRetries(0))...)
+	}
+	t.Cleanup(func() { newTokenSource = built })
+
+	cancel, done, runErr := startDaemonForTest(t, recordingRunner("true", nil))
+	select {
+	case <-limited:
+	case <-done:
+		t.Fatalf("runDaemon returned before the rate-limited token request: %v", *runErr)
+	case <-time.After(10 * time.Second):
+		t.Fatal("no second token request within 10s")
+	}
+	start := time.Now()
+	probe := time.NewTicker(50 * time.Millisecond)
+	defer probe.Stop()
+	deadline := time.After(retryAfter + 5*time.Second)
+	var probes, wrong int
+	var firstAt time.Duration
+	var first health.Freshness
+probing:
+	for {
+		select {
+		case <-waited:
+			break probing
+		case <-done:
+			t.Fatalf("runDaemon returned during the rate-limit wait: %v", *runErr)
+		case <-deadline:
+			t.Fatal("no token request after GitHub's wait")
+		case <-probe.C:
+			f := health.Inspect(healthMarkerPath, probeOptions()...)
+			probes++
+			if !f.Healthy() {
+				if wrong == 0 {
+					firstAt, first = time.Since(start), f
+				}
+				wrong++
+			}
+		}
+	}
+	waitedFor := time.Since(start)
+	cancel()
+	awaitDaemonStopped(t, done)
+
+	if err := *runErr; err != nil {
+		t.Errorf("runDaemon() = %v, want nil", err)
+	}
+	if waitedFor <= lease {
+		t.Fatalf("the wait lasted %s, within the %s lease, so it tests nothing", waitedFor, lease)
+	}
+	if wrong > 0 {
+		t.Errorf("the health probe read unhealthy on %d of %d probes during the wait; the first, %s in: %s (marker age %s, max %s)",
+			wrong, probes, firstAt.Round(50*time.Millisecond), first.Reason(), first.Age.Round(10*time.Millisecond), first.MaxAge)
+	}
+}
+
+// TestExecute_ARateLimitWaitCountsNothingTowardTheGrace covers a run that
+// waits out two hour-long rate limits and then fails in a way an outage
+// causes: its failures count from the end of the wait, so a second failing
+// run straight after it is still tolerated.
+func TestExecute_ARateLimitWaitCountsNothingTowardTheGrace(t *testing.T) {
+	tests := []struct {
+		after   http.HandlerFunc
+		outcome runOutcome
+		name    string
+	}{
+		{
+			name: "a token outage after the wait",
+			after: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusServiceUnavailable, `{"message":"unavailable"}`)
+			},
+			outcome: runComplete,
+		},
+		{
+			name:    "a repository error after the wait",
+			after:   func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusCreated, tokenBody()) },
+			outcome: runRepositoryError,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+			synctest.Test(t, func(t *testing.T) {
+				var mu sync.Mutex
+				var asked []time.Time
+				d := appModeDaemon(t, nil, func(w http.ResponseWriter, r *http.Request) {
+					mu.Lock()
+					asked = append(asked, time.Now())
+					n := len(asked)
+					mu.Unlock()
+					if n <= 2 {
+						w.Header().Set("Retry-After", "3600")
+						writeJSON(w, http.StatusTooManyRequests, `{"message":"You have exceeded a secondary rate limit"}`)
+						return
+					}
+					tt.after(w, r)
+				}, forgeapi.WithRetries(0))
+				d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
+					return runResult{outcome: tt.outcome}
+				}
+				run := func() trigger.Result {
+					t.Helper()
+					j := newJob("interval", nil, nil)
+					d.execute(t.Context(), t.Context().Done(), j)
+					return <-j.Result()
+				}
+
+				if out := run(); !out.OK || out.Reason != toleratedReason {
+					t.Fatalf("first failing run after the wait = ok %v reason %q, want ok with %q", out.OK, out.Reason, toleratedReason)
+				}
+				mu.Lock()
+				got := slices.Clone(asked)
+				mu.Unlock()
+				if len(got) != 3 || got[2].Sub(got[0]) < 2*time.Hour {
+					t.Fatalf("token requests = %v, want 3 spanning GitHub's two hour-long waits", got)
+				}
+				afterWait := got[2]
+				if d.failingSince.Before(afterWait.Add(-time.Second)) {
+					t.Errorf("failingSince is %s before the request after the wait, want no earlier than it", afterWait.Sub(d.failingSince))
+				}
+				if out := run(); !out.OK || out.Reason != toleratedReason {
+					t.Errorf("second failing run straight after = ok %v reason %q, want ok with %q: the failures have lasted minutes", out.OK, out.Reason, toleratedReason)
+				}
+			})
+		})
 	}
 }
 
@@ -821,11 +1220,11 @@ func TestExecute_TokenNeverReachesTheLog(t *testing.T) {
 		default:
 			writeJSON(w, http.StatusCreated, `{"token":"`+testToken)
 		}
-	})
+	}, forgeapi.WithRetries(1))
 
 	for range 2 {
 		j := newJob("interval", []string{"owner/repo"}, nil)
-		d.execute(t.Context(), t.Context().Err, j)
+		d.execute(t.Context(), t.Context().Done(), j)
 		<-j.Result()
 	}
 
@@ -845,39 +1244,6 @@ func TestExecute_TokenNeverReachesTheLog(t *testing.T) {
 	}
 }
 
-func TestGitHubMessage(t *testing.T) {
-	t.Parallel()
-	const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiI0MjQyIn0.c2lnbmF0dXJl" // gitleaks:allow (fake JWT)
-	tests := []struct {
-		name    string
-		message string
-		want    string
-	}{
-		{
-			name:    "a cut inside an echoed JWT keeps none of it",
-			message: strings.Repeat("a", 180) + jwt[:40],
-			want:    strings.Repeat("a", 180) + "...",
-		},
-		{
-			name:    "a newline becomes a space",
-			message: "Bad\ncredentials",
-			want:    "Bad credentials",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			body, err := json.Marshal(map[string]string{"message": tt.message})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := githubMessage(body, jwt); got != tt.want {
-				t.Errorf("githubMessage(%q) = %q, want %q", body, got, tt.want)
-			}
-		})
-	}
-}
-
 // TestExecute_AReflectedJWTNeverReachesTheLog uses a server that echoes the
 // bearer JWT in its error message. Not parallel: it swaps the global slog
 // default.
@@ -886,8 +1252,8 @@ func TestExecute_AReflectedJWTNeverReachesTheLog(t *testing.T) {
 		name   string
 		status int
 	}{
-		{name: "permanent 401", status: http.StatusUnauthorized},
-		{name: "retried 502", status: http.StatusBadGateway},
+		{name: "a rejected key", status: http.StatusUnauthorized},
+		{name: "a refused grant", status: http.StatusUnprocessableEntity},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -903,10 +1269,9 @@ func TestExecute_AReflectedJWTNeverReachesTheLog(t *testing.T) {
 				mu.Unlock()
 				writeJSON(w, tt.status, `{"message":"rejected `+jwt+`"}`)
 			})
-			d.tokens.baseDelay = time.Millisecond
 
 			j := newJob("interval", nil, nil)
-			d.execute(t.Context(), t.Context().Err, j)
+			d.execute(t.Context(), t.Context().Done(), j)
 			<-j.Result()
 
 			mu.Lock()
@@ -916,8 +1281,8 @@ func TestExecute_AReflectedJWTNeverReachesTheLog(t *testing.T) {
 				t.Fatalf("log lacks the redacted server message, so the test did not reach it:\n%s", logged)
 			}
 			for _, jwt := range jwts {
-				// The 200-byte cap alone would keep the header, the claims and
-				// part of the signature, so look for a signature fragment.
+				// A length cap alone would keep the header, the claims and part
+				// of the signature, so look for a signature fragment.
 				sig := jwt[strings.LastIndex(jwt, ".")+1:]
 				if strings.Contains(logged, sig[:16]) {
 					t.Errorf("log carries the reflected App JWT:\n%s", logged)

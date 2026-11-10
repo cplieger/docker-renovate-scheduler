@@ -11,9 +11,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/cplieger/forgeapi/v2"
+	"github.com/cplieger/go/measure"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
 	"github.com/cplieger/go/slogx"
@@ -111,9 +115,34 @@ func tokenServer(status int, body string) func(t *testing.T, d *daemon) {
 	return func(t *testing.T, d *daemon) {
 		d.tokens = fakeGitHub(t, testInstallation, func(w http.ResponseWriter, _ *http.Request) {
 			writeJSON(w, status, body)
-		})
-		d.tokens.baseDelay = time.Millisecond
+		}, forgeapi.WithRetries(0))
+		d.installationID = testInstallation
 	}
+}
+
+// rateLimitedOnce answers the first token request 429 with Retry-After: 1,
+// GitHub's shortest stated wait, and every later one with then.
+func rateLimitedOnce(then http.HandlerFunc) func(t *testing.T, d *daemon) {
+	return func(t *testing.T, d *daemon) {
+		var asked atomic.Int32
+		d.tokens = fakeGitHub(t, testInstallation, func(w http.ResponseWriter, r *http.Request) {
+			if asked.Add(1) == 1 {
+				w.Header().Set("Retry-After", "1")
+				writeJSON(w, http.StatusTooManyRequests, `{"message":"You have exceeded a secondary rate limit"}`)
+				return
+			}
+			then(w, r)
+		}, forgeapi.WithRetries(0))
+		d.installationID = testInstallation
+	}
+}
+
+// tokenExpiringSoon mints a token that leaves a run about two seconds once
+// tokenExpiryMargin is kept, under a RUN_TIMEOUT of an hour.
+func tokenExpiringSoon(t *testing.T, d *daemon) {
+	expiry := time.Now().Add(tokenExpiryMargin + 3*time.Second).UTC().Format(time.RFC3339)
+	tokenServer(http.StatusCreated, tokenBodyExpiring(expiry))(t, d)
+	d.timeout = time.Hour
 }
 
 func pastGrace(setup func(t *testing.T, d *daemon)) func(t *testing.T, d *daemon) {
@@ -150,6 +179,17 @@ var runPaths = []runPath{
 	{name: "token outage inside the grace", setup: tokenServer(http.StatusServiceUnavailable, `{"message":"unavailable"}`), completed: true, result: resultTokenUnavailable, exitCode: noExitCode, ok: true, tolerated: true, healthy: true},
 	{name: "token outage past the grace", setup: pastGrace(tokenServer(http.StatusServiceUnavailable, `{"message":"unavailable"}`)), completed: true, result: resultTokenUnavailable, exitCode: noExitCode},
 	{name: "token rejected", setup: tokenServer(http.StatusUnauthorized, `{"message":"Bad credentials"}`), completed: true, result: resultTokenFailed, exitCode: noExitCode},
+	{name: "token rate-limited, then complete", setup: func(t *testing.T, d *daemon) {
+		rateLimitedOnce(func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusCreated, tokenBody()) })(t, d)
+		shellRunner("exit 0")(t, d)
+	}, completed: true, result: resultComplete, ok: true, healthy: true},
+	{name: "token rate-limited, then an outage", setup: rateLimitedOnce(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusServiceUnavailable, `{"message":"unavailable"}`)
+	}), completed: true, result: resultTokenUnavailable, exitCode: noExitCode, ok: true, tolerated: true, healthy: true},
+	{name: "run past the token's life", setup: func(t *testing.T, d *daemon) {
+		tokenExpiringSoon(t, d)
+		shellRunner("sleep 30")(t, d)
+	}, completed: true, result: resultTimedOut, exitCode: noExitCode},
 	{name: "halted by a surviving group", setup: func(_ *testing.T, d *daemon) { d.halted = true }},
 	{name: "shutdown before the run", shutdown: true},
 }
@@ -231,6 +271,92 @@ func TestEveryCompletedRunWritesOneRunFinishedRecord(t *testing.T) {
 			if !p.tolerated && healthy != out.OK {
 				t.Errorf("health = %v disagrees with the outcome ok=%v", healthy, out.OK)
 			}
+		})
+	}
+}
+
+// TestARateLimitedRunCountsItsFailureFromTheWaitsEnd covers a run that waits
+// out an hour-long rate limit and then fails in a way an outage causes: its
+// one run finished record is tolerated and its duration includes the wait,
+// while the failure clock (failing_since_timestamp_seconds and the failure
+// line's failing_for) starts where the wait ended. Serial: swaps slog.Default.
+func TestARateLimitedRunCountsItsFailureFromTheWaitsEnd(t *testing.T) {
+	const wait = time.Hour
+	tests := []struct {
+		after   http.HandlerFunc
+		name    string
+		result  string
+		line    string
+		outcome runOutcome
+	}{
+		{
+			name: "a token outage after the wait",
+			after: func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusServiceUnavailable, `{"message":"unavailable"}`)
+			},
+			outcome: runComplete, result: resultTokenUnavailable, line: "renovate run skipped: github app token unavailable",
+		},
+		{
+			name:    "a repository error after the wait",
+			after:   func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusCreated, tokenBody()) },
+			outcome: runRepositoryError, result: resultRepositoryError, line: "renovate run ended in a repository error",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+			synctest.Test(t, func(t *testing.T) {
+				read := logLines(t)
+				d, _ := newBareDaemon(t, nil)
+				reg := measure.NewRegistry(metricsPrefix)
+				d.metrics = newRunMetrics(reg, d.marker, "external", "app", scheduler.RunRecord{}, false)
+				var asked atomic.Int32
+				d.tokens = fakeGitHub(t, testInstallation, func(w http.ResponseWriter, r *http.Request) {
+					if asked.Add(1) == 1 {
+						w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())))
+						writeJSON(w, http.StatusTooManyRequests, `{"message":"You have exceeded a secondary rate limit"}`)
+						return
+					}
+					tt.after(w, r)
+				}, forgeapi.WithRetries(0))
+				d.installationID = testInstallation
+				d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
+					return runResult{outcome: tt.outcome}
+				}
+				d.health.Set(true)
+				start := time.Now()
+
+				j := newJob("interval", nil, nil)
+				d.execute(t.Context(), t.Context().Done(), j)
+				out := <-j.Result()
+				lines := read()
+
+				if !out.OK || out.Reason != toleratedReason {
+					t.Errorf("outcome = ok %v reason %q, want ok with %q", out.OK, out.Reason, toleratedReason)
+				}
+				records := recordsNamed(t, lines, runFinishedMsg)
+				if len(records) != 1 {
+					t.Fatalf("wrote %d run finished records, want 1: %v", len(records), records)
+				}
+				rec := records[0]
+				if rec["result"] != tt.result || rec["ok"] != "1" || rec["tolerated"] != "1" {
+					t.Errorf("record result=%s ok=%s tolerated=%s, want %s, 1, 1", rec["result"], rec["ok"], rec["tolerated"], tt.result)
+				}
+				if ms, err := strconv.ParseInt(rec["duration_ms"], 10, 64); err != nil || ms < wait.Milliseconds() {
+					t.Errorf("record duration_ms = %q, want at least the %s wait", rec["duration_ms"], wait)
+				}
+				failures := recordsNamed(t, lines, tt.line)
+				if len(failures) != 1 {
+					t.Fatalf("%q lines = %d, want 1", tt.line, len(failures))
+				}
+				if got := failingFor(t, failures[0]); got >= time.Minute {
+					t.Errorf("%q failing_for = %s, want under a minute: the failures count from the wait's end", tt.line, got)
+				}
+				clock := series(t, reg)[seriesKey("failing_since_timestamp_seconds", scopeFull)]
+				if end := float64(start.Add(wait).Unix()); clock < end || clock > end+60 {
+					t.Errorf("failing_since_timestamp_seconds = %.0f, want the wait's end %.0f, not the run's start %d", clock, end, start.Unix())
+				}
+			})
 		})
 	}
 }
