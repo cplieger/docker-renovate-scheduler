@@ -3,8 +3,8 @@ module github.com/cplieger/docker-renovate-scheduler
 go 1.27.4
 
 require (
-	github.com/cplieger/forgeapi/v2 v2.0.0-dev.13
-	github.com/cplieger/go/envx v1.1.0-dev.1
+	github.com/cplieger/forgeapi/v2 v2.0.0-dev.17
+	github.com/cplieger/go/envx v1.1.0-dev.2
 	github.com/cplieger/go/filesafe v1.1.0-dev.1
 	github.com/cplieger/go/health v1.1.0-dev.1
 	github.com/cplieger/go/httpserver v1.2.0-dev.1
@@ -14,11 +14,11 @@ require (
 )
 
 require (
-	github.com/cplieger/go/httpcache v1.1.0-dev.2 // indirect
+	github.com/cplieger/go/httpcache v1.1.0-dev.5 // indirect
 	github.com/cplieger/go/httpclient v1.2.0-dev.1 // indirect
-	github.com/cplieger/go/jsonx v1.0.0 // indirect
+	github.com/cplieger/go/jsonx v1.1.0-dev.1 // indirect
 	github.com/cplieger/go/pathinside v1.1.0-dev.1 // indirect
-	github.com/cplieger/go/ssrf v1.1.0-dev.2 // indirect
+	github.com/cplieger/go/ssrf v1.1.0-dev.5 // indirect
 	github.com/cplieger/go/textsafe v1.1.0-dev.1 // indirect
-	github.com/cplieger/go/urlform v1.1.0-dev.1 // indirect
+	github.com/cplieger/go/urlform v1.2.0-dev.1 // indirect
 )
