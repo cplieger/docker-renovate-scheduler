@@ -91,7 +91,17 @@ const (
 	runRepositoryError
 )
 
-func runRenovateOnce(ctx context.Context, timeout time.Duration, trig string, p runPayload, newCmd scheduler.CommandRunner) runOutcome {
+// runResult is one Renovate run: its outcome, Renovate's exit code (-1 when
+// the process did not start or a signal ended it), and for a repository error
+// the error and duration the executor's failure line carries.
+type runResult struct {
+	err      error
+	outcome  runOutcome
+	exitCode int
+	duration time.Duration
+}
+
+func runRenovateOnce(ctx context.Context, timeout time.Duration, trig string, p runPayload, newCmd scheduler.CommandRunner) runResult {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -104,9 +114,10 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trig string, p 
 	cmd.Env = withChildOverrides(p.Env)
 	if startErr := cmd.Start(); startErr != nil {
 		logRunFailure(trig, time.Since(start).Milliseconds(), startErr)
-		return runStartFailed
+		return runResult{outcome: runStartFailed, exitCode: -1}
 	}
 	runErr := cmd.Wait()
+	exitCode := cmd.ProcessState.ExitCode()
 	durationMs := time.Since(start).Milliseconds()
 	// Read the deadline before the containment sweep consumes more time.
 	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
@@ -116,10 +127,10 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trig string, p 
 	switch {
 	case runErr == nil:
 		if survived {
-			return runContained
+			return runResult{outcome: runContained, exitCode: exitCode}
 		}
 		slog.Info("renovate run complete", "trigger", trig, "duration_ms", durationMs)
-		return runComplete
+		return runResult{outcome: runComplete, exitCode: exitCode}
 	case timedOut:
 		failure = runTimedOut
 		slog.Error("renovate run timed out",
@@ -130,9 +141,9 @@ func runRenovateOnce(ctx context.Context, timeout time.Duration, trig string, p 
 		}
 	}
 	if survived {
-		return runContained
+		return runResult{outcome: runContained, exitCode: exitCode}
 	}
-	return failure
+	return runResult{err: runErr, outcome: failure, exitCode: exitCode, duration: time.Since(start)}
 }
 
 // abortExitCode is how node's SIGABRT reaches the daemon: the entrypoint chain
@@ -147,15 +158,12 @@ type runDiagnosis struct {
 
 // logRunFailure records a failed run, naming a likely cause when the exit
 // status identifies one so the operator reads a remedy instead of a number,
-// and reports whether it was a repository error. A repository error is a
-// warning here, because a platform outage causes most of them; the executor
-// escalates one that lasts. The message strings are fixed because the shipped
-// alert rules key on them.
+// and reports whether it was a repository error, which it leaves unlogged:
+// only the executor knows whether that run is still tolerated, so it writes
+// the line (logRepositoryError). The message strings are fixed because the
+// image smoke test and the docs' message table read them.
 func logRunFailure(trig string, durationMs int64, runErr error) (repositoryError bool) {
-	if diag, ok := repositoryErrorDiagnosis(runErr); ok {
-		slog.Warn("renovate run ended in a repository error",
-			"trigger", trig, "duration_ms", durationMs, "error", runErr,
-			"likely_cause", diag.cause, "fix", diag.fix)
+	if _, ok := repositoryErrorDiagnosis(runErr); ok {
 		return true
 	}
 	if diag, ok := abortDiagnosis(runErr); ok {

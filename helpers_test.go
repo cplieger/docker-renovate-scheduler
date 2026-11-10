@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/measure"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
 )
@@ -31,13 +32,21 @@ func newBareDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, strin
 		health:    health.NewLatch(marker),
 		verifier:  newBaseDirVerifier(),
 		stamp:     scheduler.NewStamp(stampFile),
+		completed: scheduler.NewStamp(filepath.Join(dir, completedStampName)),
+		metrics:   testMetrics(marker),
 		newCmd:    runner,
 		runOnce:   runRenovateOnce,
+		now:       time.Now,
 		stampPath: stampFile,
 		timeout:   time.Minute,
 		fatal:     make(chan error, 1),
 	}
 	return d, markerPath
+}
+
+// testMetrics returns run metrics on a registry of their own.
+func testMetrics(marker *health.Marker) *runMetrics {
+	return newRunMetrics(measure.NewRegistry(metricsPrefix), marker, "external", "token", scheduler.RunRecord{}, false)
 }
 
 // maxSunPath is the longest usable unix-socket path: Linux sun_path is
@@ -108,14 +117,14 @@ func gatedRunner(t *testing.T) (runner scheduler.CommandRunner, awaitEntered, re
 // gatedRunOnce returns a runOnce seam that signals entry after execute's
 // shutdown preflight check, a boundary gatedRunner's readiness file cannot
 // observe, then blocks until released and reports a clean outcome.
-func gatedRunOnce(t *testing.T) (runOnce func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome, awaitEntered, release func()) {
+func gatedRunOnce(t *testing.T) (runOnce func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult, awaitEntered, release func()) {
 	t.Helper()
 	entered := make(chan struct{})
 	proceed := make(chan struct{})
-	runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
+	runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
 		close(entered)
 		<-proceed
-		return runComplete
+		return runResult{outcome: runComplete}
 	}
 	awaitEntered = func() {
 		select {

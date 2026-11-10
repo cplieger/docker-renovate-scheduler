@@ -1,6 +1,6 @@
 # Configuration
 
-This page covers the scheduler's settings in full and GitHub App authentication. It also covers the two scheduling modes, running the container as another user and the memory a Renovate run needs. It is for readers who go past the quick start. Renovate's own settings are documented in Renovate's [self-hosted configuration](https://docs.renovatebot.com/self-hosted-configuration/).
+This page covers the scheduler's settings in full and GitHub App authentication. It also covers the optional metrics page, the two scheduling modes, running the container as another user and the memory a Renovate run needs. It is for readers who go past the quick start. Renovate's own settings are documented in Renovate's [self-hosted configuration](https://docs.renovatebot.com/self-hosted-configuration/).
 
 ## Settings
 
@@ -8,7 +8,14 @@ The scheduler reads these environment variables at start. They sit outside the `
 
 - `RUN_INTERVAL`, default `6h`, is the time between runs as a Go duration, such as `6h`, `1h` or `30m`. `off`, `disabled` and `0` turn the built-in schedule off, and runs then start only when your own scheduler asks. An unset, negative or unreadable value means `6h`.
 - `RUN_TIMEOUT`, default `1h`, is the longest one Renovate run may take, as a Go duration. A run past it is stopped and fails. A zero or negative value means `1h`. Renovate's own `RENOVATE_EXECUTION_TIMEOUT` is a separate limit for each command Renovate starts.
-- `LOG_LEVEL`, default `info`, is read by the scheduler and by Renovate. Both honor `debug`, `info`, `warn` and `error`. Renovate also accepts `trace` and `fatal`, and the scheduler then logs that it does not recognize the value and uses `info` for its own lines. Any other value, including `warning` and forms such as `warn+1`, stops Renovate from starting. With the built-in schedule the container then never turns healthy.
+- `LOG_LEVEL`, default `info`, is read by the scheduler and by Renovate. Both honor `debug`, `info`, `warn` and `error`. Renovate also accepts `trace` and `fatal`, and the scheduler then logs that it does not recognize the value and uses `info` for its own lines. Any other value, including `warning` and forms such as `warn+1`, stops Renovate from starting. With the built-in schedule the container then never turns healthy. The log alert rules in `alerts/logql.yaml` read an `info` record, so they stop at `warn` or `error`.
+- `METRICS_LISTEN_ADDR`, unset by default, is the address of an optional Prometheus metrics page, as [The metrics page](#the-metrics-page) explains.
+
+## The metrics page
+
+Set `METRICS_LISTEN_ADDR` to an address the container can listen on, such as `:9470`, and publish that port to reach it from another host. The address then serves `GET /metrics`, the page `alerts/promql.yaml` reads, and `GET /healthz`, the same verdict as the healthcheck. Unset or empty, the image opens no port. Spaces and invisible characters around the value are ignored.
+
+The container listens before its first run. An address it cannot listen on, malformed or already in use, stops it at start with `cannot listen on METRICS_LISTEN_ADDR` and one `daemon stopped` line, and it never falls back to another address. [Monitoring and alerts](monitoring.md#metrics) lists the series.
 
 ## Renovate's own settings
 

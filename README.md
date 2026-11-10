@@ -3,7 +3,7 @@
 [![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/docker-renovate-scheduler/badges/size.json)](https://github.com/cplieger/docker-renovate-scheduler/pkgs/container/docker-renovate-scheduler) [![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)](https://github.com/cplieger/docker-renovate-scheduler/pkgs/container/docker-renovate-scheduler) [![base: renovate/renovate](https://img.shields.io/badge/base-renovate%2Frenovate-1A1F6C)](https://github.com/cplieger/docker-renovate-scheduler/blob/main/Dockerfile) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/docker-renovate-scheduler/badges/mutation.json)](https://github.com/cplieger/docker-renovate-scheduler/issues?q=label%3Agremlins-tracker) [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/docker-renovate-scheduler/releases)
 
 <!-- hub-overview BEGIN -->
-docker-renovate-scheduler keeps your self-hosted [Renovate](https://github.com/renovatebot/renovate) bot in one always-on container that runs it on a schedule or when your own scheduler asks. It opens no ports.
+docker-renovate-scheduler keeps your self-hosted [Renovate](https://github.com/renovatebot/renovate) bot in one always-on container that runs it on a schedule or when your own scheduler asks. It opens no port unless you ask for a metrics page.
 
 ## What it does
 
@@ -79,7 +79,8 @@ The scheduler reads these settings once at start, so recreate the container afte
 | --- | --- | --- |
 | `RUN_INTERVAL` | Time between runs, such as `1h` or `30m`. `off` waits for your own scheduler to start each run | `6h` |
 | `RUN_TIMEOUT` | Longest time one run may take before it is stopped and fails | `1h` |
-| `LOG_LEVEL` | `debug`, `info`, `warn` or `error`, for the scheduler and Renovate. `trace` and `fatal` work for Renovate only. Any other value stops Renovate | `info` |
+| `LOG_LEVEL` | `debug`, `info`, `warn` or `error`, for the scheduler and Renovate. `trace` and `fatal` work for Renovate only. Any other value stops Renovate. The log alert rules need `info` or `debug` | `info` |
+| `METRICS_LISTEN_ADDR` | Address for a Prometheus metrics page and `/healthz`, for example `:9470`. Empty opens no port. An address the container cannot listen on stops it at start | none |
 | `GITHUB_APP_ID` | Your GitHub App's ID. With `GITHUB_APP_PRIVATE_KEY_FILE`, every run gets a fresh App installation token instead of `RENOVATE_TOKEN` | none |
 | `GITHUB_APP_PRIVATE_KEY_FILE` | Path inside the container to the App's private key file, such as a read-only mount | none |
 | `GITHUB_APP_INSTALLATION_ID` | The installation to use. Unset, the scheduler uses the App's only installation | none |
@@ -100,13 +101,13 @@ Keep the container's default user. Without the extra cache settings, another use
 
 ## Security
 
-The image opens no ports and runs no web server. The `run` command talks to the scheduler through a Unix socket in `/tmp`. Only the container's own user can open it, and only from inside the container. The container runs as Renovate's non-root user, UID 12021.
+The image opens no port and runs no web server unless `METRICS_LISTEN_ADDR` is set. That listener serves only `/metrics` and `/healthz`, with no login, so keep it on your network. The `run` command talks to the scheduler through a Unix socket in `/tmp`. Only the container's own user can open it, and only from inside the container. The container runs as Renovate's non-root user, UID 12021.
 
 The scheduler never logs your platform token, a GitHub App token or the App's private key. A `run` command sends its environment, which can include the token, to the scheduler through that socket only. Renovate starts from a list of arguments, with no shell. The image removes the `docker` command-line tool from Renovate's base image, so Renovate's `binarySource=docker` mode is not supported. [Security](docs/hardening.md) lists what the image contains.
 
 ## Troubleshooting
 
-The healthcheck reads a file the scheduler updates after each run. Unhealthy means the last run failed, and the next good run makes it healthy again. Repository errors and GitHub App token outages make it unhealthy only once they have lasted 2 hours. With the built-in schedule, it also turns unhealthy when no run has finished for 13 hours with the defaults, which is twice `RUN_INTERVAL` plus `RUN_TIMEOUT`. The image allows 10 minutes at start for a slow first run.
+The healthcheck reads a file the scheduler updates after each run. Unhealthy means the last run failed, and the next good run makes it healthy again. Repository errors and GitHub App token outages make it unhealthy only once they have lasted 2 hours. With the built-in schedule, it also turns unhealthy when no run has finished for 13 hours with the defaults, which is twice `RUN_INTERVAL` plus `RUN_TIMEOUT`. The image allows 10 minutes at start for a slow first run. An unhealthy container notifies nobody. [Knowing the app is alive](docs/monitoring.md#knowing-the-app-is-alive) says what does.
 
 - The container restarts with `base directory preflight failed`. The `data` folder does not belong to user 12021. Repeat step 1 of the quick start.
 - A run fails with `exit status 134` and a `likely_cause` field. Node most likely ran out of heap memory, often after Renovate raised its PRs. Set `mem_limit` to 3g or more and keep `RENOVATE_X_SQLITE_PACKAGE_CACHE=true`, as [Memory and the package cache](docs/configuration.md#memory-and-the-package-cache) explains.
@@ -116,13 +117,13 @@ The healthcheck reads a file the scheduler updates after each run. Unhealthy mea
 
 ## Monitoring
 
-docker-renovate-scheduler writes logfmt lines with UTC times to its container log, and Renovate's own output follows on the same log in both scheduling modes. It has no metrics endpoint. [Monitoring and alerts](docs/monitoring.md) lists the log lines and two Loki alert rules, one for a failed run and one for no finished run in 14 hours.
+docker-renovate-scheduler logs one `run finished` record per run and can serve a Prometheus metrics page when `METRICS_LISTEN_ADDR` is set, for example `:9470`. Alert rules for Prometheus and for Loki ship in [`alerts/`](alerts/). Load one of the two files. [Monitoring and alerts](docs/monitoring.md) lists them and says who tells you the schedule stopped. The image has a Docker healthcheck. [Knowing the app is alive](docs/monitoring.md#knowing-the-app-is-alive) says what it proves and who is told.
 
 ## Documentation
 
 - [Configuration](docs/configuration.md) covers both scheduling modes, Ofelia, another user and the memory a run needs.
 - [How it works](docs/how-it-works.md) explains the queue, the schedule, shutdown and the health rules.
-- [Monitoring and alerts](docs/monitoring.md) lists the log lines and the alert rules.
+- [Monitoring and alerts](docs/monitoring.md) lists the metrics, the `run finished` record, both rule files, and who tells you the schedule stopped.
 - [Security](docs/hardening.md) covers what the container accepts and what the image contains.
 
 ## Credits
