@@ -10,12 +10,12 @@ github.com/cplieger/go/httpcache v1.1.0-dev.5 h1:xZmQha9V3C2HpaNftuAot/dwbij/o5u
 github.com/cplieger/go/httpcache v1.1.0-dev.5/go.mod h1:gfWuZLFWwVZL2SYD1N/V7pH3qfQ2O1Z0hSFjYSFcBfI=
 github.com/cplieger/go/httpclient v1.2.0-dev.1 h1:4fjNLUM6A2yKu+yhWB/EibppR95uK5X5eXOo4NN+jKk=
 github.com/cplieger/go/httpclient v1.2.0-dev.1/go.mod h1:couTQSCNdgNwOotbaQREGcM4CjUKZJ4Bdb7FSkNwL8U=
-github.com/cplieger/go/httpserver v1.2.0-dev.1 h1:Blo6rOE1kMRSHZ6iPJKm5lFfa/sJy2aVnLJEywCYatI=
-github.com/cplieger/go/httpserver v1.2.0-dev.1/go.mod h1:MuZxKRRjQG6DAJBO88cTGhVdhSCmBu2PMeA/DWRbiTQ=
+github.com/cplieger/go/httpserver v1.2.0-dev.3 h1:WCBhTrBMTn+r9ledIRqmRErC2Z8Fb44a9MDoWbYsZAo=
+github.com/cplieger/go/httpserver v1.2.0-dev.3/go.mod h1:MuZxKRRjQG6DAJBO88cTGhVdhSCmBu2PMeA/DWRbiTQ=
 github.com/cplieger/go/jsonx v1.1.0-dev.1 h1:9Dm1B+MuplMxQRKcp+FucJLgf/xSSKWd68VMltqdIeo=
 github.com/cplieger/go/jsonx v1.1.0-dev.1/go.mod h1:ry6co0JYAadIhjHtkktBSK3to4YdtEak1P7mdmQlr7U=
-github.com/cplieger/go/measure v1.2.0-dev.1 h1:uCKyQKa6PK1oWXOU/BwdnwJgcHFNi3QqcRywkVCB8i0=
-github.com/cplieger/go/measure v1.2.0-dev.1/go.mod h1:oH0qxNStRZYbEn3iHpXv/7jKcrjg/EzsxrhLhBK6BC0=
+github.com/cplieger/go/measure v1.2.0-dev.2 h1:wZDZMSmg0e6NaGUt1+4nGw+wNrkMa+Z2gHV1XtKALek=
+github.com/cplieger/go/measure v1.2.0-dev.2/go.mod h1:oH0qxNStRZYbEn3iHpXv/7jKcrjg/EzsxrhLhBK6BC0=
 github.com/cplieger/go/pathinside v1.1.0-dev.1 h1:ZMryoY2Hxrodm5uOLeKVpaKVO9ADp1RDDX0IWlKS/PY=
 github.com/cplieger/go/pathinside v1.1.0-dev.1/go.mod h1:fIyGk/T2XYqVLJ5/cXOFkjk202Mwbdu0aXhH7Ky1/kI=
 github.com/cplieger/go/scheduler v1.1.0-dev.1 h1:w7rEj8QbNqVv+9V+syN9Wgnxn9+IILHVlYYgmJzy9AM=
