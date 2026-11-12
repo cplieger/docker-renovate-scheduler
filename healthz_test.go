@@ -7,12 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strconv"
 	"testing"
+	"testing/synctest"
 	"time"
 
-	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/health/v2"
 	"github.com/cplieger/go/measure"
 )
 
@@ -20,26 +20,6 @@ import (
 type healthzBody struct {
 	Status  string   `json:"status"`
 	Reasons []string `json:"reasons"`
-}
-
-// setMarker puts a test marker in a state: written by a good or tolerated run
-// (fresh), removed by a failed one (failed), or written age ago (aged).
-func setMarker(t *testing.T, marker *health.Marker, path, state string, age time.Duration) {
-	t.Helper()
-	switch state {
-	case "fresh":
-		marker.Set(true)
-	case "failed":
-		marker.Set(false)
-	case "aged":
-		marker.Set(true)
-		aged := time.Now().Add(-age)
-		if err := os.Chtimes(path, aged, aged); err != nil {
-			t.Fatal(err)
-		}
-	default:
-		t.Fatalf("unknown marker state %q", state)
-	}
 }
 
 func getHealthz(t *testing.T, client *http.Client, url string) (int, http.Header, healthzBody) {
@@ -60,17 +40,27 @@ func getHealthz(t *testing.T, client *http.Client, url string) (int, http.Header
 	return resp.StatusCode, resp.Header, body
 }
 
+// serveHealthz answers one GET /healthz from h and decodes its body.
+func serveHealthz(t *testing.T, h http.Handler) (int, healthzBody) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	var body healthzBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("GET /healthz body %q is not JSON: %v", rec.Body.String(), err)
+	}
+	return rec.Code, body
+}
+
 // TestServeMetricsServesHealthz pins the route on METRICS_LISTEN_ADDR: GET and
-// HEAD answer 200 {"status":"ok"} on a fresh marker, 503 with one reason per
-// fault on a failed or a stale marker, and any other method gets 405.
+// HEAD answer 200 {"status":"ok"} after a good run, 503 with one reason after
+// a failed one, and any other method gets 405.
 func TestServeMetricsServesHealthz(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "healthy")
-	marker := health.NewMarker(path)
-	// A 1h interval and a 30m run timeout: a lease of two intervals plus one timeout.
+	st := health.NewStatus()
 	lease := runLease(time.Hour, true, 30*time.Minute, false)
 	addr := freeAddr(t)
 	ctx, cancel := context.WithCancel(t.Context())
-	stop, err := serveMetrics(ctx, addr, measure.NewRegistry(metricsPrefix), newHealthz(marker, lease))
+	stop, err := serveMetrics(ctx, addr, measure.NewRegistry(metricsPrefix), newHealthz(st, lease))
 	if err != nil {
 		cancel()
 		t.Fatalf("serveMetrics(%q) error = %v", addr, err)
@@ -82,23 +72,20 @@ func TestServeMetricsServesHealthz(t *testing.T) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	url := "http://" + addr + "/healthz"
 
-	const pastLease = 3 * time.Hour
-	reasons := map[string]string{}
 	for _, tc := range []struct {
 		name       string
-		state      string
 		wantStatus string
 		wantCode   int
+		healthy    bool
 	}{
-		{name: "fresh", state: "fresh", wantCode: http.StatusOK, wantStatus: "ok"},
-		{name: "failed", state: "failed", wantCode: http.StatusServiceUnavailable, wantStatus: "unhealthy"},
-		{name: "stale", state: "aged", wantCode: http.StatusServiceUnavailable, wantStatus: "unhealthy"},
+		{name: "fresh", healthy: true, wantCode: http.StatusOK, wantStatus: "ok"},
+		{name: "failed", wantCode: http.StatusServiceUnavailable, wantStatus: "unhealthy"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			setMarker(t, marker, path, tc.state, pastLease)
+			st.Set(tc.healthy)
 			code, header, body := getHealthz(t, client, url)
 			if code != tc.wantCode || body.Status != tc.wantStatus {
-				t.Errorf("GET /healthz on a %s marker = %d %q, want %d %q", tc.name, code, body.Status, tc.wantCode, tc.wantStatus)
+				t.Errorf("GET /healthz %s = %d %q, want %d %q", tc.name, code, body.Status, tc.wantCode, tc.wantStatus)
 			}
 			for key, want := range map[string]string{
 				"Content-Type":           "application/json",
@@ -109,25 +96,17 @@ func TestServeMetricsServesHealthz(t *testing.T) {
 					t.Errorf("GET /healthz %s = %q, want %q", key, got, want)
 				}
 			}
-			switch {
-			case tc.wantCode == http.StatusOK && body.Reasons != nil:
-				t.Errorf("GET /healthz on a fresh marker lists reasons %q, want none", body.Reasons)
-			case tc.wantCode != http.StatusOK && len(body.Reasons) != 1:
-				t.Errorf("GET /healthz on a %s marker lists reasons %q, want exactly one", tc.name, body.Reasons)
-			case tc.wantCode != http.StatusOK:
-				reasons[tc.name] = body.Reasons[0]
+			if tc.healthy && body.Reasons != nil {
+				t.Errorf("GET /healthz after a good run lists reasons %q, want none", body.Reasons)
+			}
+			if !tc.healthy && (len(body.Reasons) != 1 || body.Reasons[0] != reasonRunFailed) {
+				t.Errorf("GET /healthz after a failed run lists reasons %q, want only %q", body.Reasons, reasonRunFailed)
 			}
 		})
 	}
-	if reasons["failed"] != reasonRunFailed {
-		t.Errorf("GET /healthz on a failed marker reports %q, want %q", reasons["failed"], reasonRunFailed)
-	}
-	if reasons["stale"] != reasonStuck {
-		t.Errorf("GET /healthz on a stale marker reports %q, want %q", reasons["stale"], reasonStuck)
-	}
 
 	t.Run("HEAD", func(t *testing.T) {
-		setMarker(t, marker, path, "fresh", 0)
+		st.Set(true)
 		resp, err := client.Head(url)
 		if err != nil {
 			t.Fatalf("HEAD /healthz: %v", err)
@@ -149,16 +128,38 @@ func TestServeMetricsServesHealthz(t *testing.T) {
 	})
 }
 
+// TestHealthzNamesEachFault pins one reason per fault: a failed run reports
+// reasonRunFailed alone, and a good run older than the lease reports
+// reasonStuck alone.
+func TestHealthzNamesEachFault(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		st := health.NewStatus()
+		// A 1h interval and a 30m run timeout: a lease of two intervals plus one timeout.
+		h := newHealthz(st, 2*time.Hour+30*time.Minute)
+
+		st.Set(false)
+		if code, body := serveHealthz(t, h); code != http.StatusServiceUnavailable || len(body.Reasons) != 1 || body.Reasons[0] != reasonRunFailed {
+			t.Errorf("GET /healthz after a failed run = %d %q, want 503 with only %q", code, body.Reasons, reasonRunFailed)
+		}
+		st.Set(true)
+		time.Sleep(2*time.Hour + 30*time.Minute + time.Second)
+		if code, body := serveHealthz(t, h); code != http.StatusServiceUnavailable || len(body.Reasons) != 1 || body.Reasons[0] != reasonStuck {
+			t.Errorf("GET /healthz past the lease = %d %q, want 503 with only %q", code, body.Reasons, reasonStuck)
+		}
+	})
+}
+
 // TestTheLeaseInAppModeCoversTheTokenRequest pins the lease to one run of the
 // work loop: in GitHub App mode a run may spend tokenMintBudget on its token
-// before RUN_TIMEOUT starts, so a marker that old is still healthy there, while
-// in token mode, whose runs ask for no token, it is stuck. /healthz and the
-// health subcommand agree in both modes. Serial: it sets the environment.
+// before RUN_TIMEOUT starts, so a good run that long ago is still healthy
+// there, while in token mode, whose runs ask for no token, it is stuck. The
+// health subcommand arms the same lease in both modes, whether or not the key
+// file is still there. Serial: it sets the environment.
 func TestTheLeaseInAppModeCoversTheTokenRequest(t *testing.T) {
 	const interval, runTimeout = time.Minute, 30 * time.Minute
 	// A run that starts as the second interval ends, spends the whole token
 	// budget and then most of RUN_TIMEOUT.
-	const age = 2*interval + tokenMintBudget + runTimeout - 30*time.Second
+	const age = 2*interval + 2*time.Minute + runTimeout - 30*time.Second
 	for _, tc := range []struct {
 		name     string
 		app      bool
@@ -166,8 +167,6 @@ func TestTheLeaseInAppModeCoversTheTokenRequest(t *testing.T) {
 		wantCode int
 	}{
 		{name: "GitHub App mode", app: true, wantCode: http.StatusOK},
-		// The daemon read its key at start, so the probe must not depend on
-		// the file still being there.
 		{name: "GitHub App mode after the key file is gone", app: true, keyGone: true, wantCode: http.StatusOK},
 		{name: "token mode", wantCode: http.StatusServiceUnavailable},
 	} {
@@ -185,28 +184,27 @@ func TestTheLeaseInAppModeCoversTheTokenRequest(t *testing.T) {
 				t.Setenv(envAppID, strconv.Itoa(testAppID))
 				t.Setenv(envAppKeyFile, key)
 			}
-			path := filepath.Join(t.TempDir(), "healthy")
-			marker := health.NewMarker(path)
-			setMarker(t, marker, path, "aged", age)
-
-			rec := httptest.NewRecorder()
-			newHealthz(marker, runLease(interval, true, runTimeout, tc.app)).
-				ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-			if rec.Code != tc.wantCode {
-				t.Errorf("/healthz on a healthy marker %s old = %d, want %d", age, rec.Code, tc.wantCode)
+			lease := runLease(interval, true, runTimeout, tc.app)
+			if got := probeLease(); got != lease {
+				t.Errorf("the health subcommand arms %v, /healthz %v: the two readers disagree", got, lease)
 			}
-			if probeHealthy := health.Inspect(path, probeOptions()...).Healthy(); probeHealthy != (rec.Code == http.StatusOK) {
-				t.Errorf("/healthz = %d but the health subcommand reads healthy = %v: the two readers disagree", rec.Code, probeHealthy)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				st := health.NewStatus()
+				h := newHealthz(st, lease)
+				st.Set(true)
+				time.Sleep(age)
+				if code, _ := serveHealthz(t, h); code != tc.wantCode {
+					t.Errorf("/healthz %s after a good run = %d, want %d", age, code, tc.wantCode)
+				}
+			})
 		})
 	}
 }
 
-// TestHealthzAgreesWithTheHealthSubcommand pins one verdict for two readers:
-// for a fresh, a failed, a not yet stale and a stale marker, /healthz answers
-// 200 exactly when the health subcommand exits 0. With the schedule on, the
-// lease is two run intervals plus one run timeout; with RUN_INTERVAL=off there
-// is none. Serial: it sets the environment both readers parse.
+// TestHealthzAgreesWithTheHealthSubcommand pins one deadline for two readers:
+// for each schedule the lease the health subcommand arms is the one /healthz
+// applies, and /healthz turns 503 just past it after a good run (never, with
+// RUN_INTERVAL=off). Serial: it sets the environment both readers parse.
 func TestHealthzAgreesWithTheHealthSubcommand(t *testing.T) {
 	clearAppEnv(t)
 	for _, env := range []struct {
@@ -218,64 +216,67 @@ func TestHealthzAgreesWithTheHealthSubcommand(t *testing.T) {
 		{interval: "1h", timeout: "0", lease: 2*time.Hour + time.Hour},
 		{interval: "off", timeout: ""},
 	} {
-		// With no lease, any age is healthy; 100 hours stands for "long ago".
-		within, past := env.lease-time.Hour, env.lease+time.Hour
-		pastCode := http.StatusServiceUnavailable
-		if env.lease == 0 {
-			within, past = time.Hour, 100*time.Hour
-			pastCode = http.StatusOK
-		}
-		for _, tc := range []struct {
-			state    string
-			age      time.Duration
-			wantCode int
-		}{
-			{state: "fresh", wantCode: http.StatusOK},
-			{state: "failed", wantCode: http.StatusServiceUnavailable},
-			{state: "aged", age: within, wantCode: http.StatusOK},
-			{state: "aged", age: past, wantCode: pastCode},
-		} {
-			name := "RUN_INTERVAL=" + env.interval + " RUN_TIMEOUT=" + env.timeout + " " + tc.state + " " + tc.age.String()
-			t.Run(name, func(t *testing.T) {
-				t.Setenv("RUN_INTERVAL", env.interval)
-				t.Setenv("RUN_TIMEOUT", env.timeout)
-				interval, scheduleEnabled := loadInterval()
-				path := filepath.Join(t.TempDir(), "healthy")
-				marker := health.NewMarker(path)
-				setMarker(t, marker, path, tc.state, tc.age)
-
-				rec := httptest.NewRecorder()
-				newHealthz(marker, runLease(interval, scheduleEnabled, loadRunTimeout(), false)).
-					ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-				probeHealthy := health.Inspect(path, probeOptions()...).Healthy()
-				if rec.Code != tc.wantCode {
-					t.Errorf("/healthz = %d, want %d", rec.Code, tc.wantCode)
+		t.Run("RUN_INTERVAL="+env.interval+" RUN_TIMEOUT="+env.timeout, func(t *testing.T) {
+			t.Setenv("RUN_INTERVAL", env.interval)
+			t.Setenv("RUN_TIMEOUT", env.timeout)
+			if got := probeLease(); got != env.lease {
+				t.Fatalf("the health subcommand arms %v, want %v", got, env.lease)
+			}
+			interval, scheduleEnabled := loadInterval()
+			lease := runLease(interval, scheduleEnabled, loadRunTimeout(), false)
+			synctest.Test(t, func(t *testing.T) {
+				st := health.NewStatus()
+				h := newHealthz(st, lease)
+				st.Set(true)
+				// With no lease, any age is healthy; 100 hours stands for "long ago".
+				within, past, pastCode := env.lease-time.Second, 2*time.Second, http.StatusServiceUnavailable
+				if env.lease == 0 {
+					within, past, pastCode = time.Hour, 100*time.Hour, http.StatusOK
 				}
-				if probeHealthy != (rec.Code == http.StatusOK) {
-					t.Errorf("/healthz = %d but the health subcommand reads healthy = %v: the two readers disagree", rec.Code, probeHealthy)
+				time.Sleep(within)
+				if code, _ := serveHealthz(t, h); code != http.StatusOK {
+					t.Errorf("/healthz %v after a good run = %d, want 200", within, code)
+				}
+				time.Sleep(past)
+				if code, _ := serveHealthz(t, h); code != pastCode {
+					t.Errorf("/healthz past the lease = %d, want %d", code, pastCode)
 				}
 			})
-		}
+		})
 	}
 }
 
 // TestDaemonServesHealthzOnTheMetricsAddress: the daemon wires /healthz to its
-// own marker, so a booted external-mode daemon answers 200, and unhealthy
-// once its health latch drops. Not parallel: it uses the package-global
-// health marker path.
+// own verdict, so a booted external-mode daemon answers 200, and 503 naming
+// the failed run once a triggered run fails. Not parallel: it uses the
+// package-global health marker path.
 func TestDaemonServesHealthzOnTheMetricsAddress(t *testing.T) {
 	addr := freeAddr(t)
 	daemonEnv(t, addr)
-	startDaemon(t)
+	sock := testSocketPath(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- runDaemon(ctx, sock, recordingRunner("false", nil)) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("runDaemon() = %v, want nil", err)
+		}
+	})
 	getMetrics(t, addr)
 	client := &http.Client{Timeout: 5 * time.Second}
 	url := "http://" + addr + "/healthz"
 
-	if code, _, body := getHealthz(t, client, url); code != http.StatusOK || body.Status != "ok" {
-		t.Errorf("GET /healthz on a booted daemon = %d %q, want 200 \"ok\"", code, body.Status)
+	// External mode boots healthy once the trigger server starts, after the
+	// metrics listener binds.
+	waitFor(t, 5*time.Second, func() bool {
+		code, _, body := getHealthz(t, client, url)
+		return code == http.StatusOK && body.Status == "ok"
+	}, "GET /healthz on a booted external-mode daemon never answered 200 \"ok\"")
+	if code := runClient(sock, nil); code != 1 {
+		t.Fatalf("runClient() = %d, want 1 (the run fails)", code)
 	}
-	health.NewMarker(healthMarkerPath).Set(false)
-	if code, _, body := getHealthz(t, client, url); code != http.StatusServiceUnavailable || len(body.Reasons) != 1 {
-		t.Errorf("GET /healthz after a failed run = %d %q, want 503 with one reason", code, body.Reasons)
+	if code, _, body := getHealthz(t, client, url); code != http.StatusServiceUnavailable || len(body.Reasons) != 1 || body.Reasons[0] != reasonRunFailed {
+		t.Errorf("GET /healthz after a failed run = %d %q, want 503 with only %q", code, body.Reasons, reasonRunFailed)
 	}
 }

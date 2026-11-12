@@ -2,19 +2,20 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/health/v2"
 	"github.com/cplieger/go/measure"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
@@ -211,8 +212,8 @@ func TestDaemonRefusesAMetricsAddressItCannotBind(t *testing.T) {
 			if naming != 1 {
 				t.Errorf("ERROR lines naming METRICS_LISTEN_ADDR = %d, want 1:\n%s", naming, strings.Join(read(), "\n"))
 			}
-			if health.NewMarker(healthMarkerPath).Healthy() {
-				t.Error("marker healthy after a refused start, want unhealthy")
+			if _, err := os.Stat(healthMarkerPath); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("health marker after a refused start: stat err = %v, want not-exist (unhealthy)", err)
 			}
 		})
 	}
@@ -230,7 +231,7 @@ func TestRunSetsEverySeriesToItsRecord(t *testing.T) {
 			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 			d, _ := newBareDaemon(t, recordingRunner("true", nil))
 			reg := measure.NewRegistry(metricsPrefix)
-			d.metrics = newRunMetrics(reg, d.marker, "external", "token", scheduler.RunRecord{}, false)
+			d.metrics = newRunMetrics(reg, d.status, "external", "token", scheduler.RunRecord{}, false)
 			_, records, healthy := runOn(t, d, p)
 			if len(records) != 1 {
 				t.Fatalf("wrote %d run finished records, want 1", len(records))
@@ -297,8 +298,7 @@ func TestRejectedRunsCountByReason(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := measure.NewRegistry(metricsPrefix)
-			marker := health.NewMarker(filepath.Join(t.TempDir(), "marker"))
-			d := &daemon{queue: tt.queue(), metrics: newRunMetrics(reg, marker, "built-in", "token", scheduler.RunRecord{}, false)}
+			d := &daemon{queue: tt.queue(), metrics: newRunMetrics(reg, health.NewStatus(), "built-in", "token", scheduler.RunRecord{}, false)}
 			d.tick("interval")
 			got := series(t, reg)
 			for _, r := range []string{rejectFull, rejectClosing} {

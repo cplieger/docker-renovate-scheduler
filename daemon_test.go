@@ -17,7 +17,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/health/v2"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
 	"github.com/cplieger/go/slogx/capture"
@@ -137,7 +137,7 @@ func TestExecutor_RepositoryErrorsFailOnlyAfterTheGrace(t *testing.T) {
 	if out := run(); !out.OK || out.Reason != toleratedReason {
 		t.Fatalf("first repository error = ok %v reason %q, want ok with %q", out.OK, out.Reason, toleratedReason)
 	}
-	if !d.marker.Healthy() {
+	if !d.status.Healthy() {
 		t.Error("health unhealthy after a tolerated repository error, want it untouched")
 	}
 	if fi, err := os.Stat(markerPath); err != nil || !fi.ModTime().After(old) {
@@ -151,7 +151,7 @@ func TestExecutor_RepositoryErrorsFailOnlyAfterTheGrace(t *testing.T) {
 	if out := run(); out.OK || out.Reason != escalatedReason {
 		t.Fatalf("repository error past the grace = ok %v reason %q, want a failure with %q", out.OK, out.Reason, escalatedReason)
 	}
-	if d.marker.Healthy() {
+	if d.status.Healthy() {
 		t.Error("health healthy after repository errors lasting the grace, want unhealthy")
 	}
 	if n := rec.CountLevel(slog.LevelError, ""); n != 1 {
@@ -177,8 +177,8 @@ func TestExecutor_RepositoryErrorsFailOnlyAfterTheGrace(t *testing.T) {
 
 	outcome = runComplete
 	run()
-	if !d.failingSince.IsZero() || !d.marker.Healthy() {
-		t.Errorf("after a good full pass: failingSince = %v, healthy = %v; want zero and healthy", d.failingSince, d.marker.Healthy())
+	if !d.failingSince.IsZero() || !d.status.Healthy() {
+		t.Errorf("after a good full pass: failingSince = %v, healthy = %v; want zero and healthy", d.failingSince, d.status.Healthy())
 	}
 	outcome = runRepositoryError
 	if out := run(); !out.OK {
@@ -191,7 +191,7 @@ func TestExecutor_RepositoryErrorsFailOnlyAfterTheGrace(t *testing.T) {
 	if out := run(); !out.OK {
 		t.Error("repository error within the grace after a hard failure = failed, want tolerated")
 	}
-	if d.marker.Healthy() {
+	if d.status.Healthy() {
 		t.Error("a tolerated repository error re-greened health after a hard failure, want it left unhealthy")
 	}
 
@@ -266,7 +266,7 @@ func TestExecutor_FirstFailureIsToleratedHoweverLongItsRunLasted(t *testing.T) {
 			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 			read := logLines(t)
 			d, _ := newBareDaemon(t, recordingRunner("true", nil))
-			d.health.Set(true)
+			d.status.Set(true)
 			c.setup(t, d)
 			lasted := failureGrace + 30*time.Minute
 			d.now = func() time.Time { return time.Now().Add(-lasted) }
@@ -284,7 +284,7 @@ func TestExecutor_FirstFailureIsToleratedHoweverLongItsRunLasted(t *testing.T) {
 			if !out.OK || out.Reason != toleratedReason {
 				t.Errorf("outcome = ok %v reason %q, want ok with %q", out.OK, out.Reason, toleratedReason)
 			}
-			if !d.marker.Healthy() {
+			if !d.status.Healthy() {
 				t.Error("health unhealthy after the first failure, want it kept")
 			}
 			if warns := withLevel(lines, "WARN", c.msg); len(warns) != 1 {
@@ -623,7 +623,7 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 	}
 
 	cancel()              // SIGTERM lands mid-run
-	d.health.BeginDrain() // runDaemon's immediate unhealthy transition
+	d.status.BeginDrain() // runDaemon's immediate unhealthy transition
 	d.queue.Close()       // daemon stops admission
 	release()             // the in-flight run finishes its pass
 
@@ -635,7 +635,7 @@ func TestExecutor_ShutdownCancelsQueuedButFinishesInFlight(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("in-flight result not delivered")
 	}
-	if d.marker.Healthy() {
+	if d.status.Healthy() {
 		t.Error("health marker became healthy after shutdown began (the draining run's completion must not overwrite the shutdown state)")
 	}
 	select {
@@ -728,7 +728,7 @@ func TestExecutor_PreflightTimeoutDoesNotClaimBaseDirUnwritable(t *testing.T) {
 // submission (queue full) is logged and skipped — the tick must not panic or
 // block; the next interval provides freshness.
 func TestTick_SkipsWhenQueueRejects(t *testing.T) {
-	d := &daemon{queue: trigger.NewQueue[runPayload](0), metrics: testMetrics(health.NewMarker(filepath.Join(t.TempDir(), "marker")))} // zero capacity: every submit is rejected
+	d := &daemon{queue: trigger.NewQueue[runPayload](0), metrics: testMetrics(health.NewStatus())} // zero capacity: every submit is rejected
 	done := make(chan struct{})
 	go func() { defer close(done); d.tick("interval") }()
 	select {
@@ -912,7 +912,7 @@ func TestRunDaemon_BootFailureUpdatesMarkerOnlyAfterAcquiringSocket(t *testing.T
 	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
 
 	t.Run("unwritable base dir", func(t *testing.T) {
-		// A previous life probed healthy: docker restart preserves /tmp.
+		// A previous life left a healthy marker.
 		if err := os.WriteFile(healthMarkerPath, nil, 0o600); err != nil {
 			t.Fatalf("setup previous life's marker: %v", err)
 		}
@@ -1018,7 +1018,7 @@ func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	invocations := 0
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
-	d.marker.Set(true) // a healthy pre-containment state the halt must clear
+	d.status.Set(true) // a healthy pre-containment state the halt must clear
 	d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
 		invocations++
 		return runResult{outcome: runContained} // the group survived the sweep
@@ -1056,7 +1056,7 @@ func TestExecutor_HaltsAdmissionAfterSurvivingGroup(t *testing.T) {
 	if invocations != 1 {
 		t.Errorf("runOnce invoked %d times, want 1: no run may start after a surviving group", invocations)
 	}
-	if d.marker.Healthy() {
+	if d.status.Healthy() {
 		t.Error("health marker healthy after containment loss, want unhealthy")
 	}
 	select {
@@ -1095,15 +1095,14 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("trigger.Listen(%q) = %v", sock, err)
 	}
-	marker := health.NewMarker(healthMarkerPath)
+	st := health.NewStatus(health.WithMarker(healthMarkerPath))
 	d := &daemon{
 		queue:     trigger.NewQueue[runPayload](queueCapacity),
-		marker:    marker,
-		health:    health.NewLatch(marker),
+		status:    st,
 		verifier:  newBaseDirVerifier(),
 		stamp:     scheduler.NewStamp(stampPath()),
 		completed: scheduler.NewStamp(completedStampPath()),
-		metrics:   testMetrics(marker),
+		metrics:   testMetrics(st),
 		newCmd:    recordingRunner("true", nil),
 		runOnce:   runOnce,
 		now:       time.Now,
@@ -1199,15 +1198,14 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("trigger.Listen(%q) = %v", sock, err)
 	}
-	marker := health.NewMarker(healthMarkerPath)
+	st := health.NewStatus(health.WithMarker(healthMarkerPath))
 	d := &daemon{
 		queue:     trigger.NewQueue[runPayload](queueCapacity),
-		marker:    marker,
-		health:    health.NewLatch(marker),
+		status:    st,
 		verifier:  newBaseDirVerifier(),
 		stamp:     scheduler.NewStamp(stampPath()),
 		completed: scheduler.NewStamp(completedStampPath()),
-		metrics:   testMetrics(marker),
+		metrics:   testMetrics(st),
 		newCmd:    recordingRunner("true", nil),
 		runOnce:   runOnce,
 		now:       time.Now,

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/health/v2"
 	"github.com/cplieger/go/measure"
 	"github.com/cplieger/go/scheduler"
 )
@@ -82,8 +82,7 @@ func seriesNames(expr string) []string {
 func exportedFamilies(t *testing.T) map[string][]string {
 	t.Helper()
 	dir := t.TempDir()
-	marker := health.NewMarker(filepath.Join(dir, "healthy"))
-	reg, m := newMetricsRegistry(marker, "built-in", "token", scheduler.NewStamp(filepath.Join(dir, "completed")))
+	reg, m := newMetricsRegistry(health.NewStatus(), "built-in", "token", scheduler.NewStamp(filepath.Join(dir, "completed")))
 	now := time.Now()
 	for _, scope := range runScopes {
 		m.observe(scope, runVerdict{result: resultComplete, ok: true}, time.Second, now, time.Time{})

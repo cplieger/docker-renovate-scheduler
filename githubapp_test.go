@@ -29,7 +29,6 @@ import (
 
 	"github.com/cplieger/forgeapi/v2"
 	"github.com/cplieger/forgeapi/v2/creds"
-	"github.com/cplieger/go/health"
 	"github.com/cplieger/go/measure"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
@@ -676,7 +675,7 @@ func TestExecute_TokenFailureFailsTheRunWithoutStartingRenovate(t *testing.T) {
 			rec := capture.Default(t)
 			var started [][]string
 			d := appModeDaemon(t, recordingRunner("true", &started), tt.handler)
-			d.health.Set(true)
+			d.status.Set(true)
 
 			j := newJob("interval", nil, nil)
 			d.execute(t.Context(), t.Context().Done(), j)
@@ -688,7 +687,7 @@ func TestExecute_TokenFailureFailsTheRunWithoutStartingRenovate(t *testing.T) {
 			if len(started) != 0 {
 				t.Errorf("renovate started %d times, want 0 without a token", len(started))
 			}
-			if d.marker.Healthy() {
+			if d.status.Healthy() {
 				t.Error("health marker healthy after a token failure, want unhealthy")
 			}
 			if !rec.AttrContains("github app token request failed", "hint", tt.wantHint) {
@@ -794,7 +793,7 @@ func TestExecute_TokenOutageIsToleratedForTheGrace(t *testing.T) {
 		func(w http.ResponseWriter, _ *http.Request) {
 			writeJSON(w, http.StatusServiceUnavailable, `{"message":"unavailable"}`)
 		}, forgeapi.WithRetries(0))
-	d.health.Set(true)
+	d.status.Set(true)
 	run := func() trigger.Result {
 		t.Helper()
 		j := newJob("interval", nil, nil)
@@ -805,7 +804,7 @@ func TestExecute_TokenOutageIsToleratedForTheGrace(t *testing.T) {
 	if out := run(); !out.OK || out.Reason != toleratedReason {
 		t.Fatalf("token outage = ok %v reason %q, want ok with %q", out.OK, out.Reason, toleratedReason)
 	}
-	if !d.marker.Healthy() {
+	if !d.status.Healthy() {
 		t.Error("health unhealthy after a tolerated token outage, want it untouched")
 	}
 
@@ -813,7 +812,7 @@ func TestExecute_TokenOutageIsToleratedForTheGrace(t *testing.T) {
 	if out := run(); out.OK || out.Reason != mintFailedReason {
 		t.Errorf("token outage past the grace = ok %v reason %q, want a failure with %q", out.OK, out.Reason, mintFailedReason)
 	}
-	if d.marker.Healthy() {
+	if d.status.Healthy() {
 		t.Error("health healthy after a token outage lasting the grace, want unhealthy")
 	}
 	if len(started) != 0 {
@@ -899,7 +898,7 @@ func TestExecute_ShutdownDuringARateLimitWaitCancelsTheRun(t *testing.T) {
 		handler, asked := rateLimitedGitHub(1)
 		d := appModeDaemon(t, nil, handler)
 		reg := measure.NewRegistry(metricsPrefix)
-		d.metrics = newRunMetrics(reg, d.marker, "external", "app", scheduler.RunRecord{}, false)
+		d.metrics = newRunMetrics(reg, d.status, "external", "app", scheduler.RunRecord{}, false)
 		var runs int
 		d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
 			runs++
@@ -935,176 +934,106 @@ func TestExecute_ShutdownDuringARateLimitWaitCancelsTheRun(t *testing.T) {
 
 // TestExecute_ARateLimitWaitKeepsHealthAsItWas covers a wait that outlasts
 // the built-in schedule's lease, then a run lasting most of its timeout:
-// /healthz answers through both as before the run, 200 for a healthy marker
-// written near the lease's end and 503 for an absent one. It runs on the real
-// clock, because the lease reads the marker file's modification time.
+// /healthz answers through both as before the run, 200 for a healthy verdict
+// set near the lease's end and 503 for an unhealthy one.
 func TestExecute_ARateLimitWaitKeepsHealthAsItWas(t *testing.T) {
 	const (
 		interval   = 100 * time.Millisecond
 		runTimeout = 1200 * time.Millisecond
 		retryAfter = 2 * time.Second
-		// age lapses the marker inside the wait's first half lease, before the
+		// age lapses the verdict inside the wait's first half lease, before the
 		// first periodic refresh.
 		age = time.Second
 		// runLasts plus the time since the wait's last half-lease refresh,
 		// 600ms before its end, passes the lease, so only a refresh at the
-		// wait's end keeps the marker fresh through the run.
+		// wait's end keeps the verdict fresh through the run.
 		runLasts = 1100 * time.Millisecond
 	)
-	// The wait refreshes on whatever lease the daemon holds. The token-mode
-	// figure keeps it shorter than the wait, so this runs on the real clock.
 	lease := runLease(interval, true, runTimeout, false)
 	tests := []struct {
 		name    string
-		marker  string
+		healthy bool
 		outcome runOutcome
 		want    int
 	}{
-		{name: "a healthy marker stays fresh", marker: "aged", outcome: runComplete, want: http.StatusOK},
-		{name: "an absent marker stays absent", marker: "failed", outcome: runFailed, want: http.StatusServiceUnavailable},
+		{name: "a healthy verdict stays fresh", healthy: true, outcome: runComplete, want: http.StatusOK},
+		{name: "an unhealthy verdict stays unhealthy", outcome: runFailed, want: http.StatusServiceUnavailable},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-			waited := make(chan struct{})
-			var asked atomic.Int32
-			d, markerPath := newBareDaemon(t, nil)
-			d.tokens = fakeGitHub(t, testInstallation, func(w http.ResponseWriter, _ *http.Request) {
-				switch asked.Add(1) {
-				case 1:
-					w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
-					writeJSON(w, http.StatusTooManyRequests, `{"message":"You have exceeded a secondary rate limit"}`)
-					return
-				case 2:
-					close(waited)
+			synctest.Test(t, func(t *testing.T) {
+				waited := make(chan struct{})
+				var asked atomic.Int32
+				d, _ := newBareDaemon(t, nil)
+				d.tokens = fakeGitHub(t, testInstallation, func(w http.ResponseWriter, _ *http.Request) {
+					switch asked.Add(1) {
+					case 1:
+						w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
+						writeJSON(w, http.StatusTooManyRequests, `{"message":"You have exceeded a secondary rate limit"}`)
+						return
+					case 2:
+						close(waited)
+					}
+					writeJSON(w, http.StatusCreated, tokenBody())
+				}, forgeapi.WithRetries(0))
+				d.installationID = testInstallation
+				d.timeout = runTimeout
+				var ran time.Duration
+				d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
+					began := time.Now()
+					time.Sleep(runLasts)
+					ran = time.Since(began)
+					return runResult{outcome: tt.outcome}
 				}
-				writeJSON(w, http.StatusCreated, tokenBody())
-			}, forgeapi.WithRetries(0))
-			d.installationID = testInstallation
-			d.timeout = runTimeout
-			var ran time.Duration
-			d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
-				began := time.Now()
-				time.Sleep(runLasts)
-				ran = time.Since(began)
-				return runResult{outcome: tt.outcome}
-			}
-			d.lease = lease
-			setMarker(t, d.marker, markerPath, tt.marker, age)
-			healthz := newHealthz(d.marker, lease)
-			start := time.Now()
+				d.lease = lease
+				healthz := newHealthz(d.status, lease)
+				d.status.Set(tt.healthy)
+				time.Sleep(age)
+				start := time.Now()
 
-			j := newJob("interval", nil, nil)
-			done := make(chan struct{})
-			go func() { defer close(done); d.execute(t.Context(), t.Context().Done(), j) }()
-			probe := time.NewTicker(50 * time.Millisecond)
-			defer probe.Stop()
-			var probes, wrong, firstCode int
-			var waitedFor, firstAt time.Duration
-			var firstBody string
-			endOfWait := waited
-		probing:
-			for {
-				select {
-				case <-endOfWait:
-					waitedFor, endOfWait = time.Since(start), nil
-				case <-done:
-					break probing
-				case <-probe.C:
-					rec := httptest.NewRecorder()
-					healthz.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-					probes++
-					if rec.Code != tt.want {
-						if wrong == 0 {
-							firstAt, firstCode, firstBody = time.Since(start), rec.Code, rec.Body.String()
+				j := newJob("interval", nil, nil)
+				done := make(chan struct{})
+				go func() { defer close(done); d.execute(t.Context(), t.Context().Done(), j) }()
+				probe := time.NewTicker(50 * time.Millisecond)
+				defer probe.Stop()
+				var probes, wrong, firstCode int
+				var waitedFor, firstAt time.Duration
+				var firstBody string
+				endOfWait := waited
+			probing:
+				for {
+					select {
+					case <-endOfWait:
+						waitedFor, endOfWait = time.Since(start), nil
+					case <-done:
+						break probing
+					case <-probe.C:
+						rec := httptest.NewRecorder()
+						healthz.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+						probes++
+						if rec.Code != tt.want {
+							if wrong == 0 {
+								firstAt, firstCode, firstBody = time.Since(start), rec.Code, rec.Body.String()
+							}
+							wrong++
 						}
-						wrong++
 					}
 				}
-			}
-			<-j.Result()
+				<-j.Result()
 
-			if waitedFor <= lease {
-				t.Fatalf("the wait lasted %s, within the %s lease, so it tests nothing", waitedFor, lease)
-			}
-			if ran >= lease {
-				t.Fatalf("the run after the wait lasted %s, past the %s lease, so no refresh could keep the marker fresh", ran, lease)
-			}
-			if wrong > 0 {
-				t.Errorf("/healthz answered other than %d on %d of %d probes during the wait and the run after it; the first, %s in: %d %s",
-					tt.want, wrong, probes, firstAt.Round(50*time.Millisecond), firstCode, firstBody)
-			}
+				if waitedFor <= lease {
+					t.Fatalf("the wait lasted %s, within the %s lease, so it tests nothing", waitedFor, lease)
+				}
+				if ran >= lease {
+					t.Fatalf("the run after the wait lasted %s, past the %s lease, so no refresh could keep the verdict fresh", ran, lease)
+				}
+				if wrong > 0 {
+					t.Errorf("/healthz answered other than %d on %d of %d probes during the wait and the run after it; the first, %s in: %d %s",
+						tt.want, wrong, probes, firstAt, firstCode, firstBody)
+				}
+			})
 		})
-	}
-}
-
-// TestRunDaemon_HealthzAllowsTheTokenRequestInAppMode boots App mode on the
-// built-in schedule and ages the healthy marker its startup run left: past the
-// token-mode lease but inside the token request's budget /healthz answers 200,
-// and past that it reports a stuck schedule. The handler reads the daemon's own
-// lease, the one its rate-limit wait refreshes on, so this also covers that
-// wiring. Not parallel: it replaces newTokenSource and uses healthMarkerPath.
-func TestRunDaemon_HealthzAllowsTheTokenRequestInAppMode(t *testing.T) {
-	const (
-		interval   = time.Hour
-		runTimeout = 30 * time.Minute
-		tokenLease = 2*interval + runTimeout
-	)
-	addr := freeAddr(t)
-	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	t.Setenv("RUN_INTERVAL", interval.String())
-	t.Setenv("RUN_TIMEOUT", runTimeout.String())
-	t.Setenv("METRICS_LISTEN_ADDR", addr)
-	t.Setenv(envAppID, strconv.Itoa(testAppID))
-	t.Setenv(envAppInstallationID, strconv.Itoa(testInstallation))
-	t.Setenv(envAppKeyFile, writeKeyFile(t, false))
-	t.Setenv(envAppKeyInline, "")
-	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
-	github := handlerTransport(func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusCreated, tokenBody())
-	})
-	built := newTokenSource
-	newTokenSource = func(app *appConfig, opts ...forgeapi.Option) (*creds.AppSource, error) {
-		return built(app, append(opts, forgeapi.WithWireTransport(github), forgeapi.WithRetries(0))...)
-	}
-	t.Cleanup(func() { newTokenSource = built })
-
-	cancel, done, runErr := startDaemonForTest(t, recordingRunner("true", nil))
-	booted := time.After(10 * time.Second)
-	for !health.Inspect(healthMarkerPath).Healthy() {
-		select {
-		case <-done:
-			t.Fatalf("runDaemon returned before its startup run finished: %v", *runErr)
-		case <-booted:
-			t.Fatal("the startup run left no healthy marker within 10s")
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	for _, tc := range []struct {
-		name string
-		age  time.Duration
-		want int
-	}{
-		{name: "inside the token request's budget", age: tokenLease + time.Minute, want: http.StatusOK},
-		{name: "past it", age: tokenLease + tokenMintBudget + time.Minute, want: http.StatusServiceUnavailable},
-	} {
-		aged := time.Now().Add(-tc.age)
-		if err := os.Chtimes(healthMarkerPath, aged, aged); err != nil {
-			t.Fatal(err)
-		}
-		code, _, body := getHealthz(t, client, "http://"+addr+"/healthz")
-		if code != tc.want {
-			t.Errorf("GET /healthz on a healthy marker %s old (%s) = %d %q, want %d", tc.age, tc.name, code, body.Reasons, tc.want)
-		}
-		if tc.want != http.StatusOK && (len(body.Reasons) != 1 || body.Reasons[0] != reasonStuck) {
-			t.Errorf("GET /healthz %s lists %q, want only %q", tc.name, body.Reasons, reasonStuck)
-		}
-	}
-	cancel()
-	awaitDaemonStopped(t, done)
-	if err := *runErr; err != nil {
-		t.Errorf("runDaemon() = %v, want nil", err)
 	}
 }
 

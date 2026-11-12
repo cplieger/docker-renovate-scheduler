@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/health/v2"
 	"github.com/cplieger/go/measure"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
@@ -24,16 +24,15 @@ func newBareDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, strin
 	t.Helper()
 	dir := t.TempDir()
 	markerPath := filepath.Join(dir, "marker")
-	marker := health.NewMarker(markerPath)
+	st := health.NewStatus(health.WithMarker(markerPath))
 	stampFile := filepath.Join(dir, stampName)
 	d := &daemon{
 		queue:     trigger.NewQueue[runPayload](queueCapacity),
-		marker:    marker,
-		health:    health.NewLatch(marker),
+		status:    st,
 		verifier:  newBaseDirVerifier(),
 		stamp:     scheduler.NewStamp(stampFile),
 		completed: scheduler.NewStamp(filepath.Join(dir, completedStampName)),
-		metrics:   testMetrics(marker),
+		metrics:   testMetrics(st),
 		newCmd:    runner,
 		runOnce:   runRenovateOnce,
 		now:       time.Now,
@@ -45,8 +44,8 @@ func newBareDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, strin
 }
 
 // testMetrics returns run metrics on a registry of their own.
-func testMetrics(marker *health.Marker) *runMetrics {
-	return newRunMetrics(measure.NewRegistry(metricsPrefix), marker, "external", "token", scheduler.RunRecord{}, false)
+func testMetrics(st *health.Status) *runMetrics {
+	return newRunMetrics(measure.NewRegistry(metricsPrefix), st, "external", "token", scheduler.RunRecord{}, false)
 }
 
 // maxSunPath is the longest usable unix-socket path: Linux sun_path is

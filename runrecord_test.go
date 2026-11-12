@@ -208,7 +208,7 @@ func runThrough(t *testing.T, p *runPath) (trigger.Result, []map[string]string, 
 func runOn(t *testing.T, d *daemon, p *runPath) (trigger.Result, []map[string]string, bool) {
 	t.Helper()
 	read := logLines(t)
-	d.health.Set(true)
+	d.status.Set(true)
 	if p.setup != nil {
 		p.setup(t, d)
 	}
@@ -224,7 +224,7 @@ func runOn(t *testing.T, d *daemon, p *runPath) (trigger.Result, []map[string]st
 	d.runJobs(ctx)
 	cancel()
 	out := <-j.Result()
-	return out, recordsNamed(t, read(), runFinishedMsg), d.marker.Healthy()
+	return out, recordsNamed(t, read(), runFinishedMsg), d.status.Healthy()
 }
 
 // TestEveryCompletedRunWritesOneRunFinishedRecord is the record's contract:
@@ -309,7 +309,7 @@ func TestARateLimitedRunCountsItsFailureFromTheWaitsEnd(t *testing.T) {
 				read := logLines(t)
 				d, _ := newBareDaemon(t, nil)
 				reg := measure.NewRegistry(metricsPrefix)
-				d.metrics = newRunMetrics(reg, d.marker, "external", "app", scheduler.RunRecord{}, false)
+				d.metrics = newRunMetrics(reg, d.status, "external", "app", scheduler.RunRecord{}, false)
 				var asked atomic.Int32
 				d.tokens = fakeGitHub(t, testInstallation, func(w http.ResponseWriter, r *http.Request) {
 					if asked.Add(1) == 1 {
@@ -323,7 +323,7 @@ func TestARateLimitedRunCountsItsFailureFromTheWaitsEnd(t *testing.T) {
 				d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
 					return runResult{outcome: tt.outcome}
 				}
-				d.health.Set(true)
+				d.status.Set(true)
 				start := time.Now()
 
 				j := newJob("interval", nil, nil)
