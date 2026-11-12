@@ -29,7 +29,7 @@ import (
 
 	"github.com/cplieger/forgeapi/v2"
 	"github.com/cplieger/forgeapi/v2/creds"
-	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/health/v2"
 	"github.com/cplieger/go/measure"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"

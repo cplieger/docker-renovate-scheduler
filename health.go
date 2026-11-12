@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/health/v2"
 )
 
 const healthMarkerPath = health.DefaultPath

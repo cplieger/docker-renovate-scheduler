@@ -4,8 +4,8 @@ github.com/cplieger/go/envx v1.1.0 h1:AfJm5r7oR3zHmpplYwpNQL6yB7b50bmNAaOAijeG9a
 github.com/cplieger/go/envx v1.1.0/go.mod h1:USzzGAzdJGsU8ZYRmVaMGvKzgEGDDhXvUUsckSv4VfM=
 github.com/cplieger/go/filesafe v1.1.0 h1:zCInOHIkszZQKNxIQvPgaFg592E5J27+/2hfbPmzEfA=
 github.com/cplieger/go/filesafe v1.1.0/go.mod h1:ji4TnJD8S8kgKelJlCQxlHyX0UXQGTW1ylSBqH5xqhI=
-github.com/cplieger/go/health v1.1.0 h1:vG4wM0JVBXvDXxGm9fnhyn8yA0BuiyB99LE3CPulA4s=
-github.com/cplieger/go/health v1.1.0/go.mod h1:7eOprE7L510iSRZBJabPD4V06TftKymjdtLnLTZPTiY=
+github.com/cplieger/go/health/v2 v2.0.0 h1:WHZiSYIyvmaFvkohJopPptEg9oW4QxRSV5HUxaeFUKo=
+github.com/cplieger/go/health/v2 v2.0.0/go.mod h1:Dmp78r+0ZHF2xMfOQqZ7c5pBiZF1el3QhLHA1y9um2A=
 github.com/cplieger/go/httpcache v1.1.0 h1:v5BOjRilWhWMKvi9ygNgfw/q/SufZLcO6y/CSHzk8Gs=
 github.com/cplieger/go/httpcache v1.1.0/go.mod h1:RRV3+h+xRN2W+/0GemF1wEqKLEun6sqPleyBI6zDcL4=
 github.com/cplieger/go/httpclient v1.2.0 h1:E+lbIpiNkUkcq3fxdMDYn116cwx6tU1XWmn4mDdBGU0=
