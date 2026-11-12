@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cplieger/go/health/v2"
 	"github.com/cplieger/go/httpserver"
 	"github.com/cplieger/go/measure"
 	"github.com/cplieger/go/scheduler"
@@ -53,7 +52,7 @@ type runMetrics struct {
 // label value at 0, both failure clocks at 0, and the full scope's last
 // success from last, the record of the last complete full run that survived
 // a restart. The per-run series of a scope appear at its first run.
-func newRunMetrics(reg *measure.Registry, st *health.Status, mode, auth string, last scheduler.RunRecord, known bool) *runMetrics {
+func newRunMetrics(reg *measure.Registry, mode, auth string, last scheduler.RunRecord, known bool) *runMetrics {
 	scope := []string{keyScope}
 	m := &runMetrics{
 		runs: measure.NewLabeledCounter("runs_total",
@@ -77,13 +76,8 @@ func newRunMetrics(reg *measure.Registry, st *health.Status, mode, auth string, 
 		info: measure.NewLabeledGauge("info",
 			"Always 1; the labels name the scheduling mode and the GitHub auth mode.", []string{"mode", "auth"}),
 	}
-	healthyDesc := measure.NewGaugeDesc("healthy",
-		"1 while the health verdict is healthy, else 0.", nil)
-	healthy := measure.NewCollector(func(_ context.Context, e *measure.Emitter) {
-		e.Emit(healthyDesc, float64(boolDigit(st.Healthy())))
-	}, healthyDesc)
 	reg.MustRegister(m.runs, m.lastOK, m.lastResult, m.lastExitCode, m.lastRun, m.lastSuccess,
-		m.lastDuration, m.failingSince, m.rejected, m.info, healthy)
+		m.lastDuration, m.failingSince, m.rejected, m.info)
 	for _, s := range runScopes {
 		for _, r := range runResults {
 			m.runs.Add(0, s, r)
@@ -101,10 +95,10 @@ func newRunMetrics(reg *measure.Registry, st *health.Status, mode, auth string, 
 
 // newMetricsRegistry builds the registry the metrics page serves, seeded from
 // the completed-run stamp. alert_parity_test.go builds it the same way.
-func newMetricsRegistry(st *health.Status, mode, auth string, completed *scheduler.Stamp) (*measure.Registry, *runMetrics) {
+func newMetricsRegistry(mode, auth string, completed *scheduler.Stamp) (*measure.Registry, *runMetrics) {
 	reg := measure.NewRegistry(metricsPrefix)
 	last, known := completed.Last()
-	return reg, newRunMetrics(reg, st, mode, auth, last, known)
+	return reg, newRunMetrics(reg, mode, auth, last, known)
 }
 
 func unixSeconds(t time.Time) float64 {

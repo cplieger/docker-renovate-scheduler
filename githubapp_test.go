@@ -898,7 +898,7 @@ func TestExecute_ShutdownDuringARateLimitWaitCancelsTheRun(t *testing.T) {
 		handler, asked := rateLimitedGitHub(1)
 		d := appModeDaemon(t, nil, handler)
 		reg := measure.NewRegistry(metricsPrefix)
-		d.metrics = newRunMetrics(reg, d.status, "external", "app", scheduler.RunRecord{}, false)
+		d.metrics = newRunMetrics(reg, "external", "app", scheduler.RunRecord{}, false)
 		var runs int
 		d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
 			runs++

@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/go/health/v2"
 	"github.com/cplieger/go/measure"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
@@ -252,8 +251,8 @@ func TestRunSetsEverySeriesToItsRecord(t *testing.T) {
 			t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 			d, _ := newBareDaemon(t, recordingRunner("true", nil))
 			reg := measure.NewRegistry(metricsPrefix)
-			d.metrics = newRunMetrics(reg, d.status, "external", "token", scheduler.RunRecord{}, false)
-			_, records, healthy := runOn(t, d, p)
+			d.metrics = newRunMetrics(reg, "external", "token", scheduler.RunRecord{}, false)
+			_, records, _ := runOn(t, d, p)
 			if len(records) != 1 {
 				t.Fatalf("wrote %d run finished records, want 1", len(records))
 			}
@@ -297,8 +296,10 @@ func TestRunSetsEverySeriesToItsRecord(t *testing.T) {
 			if failing := rec["result"] == resultRepositoryError || rec["result"] == resultTokenUnavailable; failing != (clock > 0) {
 				t.Errorf("failing_since_timestamp_seconds = %v for result %s", clock, rec["result"])
 			}
-			check(seriesKey("healthy"), float64(boolDigit(healthy)))
 			check(seriesKey("info", "external", "token"), 1)
+			if v, ok := got[seriesKey("healthy")]; ok {
+				t.Errorf("the page serves %s = %v; the health verdict is /healthz's, not a series", seriesKey("healthy"), v)
+			}
 		})
 	}
 }
@@ -319,7 +320,7 @@ func TestRejectedRunsCountByReason(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := measure.NewRegistry(metricsPrefix)
-			d := &daemon{queue: tt.queue(), metrics: newRunMetrics(reg, health.NewStatus(), "built-in", "token", scheduler.RunRecord{}, false)}
+			d := &daemon{queue: tt.queue(), metrics: newRunMetrics(reg, "built-in", "token", scheduler.RunRecord{}, false)}
 			d.tick("interval")
 			got := series(t, reg)
 			for _, r := range []string{rejectFull, rejectClosing} {

@@ -113,7 +113,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	}
 
 	completed := scheduler.NewStamp(completedStampPath())
-	reg, metrics := newMetricsRegistry(st, modeName(scheduleEnabled), authName(app), completed)
+	reg, metrics := newMetricsRegistry(modeName(scheduleEnabled), authName(app), completed)
 	metricsAddr := metricsListenAddr()
 	d := &daemon{
 		queue:          trigger.NewQueue[runPayload](queueCapacity),

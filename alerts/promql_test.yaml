@@ -70,7 +70,7 @@ tests:
   - name: a fresh install with no completed run has no failed run
     interval: 1m
     input_series:
-      - series: 'renovate_scheduler_healthy{job="renovate", instance="renovate:9470"}'
+      - series: 'renovate_scheduler_info{job="renovate", instance="renovate:9470", mode="built-in", auth="token"}'
         values: "1x10"
     alert_rule_test:
       - eval_time: 5m
