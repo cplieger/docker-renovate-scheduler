@@ -116,17 +116,38 @@ func getMetrics(t *testing.T, addr string) (int, string) {
 	return status, string(body)
 }
 
-// countListens swaps listenTCP for the test and counts the binds.
-func countListens(t *testing.T) *int {
+// tcpListeners counts this process's listening TCP sockets, read from the
+// kernel's socket tables, so a test sees a bind however the code makes it.
+func tcpListeners(t *testing.T) int {
 	t.Helper()
-	n := 0
-	prev := listenTCP
-	listenTCP = func(network, addr string) (net.Listener, error) {
-		n++
-		return prev(network, addr)
+	fds, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("no /proc/self/fd: %v", err)
 	}
-	t.Cleanup(func() { listenTCP = prev })
-	return &n
+	ours := map[string]bool{}
+	for _, fd := range fds {
+		target, err := os.Readlink("/proc/self/fd/" + fd.Name())
+		if inode, ok := strings.CutPrefix(target, "socket:["); err == nil && ok {
+			ours[strings.TrimSuffix(inode, "]")] = true
+		}
+	}
+	const stateListen = "0A"
+	n := 0
+	for _, table := range []string{"/proc/self/net/tcp", "/proc/self/net/tcp6"} {
+		raw, err := os.ReadFile(table)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range strings.Split(string(raw), "\n")[1:] {
+			if f := strings.Fields(row); len(f) > 9 && f[3] == stateListen && ours[f[9]] {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // freeAddr returns a loopback address nothing listens on.
@@ -147,13 +168,13 @@ func freeAddr(t *testing.T) string {
 // port. Not parallel: it uses the package-global health marker path.
 func TestDaemonWithoutMetricsAddressOpensNoListener(t *testing.T) {
 	daemonEnv(t, "")
-	binds := countListens(t)
+	before := tcpListeners(t)
 	sock := startDaemon(t)
 	if code := runClient(sock, nil); code != 0 {
 		t.Errorf("runClient() = %d, want 0", code)
 	}
-	if *binds != 0 {
-		t.Errorf("the daemon bound %d TCP listeners with METRICS_LISTEN_ADDR unset, want none", *binds)
+	if got := tcpListeners(t) - before; got != 0 {
+		t.Errorf("the daemon opened %d TCP listeners with METRICS_LISTEN_ADDR unset, want none", got)
 	}
 }
 

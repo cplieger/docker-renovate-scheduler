@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strconv"
 	"testing"
 	"testing/synctest"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/cplieger/go/health/v2"
 	"github.com/cplieger/go/measure"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 // healthzBody is the JSON body every cplieger /healthz answers with.
@@ -126,6 +129,49 @@ func TestServeMetricsServesHealthz(t *testing.T) {
 			t.Errorf("POST /healthz = %d, want 405", resp.StatusCode)
 		}
 	})
+}
+
+// TestServeMetricsLogsStraysButNotScrapes pins the listener's access log: a
+// scrape and a probe log at Debug, any other path one INFO "http" line. Not
+// parallel: it swaps slog.Default.
+func TestServeMetricsLogsStraysButNotScrapes(t *testing.T) {
+	rec := capture.Default(t)
+	st := health.NewStatus()
+	addr := freeAddr(t)
+	stop, err := serveMetrics(t.Context(), addr, measure.NewRegistry(metricsPrefix), newHealthz(st, time.Hour))
+	if err != nil {
+		t.Fatalf("serveMetrics(%q) error = %v", addr, err)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, path := range []string{"/metrics", "/healthz", "/stray"} {
+		resp, err := client.Get("http://" + addr + path)
+		if err != nil {
+			stop()
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+	}
+	// The shutdown waits for every handler, so each access line is written.
+	stop()
+
+	lines := map[slog.Level][]string{}
+	for _, r := range rec.Records() {
+		if r.Message != "http" {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "path" {
+				lines[r.Level] = append(lines[r.Level], a.Value.String())
+			}
+			return true
+		})
+	}
+	if got, want := lines[slog.LevelDebug], []string{"/metrics", "/healthz"}; !slices.Equal(got, want) {
+		t.Errorf("Debug access lines = %q, want %q", got, want)
+	}
+	if got, want := lines[slog.LevelInfo], []string{"/stray"}; !slices.Equal(got, want) {
+		t.Errorf("INFO access lines = %q, want %q", got, want)
+	}
 }
 
 // TestHealthzNamesEachFault pins one reason per fault: a failed run reports
