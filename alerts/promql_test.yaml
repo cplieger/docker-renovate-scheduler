@@ -102,7 +102,7 @@ tests:
               scope: full
             exp_annotations:
               summary: "No full Renovate run has completed on schedule"
-              description: "No complete full run by the deadline the built-in schedule sets, two RUN_INTERVAL periods plus one RUN_TIMEOUT (and the token request's budget in GitHub App mode) after the last one or the start; with no deadline (0, external mode), none in 14h. Runs may be failing or tolerated, or the schedule or your own scheduler may have stopped. Runs scoped to repositories do not count.\n"
+              description: "No complete full run by the run deadline, or in 14h while it reads 0 (RUN_INTERVAL=off). Runs may be failing or tolerated, or a scheduler stopped; scoped runs do not count. Check renovate_scheduler_last_run_result and the container log.\n"
       - eval_time: 15h5m
         alertname: RenovateNoRecentRun
         exp_alerts: []
@@ -129,7 +129,7 @@ tests:
               instance: renovate:9470
             exp_annotations:
               summary: "No full Renovate run has completed on schedule"
-              description: "No complete full run by the deadline the built-in schedule sets, two RUN_INTERVAL periods plus one RUN_TIMEOUT (and the token request's budget in GitHub App mode) after the last one or the start; with no deadline (0, external mode), none in 14h. Runs may be failing or tolerated, or the schedule or your own scheduler may have stopped. Runs scoped to repositories do not count.\n"
+              description: "No complete full run by the run deadline, or in 14h while it reads 0 (RUN_INTERVAL=off). Runs may be failing or tolerated, or a scheduler stopped; scoped runs do not count. Check renovate_scheduler_last_run_result and the container log.\n"
 
   - name: the process-start arm follows the app under any scrape job name
     interval: 1m
@@ -153,7 +153,7 @@ tests:
               instance: scheduler:9470
             exp_annotations:
               summary: "No full Renovate run has completed on schedule"
-              description: "No complete full run by the deadline the built-in schedule sets, two RUN_INTERVAL periods plus one RUN_TIMEOUT (and the token request's budget in GitHub App mode) after the last one or the start; with no deadline (0, external mode), none in 14h. Runs may be failing or tolerated, or the schedule or your own scheduler may have stopped. Runs scoped to repositories do not count.\n"
+              description: "No complete full run by the run deadline, or in 14h while it reads 0 (RUN_INTERVAL=off). Runs may be failing or tolerated, or a scheduler stopped; scoped runs do not count. Check renovate_scheduler_last_run_result and the container log.\n"
 
   - name: another job's process start beside a waiting renovate target raises the alert for the renovate target only
     interval: 1m
@@ -176,7 +176,7 @@ tests:
               instance: renovate:9470
             exp_annotations:
               summary: "No full Renovate run has completed on schedule"
-              description: "No complete full run by the deadline the built-in schedule sets, two RUN_INTERVAL periods plus one RUN_TIMEOUT (and the token request's budget in GitHub App mode) after the last one or the start; with no deadline (0, external mode), none in 14h. Runs may be failing or tolerated, or the schedule or your own scheduler may have stopped. Runs scoped to repositories do not count.\n"
+              description: "No complete full run by the run deadline, or in 14h while it reads 0 (RUN_INTERVAL=off). Runs may be failing or tolerated, or a scheduler stopped; scoped runs do not count. Check renovate_scheduler_last_run_result and the container log.\n"
 
   - name: another job's process start never raises RenovateNoRecentRun
     interval: 1m
@@ -245,7 +245,7 @@ tests:
               instance: renovate:9470
             exp_annotations:
               summary: "No full Renovate run has completed on schedule"
-              description: "No complete full run by the deadline the built-in schedule sets, two RUN_INTERVAL periods plus one RUN_TIMEOUT (and the token request's budget in GitHub App mode) after the last one or the start; with no deadline (0, external mode), none in 14h. Runs may be failing or tolerated, or the schedule or your own scheduler may have stopped. Runs scoped to repositories do not count.\n"
+              description: "No complete full run by the run deadline, or in 14h while it reads 0 (RUN_INTERVAL=off). Runs may be failing or tolerated, or a scheduler stopped; scoped runs do not count. Check renovate_scheduler_last_run_result and the container log.\n"
       - eval_time: 2h1m
         alertname: RenovateNoRecentRun
         exp_alerts: []

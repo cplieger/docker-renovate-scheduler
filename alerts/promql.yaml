@@ -1,16 +1,13 @@
-# Alert rules for docker-renovate-scheduler as a Prometheus rule group, for
-# Prometheus, Mimir, vmalert or any ruler that reads Prometheus rules. This file
-# is the alternative to alerts/logql.yaml: load one of the two, not both. The
+# Alert rules for docker-renovate-scheduler as a Prometheus rule group, for any
+# ruler that reads them. Load this file or alerts/logql.yaml, not both. The
 # rules read the page served when METRICS_LISTEN_ADDR is set; scrape it as job
 # `renovate`, the name RenovateDown reads. Thresholds and severity labels are
-# starting points. While the built-in schedule runs, RenovateNoRecentRun reads
-# the run deadline the app derives from RUN_INTERVAL and RUN_TIMEOUT, so it
-# needs no resizing; its 14h window applies only while that deadline reads 0
-# (RUN_INTERVAL=off). Load this file with a release that exports
-# renovate_scheduler_run_deadline_timestamp_seconds: on an older one neither
-# arm of that rule fires. RenovateDown exists only in this file; in
-# alerts/logql.yaml, RenovateDaemonStopped covers a stopped scheduler. Notes
-# are in docs/monitoring.md.
+# starting points. RenovateNoRecentRun reads
+# renovate_scheduler_run_deadline_timestamp_seconds, which sizes itself from
+# your settings; its 14h window applies only while that reads 0
+# (RUN_INTERVAL=off). Load it with a release that exports that gauge.
+# RenovateDown exists only here; RenovateDaemonStopped covers it in
+# alerts/logql.yaml. Notes are in docs/monitoring.md.
 groups:
   - name: renovate
     rules:
@@ -66,9 +63,7 @@ groups:
         annotations:
           summary: "No full Renovate run has completed on schedule"
           description: >
-            No complete full run by the deadline the built-in schedule sets,
-            two RUN_INTERVAL periods plus one RUN_TIMEOUT (and the token
-            request's budget in GitHub App mode) after the last one or the
-            start; with no deadline (0, external mode), none in 14h. Runs may
-            be failing or tolerated, or the schedule or your own scheduler may
-            have stopped. Runs scoped to repositories do not count.
+            No complete full run by the run deadline, or in 14h while it
+            reads 0 (RUN_INTERVAL=off). Runs may be failing or tolerated, or
+            a scheduler stopped; scoped runs do not count. Check
+            renovate_scheduler_last_run_result and the container log.
