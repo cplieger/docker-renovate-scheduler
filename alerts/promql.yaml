@@ -2,11 +2,15 @@
 # Prometheus, Mimir, vmalert or any ruler that reads Prometheus rules. This file
 # is the alternative to alerts/logql.yaml: load one of the two, not both. The
 # rules read the page served when METRICS_LISTEN_ADDR is set; scrape it as job
-# `renovate`, the name RenovateDown reads. Thresholds and severity labels are starting points. The 14h
-# window (50400 seconds) is twice the sum of RUN_INTERVAL and RUN_TIMEOUT at
-# the defaults; resize it to your schedule. RenovateDown exists only in this
-# file; in alerts/logql.yaml, RenovateDaemonStopped covers a stopped scheduler.
-# Notes are in docs/monitoring.md.
+# `renovate`, the name RenovateDown reads. Thresholds and severity labels are
+# starting points. While the built-in schedule runs, RenovateNoRecentRun reads
+# the run deadline the app derives from RUN_INTERVAL and RUN_TIMEOUT, so it
+# needs no resizing; its 14h window applies only while that deadline reads 0
+# (RUN_INTERVAL=off). Load this file with a release that exports
+# renovate_scheduler_run_deadline_timestamp_seconds: on an older one neither
+# arm of that rule fires. RenovateDown exists only in this file; in
+# alerts/logql.yaml, RenovateDaemonStopped covers a stopped scheduler. Notes
+# are in docs/monitoring.md.
 groups:
   - name: renovate
     rules:
@@ -39,22 +43,32 @@ groups:
             renovate_scheduler_last_run_result names the cause, and the
             container log has the detail. Check RENOVATE_TOKEN or the GitHub
             App settings, whether the platform is reachable, and the memory limit.
-      # The full scope's last success is read back from RENOVATE_BASE_DIR after
-      # a restart. With no complete full run on record the series is absent, so
-      # the second arm measures the wait from the process start instead. Every
-      # exporter has a process start time, so that arm keeps only the targets
-      # serving renovate_scheduler_build_info, under any scrape job name.
+      # The deadline decides while it is above 0: each complete full run moves
+      # it one health lease ahead (two intervals plus RUN_TIMEOUT, and the
+      # token request's budget in GitHub App mode), so a stopped schedule and
+      # runs that keep failing both cross it. The 14h window (50400 seconds,
+      # twice the sum of RUN_INTERVAL and RUN_TIMEOUT at the defaults) reads
+      # only while the deadline is 0; size it to your own scheduler. The full
+      # scope's last success is read back from RENOVATE_BASE_DIR after a
+      # restart; with none on record the last branch measures the wait from
+      # the process start, keeping only the targets that serve
+      # renovate_scheduler_build_info, under any scrape job name.
       - alert: RenovateNoRecentRun
         expr: |
-          time() - renovate_scheduler_last_success_timestamp_seconds{scope="full"} > 50400
+          (time() > renovate_scheduler_run_deadline_timestamp_seconds + 900 and renovate_scheduler_run_deadline_timestamp_seconds > 0)
           or
-          (time() - process_start_time_seconds > 50400 and on (job, instance) renovate_scheduler_build_info unless on (job, instance) renovate_scheduler_last_success_timestamp_seconds{scope="full"})
+          (time() - renovate_scheduler_last_success_timestamp_seconds{scope="full"} > 50400 and on (job, instance) renovate_scheduler_run_deadline_timestamp_seconds == 0)
+          or
+          (time() - process_start_time_seconds > 50400 and on (job, instance) renovate_scheduler_build_info unless on (job, instance) renovate_scheduler_last_success_timestamp_seconds{scope="full"} and on (job, instance) renovate_scheduler_run_deadline_timestamp_seconds == 0)
         for: 30m
         labels:
           severity: warning
         annotations:
-          summary: "No full Renovate run has completed in 14h"
+          summary: "No full Renovate run has completed on schedule"
           description: >
-            No complete full run in 14h. Runs may be failing or tolerated, or
-            the schedule or your own scheduler may have stopped. Runs scoped to
-            repositories do not count.
+            No complete full run by the deadline the built-in schedule sets,
+            two RUN_INTERVAL periods plus one RUN_TIMEOUT (and the token
+            request's budget in GitHub App mode) after the last one or the
+            start; with no deadline (0, external mode), none in 14h. Runs may
+            be failing or tolerated, or the schedule or your own scheduler may
+            have stopped. Runs scoped to repositories do not count.

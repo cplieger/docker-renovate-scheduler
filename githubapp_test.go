@@ -898,7 +898,7 @@ func TestExecute_ShutdownDuringARateLimitWaitCancelsTheRun(t *testing.T) {
 		handler, asked := rateLimitedGitHub(1)
 		d := appModeDaemon(t, nil, handler)
 		reg := measure.NewRegistry(metricsPrefix)
-		d.metrics = newRunMetrics(reg, "external", "app", scheduler.RunRecord{}, false)
+		d.metrics = newRunMetrics(reg, "external", "app", runBoot{})
 		var runs int
 		d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
 			runs++
@@ -1214,4 +1214,55 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.w.Write(p)
+}
+
+// TestRunDaemon_DatesTheDeadlineOneLeaseAfterTheStartupRunInAppMode reads the
+// page a real App-mode daemon serves after its startup run: the deadline sits
+// two intervals, one RUN_TIMEOUT and the token request's budget after the run
+// ended. Not parallel: it replaces newTokenSource and uses healthMarkerPath.
+func TestRunDaemon_DatesTheDeadlineOneLeaseAfterTheStartupRunInAppMode(t *testing.T) {
+	const (
+		interval   = time.Hour
+		runTimeout = 30 * time.Minute
+	)
+	addr := freeAddr(t)
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	t.Setenv("RUN_INTERVAL", interval.String())
+	t.Setenv("RUN_TIMEOUT", runTimeout.String())
+	t.Setenv("METRICS_LISTEN_ADDR", addr)
+	t.Setenv(envAppID, strconv.Itoa(testAppID))
+	t.Setenv(envAppInstallationID, strconv.Itoa(testInstallation))
+	t.Setenv(envAppKeyFile, writeKeyFile(t, false))
+	t.Setenv(envAppKeyInline, "")
+	t.Cleanup(func() { _ = os.Remove(healthMarkerPath) })
+	github := handlerTransport(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusCreated, tokenBody())
+	})
+	built := newTokenSource
+	newTokenSource = func(app *appConfig, opts ...forgeapi.Option) (*creds.AppSource, error) {
+		return built(app, append(opts, forgeapi.WithWireTransport(github), forgeapi.WithRetries(0))...)
+	}
+	t.Cleanup(func() { newTokenSource = built })
+
+	cancel, done, runErr := startDaemonForTest(t, recordingRunner("true", nil))
+	var body string
+	waitFor(t, 10*time.Second, func() bool {
+		_, body = getMetrics(t, addr)
+		return strings.Contains(body, metricsPrefix+`_last_success_timestamp_seconds{scope="full"}`)
+	}, "the startup run never completed")
+	var ended float64
+	for line := range strings.SplitSeq(body, "\n") {
+		if v, ok := strings.CutPrefix(line, metricsPrefix+`_last_success_timestamp_seconds{scope="full"} `); ok {
+			ended, _ = strconv.ParseFloat(v, 64)
+		}
+	}
+	lease := 2*interval + runTimeout + tokenMintBudget
+	if got, want := sampleValue(t, body, metricsPrefix+"_run_deadline_timestamp_seconds"), ended+lease.Seconds(); got != want {
+		t.Errorf("run_deadline_timestamp_seconds = %.0f, want the run's end %.0f plus %s", got, ended, lease)
+	}
+	cancel()
+	awaitDaemonStopped(t, done)
+	if err := *runErr; err != nil {
+		t.Errorf("runDaemon() = %v, want nil", err)
+	}
 }

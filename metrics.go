@@ -50,13 +50,27 @@ type runMetrics struct {
 	failingSince *measure.LabeledGauge
 	rejected     *measure.LabeledCounter
 	info         *measure.LabeledGauge
+	deadline     *measure.Gauge
+	gap          time.Duration
+}
+
+// runBoot is what the daemon knows when it builds the page.
+type runBoot struct {
+	start time.Time
+	// last is the completed-run record; known is false when there is none.
+	last scheduler.RunRecord
+	// gap is how long after a complete full run the next one is due, the
+	// health lease (runLease); 0 in external mode.
+	gap   time.Duration
+	known bool
 }
 
 // newRunMetrics registers the series on reg and seeds them: every counter
-// label value at 0, both failure clocks at 0, and the full scope's last
-// success from last, the record of the last complete full run that survived
-// a restart. The per-run series of a scope appear at its first run.
-func newRunMetrics(reg *measure.Registry, mode, auth string, last scheduler.RunRecord, known bool) *runMetrics {
+// label value at 0, both failure clocks at 0, the full scope's last success
+// from boot.last, and the run deadline one boot.gap after that success, or
+// after boot.start when there is none. The per-run series of a scope appear
+// at its first run.
+func newRunMetrics(reg *measure.Registry, mode, auth string, boot runBoot) *runMetrics {
 	scope := []string{keyScope}
 	m := &runMetrics{
 		runs: measure.NewLabeledCounter("runs_total",
@@ -79,9 +93,12 @@ func newRunMetrics(reg *measure.Registry, mode, auth string, last scheduler.RunR
 			"Run requests the queue refused, because it was full or the daemon was shutting down.", []string{"reason"}),
 		info: measure.NewLabeledGauge("info",
 			"Always 1; the labels name the scheduling mode and the GitHub auth mode.", []string{"mode", "auth"}),
+		deadline: measure.NewGauge("run_deadline_timestamp_seconds",
+			"Unix time by which the next complete full run is due; 0 while RUN_INTERVAL is off."),
+		gap: boot.gap,
 	}
 	reg.MustRegister(m.runs, m.lastOK, m.lastResult, m.lastExitCode, m.lastRun, m.lastSuccess,
-		m.lastDuration, m.failingSince, m.rejected, m.info)
+		m.lastDuration, m.failingSince, m.rejected, m.info, m.deadline)
 	for _, s := range runScopes {
 		for _, r := range runResults {
 			m.runs.Add(0, s, r)
@@ -91,19 +108,31 @@ func newRunMetrics(reg *measure.Registry, mode, auth string, last scheduler.RunR
 	m.rejected.Add(0, rejectFull)
 	m.rejected.Add(0, rejectClosing)
 	m.info.Set(1, mode, auth)
-	if known {
-		m.lastSuccess.Set(unixSeconds(last.Time), scopeFull)
+	lastSuccess := boot.start
+	if boot.known && boot.last.OK {
+		lastSuccess = boot.last.Time
+		m.lastSuccess.Set(unixSeconds(lastSuccess), scopeFull)
 	}
+	m.setDeadline(lastSuccess)
 	return m
 }
 
+// setDeadline dates the run deadline one gap after a complete full run at
+// lastSuccess; with no gap it stays 0.
+func (m *runMetrics) setDeadline(lastSuccess time.Time) {
+	if m.gap > 0 {
+		m.deadline.Set(unixSeconds(lastSuccess.Add(m.gap)))
+	}
+}
+
 // newMetricsRegistry builds the registry the metrics page serves, seeded from
-// the completed-run stamp. alert_parity_test.go builds it the same way.
-func newMetricsRegistry(mode, auth string, completed *scheduler.Stamp) (*measure.Registry, *runMetrics) {
+// the completed-run stamp, with the run deadline gap after the last complete
+// full run. alert_parity_test.go builds it the same way.
+func newMetricsRegistry(mode, auth string, completed *scheduler.Stamp, gap time.Duration) (*measure.Registry, *runMetrics) {
 	reg := measure.NewRegistry(metricsPrefix)
 	registerBuildInfo(reg)
 	last, known := completed.Last()
-	return reg, newRunMetrics(reg, mode, auth, last, known)
+	return reg, newRunMetrics(reg, mode, auth, runBoot{start: time.Now(), last: last, known: known, gap: gap})
 }
 
 // registerBuildInfo serves build_info at 1, labelled with the release this
@@ -130,6 +159,9 @@ func (m *runMetrics) observe(scope string, v runVerdict, elapsed time.Duration, 
 	m.lastDuration.Set(elapsed.Seconds(), scope)
 	if v.result == resultComplete {
 		m.lastSuccess.Set(unixSeconds(at), scope)
+		if scope == scopeFull {
+			m.setDeadline(at)
+		}
 	}
 	clock := 0.0
 	if !failingSince.IsZero() {

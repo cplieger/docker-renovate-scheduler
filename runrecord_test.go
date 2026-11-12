@@ -309,7 +309,7 @@ func TestARateLimitedRunCountsItsFailureFromTheWaitsEnd(t *testing.T) {
 				read := logLines(t)
 				d, _ := newBareDaemon(t, nil)
 				reg := measure.NewRegistry(metricsPrefix)
-				d.metrics = newRunMetrics(reg, "external", "app", scheduler.RunRecord{}, false)
+				d.metrics = newRunMetrics(reg, "external", "app", runBoot{})
 				var asked atomic.Int32
 				d.tokens = fakeGitHub(t, testInstallation, func(w http.ResponseWriter, r *http.Request) {
 					if asked.Add(1) == 1 {

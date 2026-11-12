@@ -113,7 +113,10 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	}
 
 	completed := scheduler.NewStamp(completedStampPath())
-	reg, metrics := newMetricsRegistry(modeName(scheduleEnabled), authName(app), completed)
+	// One lease for /healthz, the probe and the run deadline, so the stall
+	// alert and the health check judge a stopped schedule at the same moment.
+	lease := runLease(interval, scheduleEnabled, runTimeout, app != nil)
+	reg, metrics := newMetricsRegistry(modeName(scheduleEnabled), authName(app), completed, lease)
 	metricsAddr := metricsListenAddr()
 	d := &daemon{
 		queue:          trigger.NewQueue[runPayload](queueCapacity),
@@ -128,7 +131,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		now:            time.Now,
 		stampPath:      stampPath(),
 		timeout:        runTimeout,
-		lease:          runLease(interval, scheduleEnabled, runTimeout, app != nil),
+		lease:          lease,
 		installationID: installationID,
 		fatal:          make(chan error, 1),
 	}

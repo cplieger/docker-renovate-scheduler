@@ -45,7 +45,7 @@ func newBareDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, strin
 
 // testMetrics returns run metrics on a registry of their own.
 func testMetrics() *runMetrics {
-	return newRunMetrics(measure.NewRegistry(metricsPrefix), "external", "token", scheduler.RunRecord{}, false)
+	return newRunMetrics(measure.NewRegistry(metricsPrefix), "external", "token", runBoot{})
 }
 
 // maxSunPath is the longest usable unix-socket path: Linux sun_path is
