@@ -199,13 +199,26 @@ var runPaths = []runPath{
 // health ended healthy.
 func runThrough(t *testing.T, p *runPath) (trigger.Result, []map[string]string, bool) {
 	t.Helper()
+	out, lines, healthy := runLinesThrough(t, p)
+	return out, recordsNamed(t, lines, runFinishedMsg), healthy
+}
+
+// runLinesThrough is runThrough returning every log line the run wrote.
+func runLinesThrough(t *testing.T, p *runPath) (trigger.Result, []string, bool) {
+	t.Helper()
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
-	return runOn(t, d, p)
+	return runOnLines(t, d, p)
 }
 
 // runOn drives one path through d's executor, as runThrough does.
 func runOn(t *testing.T, d *daemon, p *runPath) (trigger.Result, []map[string]string, bool) {
+	t.Helper()
+	out, lines, healthy := runOnLines(t, d, p)
+	return out, recordsNamed(t, lines, runFinishedMsg), healthy
+}
+
+func runOnLines(t *testing.T, d *daemon, p *runPath) (trigger.Result, []string, bool) {
 	t.Helper()
 	read := logLines(t)
 	d.status.Set(true)
@@ -224,7 +237,7 @@ func runOn(t *testing.T, d *daemon, p *runPath) (trigger.Result, []map[string]st
 	d.runJobs(ctx)
 	cancel()
 	out := <-j.Result()
-	return out, recordsNamed(t, read(), runFinishedMsg), d.status.Healthy()
+	return out, read(), d.status.Healthy()
 }
 
 // TestEveryCompletedRunWritesOneRunFinishedRecord is the record's contract:

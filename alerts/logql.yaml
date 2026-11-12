@@ -13,8 +13,9 @@ groups:
     rules:
       # A state rule: it reads the latest record of each scope in the window,
       # so it fires at the first failed run and resolves at the next good one.
-      # `| logfmt ok, scope` extracts only those fields; a bare `| logfmt`
-      # would turn every line into its own series.
+      # `| logfmt ok, scope` extracts only the two fields the rule reads. No
+      # label filter follows that field list, the shape Loki misreads (see
+      # RenovateNoRecentRun).
       - alert: RenovateRunFailed
         expr: |
           last_over_time({container="renovate"} |= `msg="run finished"` | logfmt ok, scope | unwrap ok [14h]) by (container, scope) == 0
@@ -28,9 +29,14 @@ groups:
             `result` field names the cause, and the line before it has the
             detail. Check RENOVATE_TOKEN or the GitHub App settings, and
             whether the platform is reachable.
+      # The bare `| logfmt` is deliberate. Behind a field list such as
+      # `| logfmt scope, result`, Loki (seen on 3.7.9) drops every line at
+      # the label filters once a query aggregates, so this rule fired with
+      # every run healthy (grafana/loki#11334). absent_over_time keeps no
+      # series, so extracting every field costs nothing.
       - alert: RenovateNoRecentRun
         expr: |
-          absent_over_time({container="renovate"} |= `msg="run finished"` | logfmt scope, result | scope="full" | result="complete" [14h])
+          absent_over_time({container="renovate"} |= `msg="run finished"` | logfmt | scope="full" | result="complete" [14h])
         for: 30m
         labels:
           severity: warning
