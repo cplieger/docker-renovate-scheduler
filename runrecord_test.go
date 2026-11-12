@@ -199,16 +199,30 @@ var runPaths = []runPath{
 // health ended healthy.
 func runThrough(t *testing.T, p *runPath) (trigger.Result, []map[string]string, bool) {
 	t.Helper()
-	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-	d, _ := newBareDaemon(t, recordingRunner("true", nil))
-	return runOn(t, d, p)
+	out, lines, healthy := runLinesThrough(t, p)
+	return out, recordsNamed(t, lines, runFinishedMsg), healthy
 }
 
-// runOn drives one path through d's executor, as runThrough does.
-func runOn(t *testing.T, d *daemon, p *runPath) (trigger.Result, []map[string]string, bool) {
+// runLinesThrough is runThrough returning every log line the run wrote.
+func runLinesThrough(t *testing.T, p *runPath) (trigger.Result, []string, bool) {
+	t.Helper()
+	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
+	d, _ := newBareDaemon(t, recordingRunner("true", nil))
+	return runOnLines(t, d, p)
+}
+
+// runOn drives one path through d's executor and returns the run finished
+// records it wrote.
+func runOn(t *testing.T, d *daemon, p *runPath) []map[string]string {
+	t.Helper()
+	_, lines, _ := runOnLines(t, d, p)
+	return recordsNamed(t, lines, runFinishedMsg)
+}
+
+func runOnLines(t *testing.T, d *daemon, p *runPath) (trigger.Result, []string, bool) {
 	t.Helper()
 	read := logLines(t)
-	d.health.Set(true)
+	d.status.Set(true)
 	if p.setup != nil {
 		p.setup(t, d)
 	}
@@ -224,7 +238,7 @@ func runOn(t *testing.T, d *daemon, p *runPath) (trigger.Result, []map[string]st
 	d.runJobs(ctx)
 	cancel()
 	out := <-j.Result()
-	return out, recordsNamed(t, read(), runFinishedMsg), d.marker.Healthy()
+	return out, read(), d.status.Healthy()
 }
 
 // TestEveryCompletedRunWritesOneRunFinishedRecord is the record's contract:
@@ -309,7 +323,7 @@ func TestARateLimitedRunCountsItsFailureFromTheWaitsEnd(t *testing.T) {
 				read := logLines(t)
 				d, _ := newBareDaemon(t, nil)
 				reg := measure.NewRegistry(metricsPrefix)
-				d.metrics = newRunMetrics(reg, d.marker, "external", "app", scheduler.RunRecord{}, false)
+				d.metrics = newRunMetrics(reg, "external", "app", runBoot{})
 				var asked atomic.Int32
 				d.tokens = fakeGitHub(t, testInstallation, func(w http.ResponseWriter, r *http.Request) {
 					if asked.Add(1) == 1 {
@@ -323,7 +337,7 @@ func TestARateLimitedRunCountsItsFailureFromTheWaitsEnd(t *testing.T) {
 				d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
 					return runResult{outcome: tt.outcome}
 				}
-				d.health.Set(true)
+				d.status.Set(true)
 				start := time.Now()
 
 				j := newJob("interval", nil, nil)

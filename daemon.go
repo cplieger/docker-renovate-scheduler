@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/cplieger/forgeapi/v2/creds"
-	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/health/v2"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
 )
@@ -33,9 +33,9 @@ const (
 )
 
 type daemon struct {
-	queue    *trigger.Queue[runPayload]
-	marker   *health.Marker
-	health   *health.Latch
+	queue *trigger.Queue[runPayload]
+	// status is the verdict /healthz serves and the health file mirrors.
+	status   *health.Status
 	verifier *baseDirVerifier
 	stamp    *scheduler.Stamp
 	// completed records every complete full run, to seed metrics after a restart.
@@ -55,7 +55,7 @@ type daemon struct {
 	scopedFailingSince time.Time
 	stampPath          string
 	timeout            time.Duration
-	lease              time.Duration // runLease: the marker age /healthz and the probe allow, 0 in external mode
+	lease              time.Duration // runLease: the verdict age /healthz and the probe allow, 0 in external mode
 	// installationID is the installation last resolved, which only the
 	// executor reads and writes.
 	installationID int64
@@ -86,8 +86,9 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		return daemonStopped(err)
 	}
 
-	marker := health.NewMarker(healthMarkerPath)
-	marker.Set(false)
+	// After the socket bind, so a second daemon the socket refuses leaves the
+	// live one's health file alone; NewStatus removes a stale one.
+	st := health.NewStatus(health.WithMarker(healthMarkerPath))
 
 	verifier := newBaseDirVerifier()
 	if err = verifier.verify(ctx); err != nil {
@@ -112,12 +113,13 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	}
 
 	completed := scheduler.NewStamp(completedStampPath())
-	reg, metrics := newMetricsRegistry(marker, modeName(scheduleEnabled), authName(app), completed)
+	// One lease for /healthz, the probe and the run deadline's gap.
+	lease := runLease(interval, scheduleEnabled, runTimeout, app != nil)
+	reg, metrics := newMetricsRegistry(modeName(scheduleEnabled), authName(app), completed, lease)
 	metricsAddr := metricsListenAddr()
 	d := &daemon{
 		queue:          trigger.NewQueue[runPayload](queueCapacity),
-		marker:         marker,
-		health:         health.NewLatch(marker),
+		status:         st,
 		verifier:       verifier,
 		stamp:          stamp,
 		completed:      completed,
@@ -128,13 +130,13 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		now:            time.Now,
 		stampPath:      stampPath(),
 		timeout:        runTimeout,
-		lease:          runLease(interval, scheduleEnabled, runTimeout, app != nil),
+		lease:          lease,
 		installationID: installationID,
 		fatal:          make(chan error, 1),
 	}
 	// /healthz reads the daemon's own lease, the one its rate-limit wait
 	// refreshes on, so the two cannot disagree.
-	stopMetrics, err := serveMetrics(ctx, metricsAddr, reg, newHealthz(marker, d.lease))
+	stopMetrics, err := serveMetrics(ctx, metricsAddr, reg, newHealthz(st, d.lease))
 	if err != nil {
 		slog.Error("cannot listen on METRICS_LISTEN_ADDR", "value", metricsAddr, "error", err)
 		_ = ln.Close()
@@ -152,9 +154,8 @@ func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, in
 	ctx, abort := context.WithCancelCause(ctx)
 	defer abort(nil)
 
-	defer d.marker.Cleanup()
 	// Not due means a fresh successful run survived the restart, so booting healthy is honest.
-	d.health.Set(!scheduleEnabled || !due)
+	d.status.Set(!scheduleEnabled || !due)
 
 	executorDone := make(chan struct{})
 	go func() {
@@ -198,7 +199,7 @@ func (d *daemon) run(ctx context.Context, ln net.Listener, socketPath string, in
 		abort(fatalErr)
 	}
 	slog.Info("shutting down", "cause", context.Cause(ctx))
-	d.health.BeginDrain()
+	d.status.BeginDrain()
 
 	_ = ln.Close()
 	d.queue.Close()
@@ -393,13 +394,13 @@ type runVerdict struct {
 
 // finish ends every completed run: it sets health and the metrics from the
 // verdict, writes the run's one run finished record and finishes the job, so
-// the record, the metrics, the health marker and the run client's exit code
+// the record, the metrics, the health verdict and the run client's exit code
 // cannot disagree. A tolerated failure leaves health as it was (keepHealth).
 func (d *daemon) finish(j *trigger.Job[runPayload], start time.Time, v runVerdict) {
 	if v.tolerated {
 		d.keepHealth()
 	} else {
-		d.health.Set(v.ok)
+		d.status.Set(v.ok)
 	}
 	at := time.Now()
 	elapsed := at.Sub(start)
@@ -502,11 +503,11 @@ func (d *daemon) recovered(j *trigger.Job[runPayload]) {
 	*since = time.Time{}
 }
 
-// keepHealth refreshes a healthy marker and never creates one, for a live
+// keepHealth refreshes a healthy verdict and never sets one, for a live
 // executor that has no new verdict to set.
 func (d *daemon) keepHealth() {
-	if d.marker.Healthy() {
-		d.health.Set(true)
+	if d.status.Healthy() {
+		d.status.Set(true)
 	}
 }
 
@@ -594,8 +595,8 @@ func (d *daemon) runToken(ctx context.Context) (creds.InstallationToken, time.Du
 
 // waitOutRateLimit reports whether wait passed before shutdown closed. It
 // calls keepHealth at the start, every half lease and at the end, because the
-// lease counts from the marker's last write: GitHub's wait can outlast it, and
-// the run after the wait needs a fresh write to finish inside the lease.
+// lease counts from the last healthy Set: GitHub's wait can outlast it, and
+// the run after the wait needs a fresh one to finish inside the lease.
 func (d *daemon) waitOutRateLimit(shutdown <-chan struct{}, wait time.Duration) bool {
 	d.keepHealth()
 	timer := time.NewTimer(wait)

@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/health/v2"
 )
 
 func main() {
@@ -18,7 +18,7 @@ func main() {
 
 	switch cmd {
 	case "health":
-		health.RunProbe(healthMarkerPath, probeOptions()...)
+		health.RunProbe(healthMarkerPath, health.WithMaxAge(probeLease()))
 	case "daemon":
 		if err := runDaemon(context.Background(), socketPath, defaultCommandRunner); err != nil {
 			os.Exit(1)

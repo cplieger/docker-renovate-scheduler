@@ -5,21 +5,21 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/health/v2"
 )
 
-const healthMarkerPath = health.DefaultPath
+// healthMarkerPath is the file the daemon mirrors its verdict to; Docker's
+// HEALTHCHECK re-invokes the binary with the `health` subcommand, which reads it.
+var healthMarkerPath = health.MarkerPath("docker-renovate-scheduler")
 
-func probeOptions() []health.ProbeOption {
+// probeLease is the lease the health subcommand arms: the daemon's runLease
+// for the settings the environment holds.
+func probeLease() time.Duration {
 	interval, scheduleEnabled := loadInterval()
-	lease := runLease(interval, scheduleEnabled, loadRunTimeout(), appConfigured())
-	if lease <= 0 {
-		return nil
-	}
-	return []health.ProbeOption{health.WithMaxAge(lease)}
+	return runLease(interval, scheduleEnabled, loadRunTimeout(), appConfigured())
 }
 
-// runLease is how old the marker may grow before the schedule counts as
+// runLease is how old a healthy verdict may grow before the schedule counts as
 // stuck: two intervals plus one run's budget, RUN_TIMEOUT, and in GitHub App
 // mode the token request's tokenMintBudget before it. External mode arms none
 // (0).
@@ -40,22 +40,10 @@ const (
 	reasonStuck     = "no run has finished within two run intervals plus one run's time budget, so the schedule may be stuck"
 )
 
-// newHealthz serves the verdict the health subcommand reads from marker while
-// the marker directory is writable, as one check per fault so each names itself.
-func newHealthz(marker *health.Marker, lease time.Duration) http.Handler {
+// newHealthz serves st's verdict as one check per fault, so each names itself.
+func newHealthz(st *health.Status, lease time.Duration) http.Handler {
 	return health.CheckHandler(
-		health.Check{Signal: marker, Reason: reasonRunFailed},
-		health.Check{Signal: notStale{marker: marker, lease: lease}, Reason: reasonStuck},
+		health.Check{Signal: st, Reason: reasonRunFailed},
+		health.Check{Signal: st.Fresh(lease), Reason: reasonStuck},
 	)
-}
-
-// notStale fails a marker that reads healthy but is past the lease, so an
-// absent marker reports reasonRunFailed alone and not reasonStuck too.
-type notStale struct {
-	marker *health.Marker
-	lease  time.Duration
-}
-
-func (s notStale) Healthy() bool {
-	return s.marker.Within(s.lease).Healthy() || !s.marker.Healthy()
 }

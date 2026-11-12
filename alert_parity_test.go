@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/go/health"
 	"github.com/cplieger/go/measure"
 	"github.com/cplieger/go/scheduler"
 )
@@ -39,7 +38,7 @@ var (
 	groupingRe     = regexp.MustCompile(`\b(by|without|on|ignoring|group_left|group_right)\s*\([^)]*\)`)
 	promRangeRe    = regexp.MustCompile(`\[[^\]]*\]`)
 	identRe        = regexp.MustCompile(`[a-zA-Z_:][a-zA-Z0-9_:]*`)
-	ageSecondsRe   = regexp.MustCompile(`>\s*(\d+)`)
+	ageSecondsRe   = regexp.MustCompile(`time\(\)\s*-[^>]*>\s*(\d+)`)
 )
 
 // ruleExprs returns each alert of a shipped rule file with its expression.
@@ -82,8 +81,7 @@ func seriesNames(expr string) []string {
 func exportedFamilies(t *testing.T) map[string][]string {
 	t.Helper()
 	dir := t.TempDir()
-	marker := health.NewMarker(filepath.Join(dir, "healthy"))
-	reg, m := newMetricsRegistry(marker, "built-in", "token", scheduler.NewStamp(filepath.Join(dir, "completed")))
+	reg, m := newMetricsRegistry("built-in", "token", scheduler.NewStamp(filepath.Join(dir, "completed")), time.Hour)
 	now := time.Now()
 	for _, scope := range runScopes {
 		m.observe(scope, runVerdict{result: resultComplete, ok: true}, time.Second, now, time.Time{})
@@ -214,8 +212,9 @@ func TestHeadersNameTheOneSidedAlerts(t *testing.T) {
 	}
 }
 
-// TestPromQLNoRecentRunWindowIsTwiceTheDefaultRunCycle keeps the metric rule
-// at the log rule's window: twice the sum of RUN_INTERVAL and RUN_TIMEOUT.
+// TestPromQLNoRecentRunWindowIsTwiceTheDefaultRunCycle keeps every age the
+// metric rule compares at the log rule's window: twice the sum of
+// RUN_INTERVAL and RUN_TIMEOUT.
 func TestPromQLNoRecentRunWindowIsTwiceTheDefaultRunCycle(t *testing.T) {
 	want := 2 * (defaultInterval + defaultRunTimeout)
 	expr, ok := ruleExprs(t, "alerts/promql.yaml")["RenovateNoRecentRun"]
