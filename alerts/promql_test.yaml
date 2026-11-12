@@ -107,10 +107,55 @@ tests:
     input_series:
       - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
         values: "0x1000"
+      - series: 'renovate_scheduler_build_info{job="renovate", instance="renovate:9470", version="v4.0.0"}'
+        values: "1x1000"
     alert_rule_test:
       - eval_time: 14h20m
         alertname: RenovateNoRecentRun
         exp_alerts: []
+      - eval_time: 14h35m
+        alertname: RenovateNoRecentRun
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: renovate
+              instance: renovate:9470
+            exp_annotations:
+              summary: "No full Renovate run has completed in 14h"
+              description: "No complete full run in 14h. Runs may be failing or tolerated, or the schedule or your own scheduler may have stopped. Runs scoped to repositories do not count.\n"
+
+  - name: the process-start arm follows the app under any scrape job name
+    interval: 1m
+    input_series:
+      - series: 'process_start_time_seconds{job="renovate-scheduler", instance="scheduler:9470"}'
+        values: "0x1000"
+      - series: 'renovate_scheduler_build_info{job="renovate-scheduler", instance="scheduler:9470", version="v4.0.0"}'
+        values: "1x1000"
+    alert_rule_test:
+      - eval_time: 14h20m
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+      - eval_time: 14h35m
+        alertname: RenovateNoRecentRun
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: renovate-scheduler
+              instance: scheduler:9470
+            exp_annotations:
+              summary: "No full Renovate run has completed in 14h"
+              description: "No complete full run in 14h. Runs may be failing or tolerated, or the schedule or your own scheduler may have stopped. Runs scoped to repositories do not count.\n"
+
+  - name: another job's process start beside a waiting renovate target raises the alert for the renovate target only
+    interval: 1m
+    input_series:
+      - series: 'process_start_time_seconds{job="node", instance="node:9100"}'
+        values: "0x1000"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1000"
+      - series: 'renovate_scheduler_build_info{job="renovate", instance="renovate:9470", version="v4.0.0"}'
+        values: "1x1000"
+    alert_rule_test:
       - eval_time: 14h35m
         alertname: RenovateNoRecentRun
         exp_alerts:
@@ -139,6 +184,8 @@ tests:
         values: "0x1000"
       - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
         values: "0x1000"
+      - series: 'renovate_scheduler_build_info{job="renovate", instance="renovate:9470", version="v4.0.0"}'
+        values: "1x1000"
       - series: 'renovate_scheduler_last_success_timestamp_seconds{job="renovate", instance="renovate:9470", scope="full"}'
         values: "1+60x1000"
     alert_rule_test:

@@ -15,6 +15,10 @@ import (
 
 const metricsPrefix = "renovate_scheduler"
 
+// version is the release this binary is, stamped by the Dockerfile's
+// BUILD_VERSION build argument; an unstamped build reports "dev".
+var version = "dev"
+
 // Run scopes, the `scope` field of the run finished record and a label.
 const (
 	keyScope    = "scope"
@@ -97,8 +101,18 @@ func newRunMetrics(reg *measure.Registry, mode, auth string, last scheduler.RunR
 // the completed-run stamp. alert_parity_test.go builds it the same way.
 func newMetricsRegistry(mode, auth string, completed *scheduler.Stamp) (*measure.Registry, *runMetrics) {
 	reg := measure.NewRegistry(metricsPrefix)
+	registerBuildInfo(reg)
 	last, known := completed.Last()
 	return reg, newRunMetrics(reg, mode, auth, last, known)
+}
+
+// registerBuildInfo serves build_info at 1, labelled with the release this
+// process runs, for a rule to join on whatever the target's scrape job is.
+func registerBuildInfo(reg *measure.Registry) {
+	info := measure.NewLabeledGauge("build_info",
+		"Always 1; the version label is the release this process runs.", []string{"version"})
+	reg.MustRegister(info)
+	info.Set(1, version)
 }
 
 func unixSeconds(t time.Time) float64 {

@@ -9,7 +9,10 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -301,6 +304,24 @@ func TestRunSetsEverySeriesToItsRecord(t *testing.T) {
 				t.Errorf("the page serves %s = %v; the health verdict is /healthz's, not a series", seriesKey("healthy"), v)
 			}
 		})
+	}
+}
+
+// TestMetricsPageServesBuildInfo pins the series a rule joins on to find this
+// app's targets whatever their scrape job is named: one line at 1, labelled
+// with the stamped version.
+func TestMetricsPageServesBuildInfo(t *testing.T) {
+	reg, _ := newMetricsRegistry("built-in", "token", scheduler.NewStamp(filepath.Join(t.TempDir(), "completed")))
+	rec := httptest.NewRecorder()
+	reg.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody))
+	var lines []string
+	for line := range strings.SplitSeq(rec.Body.String(), "\n") {
+		if strings.HasPrefix(line, metricsPrefix+"_build_info") {
+			lines = append(lines, line)
+		}
+	}
+	if want := metricsPrefix + `_build_info{version="` + version + `"} 1`; !slices.Equal(lines, []string{want}) {
+		t.Errorf("build_info lines = %q, want [%q]", lines, want)
 	}
 }
 
