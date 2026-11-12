@@ -211,11 +211,12 @@ func runLinesThrough(t *testing.T, p *runPath) (trigger.Result, []string, bool) 
 	return runOnLines(t, d, p)
 }
 
-// runOn drives one path through d's executor, as runThrough does.
-func runOn(t *testing.T, d *daemon, p *runPath) (trigger.Result, []map[string]string, bool) {
+// runOn drives one path through d's executor and returns the run finished
+// records it wrote.
+func runOn(t *testing.T, d *daemon, p *runPath) []map[string]string {
 	t.Helper()
-	out, lines, healthy := runOnLines(t, d, p)
-	return out, recordsNamed(t, lines, runFinishedMsg), healthy
+	_, lines, _ := runOnLines(t, d, p)
+	return recordsNamed(t, lines, runFinishedMsg)
 }
 
 func runOnLines(t *testing.T, d *daemon, p *runPath) (trigger.Result, []string, bool) {

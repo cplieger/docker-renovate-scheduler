@@ -257,7 +257,7 @@ func TestRunSetsEverySeriesToItsRecord(t *testing.T) {
 			booted := time.Now().Add(-time.Minute)
 			const gap = time.Hour
 			d.metrics = newRunMetrics(reg, "external", "token", runBoot{start: booted, gap: gap})
-			_, records, _ := runOn(t, d, p)
+			records := runOn(t, d, p)
 			if len(records) != 1 {
 				t.Fatalf("wrote %d run finished records, want 1", len(records))
 			}
