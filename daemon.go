@@ -113,8 +113,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	}
 
 	completed := scheduler.NewStamp(completedStampPath())
-	// One lease for /healthz, the probe and the run deadline, so the stall
-	// alert and the health check judge a stopped schedule at the same moment.
+	// One lease for /healthz, the probe and the run deadline's gap.
 	lease := runLease(interval, scheduleEnabled, runTimeout, app != nil)
 	reg, metrics := newMetricsRegistry(modeName(scheduleEnabled), authName(app), completed, lease)
 	metricsAddr := metricsListenAddr()
