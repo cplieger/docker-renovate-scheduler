@@ -12,11 +12,12 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
-	"github.com/cplieger/atomicfile/v4"
-	"github.com/cplieger/envx/v2"
-	"github.com/cplieger/scheduler/v4"
-	"github.com/cplieger/slogx"
+	"github.com/cplieger/go/envx"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/slogx"
 )
 
 const (
@@ -27,6 +28,9 @@ const (
 	// The owner-only socket limits trigger authority to the container user.
 	socketPath = "/tmp/docker-renovate-scheduler.sock"
 	stampName  = ".docker-renovate-scheduler-last-run"
+	// completedStampName seeds the full scope's last-success series after a
+	// restart.
+	completedStampName = ".docker-renovate-scheduler-last-complete"
 )
 
 func setupLogger() {
@@ -36,6 +40,20 @@ func setupLogger() {
 	if !recognized {
 		slog.Warn("unrecognized LOG_LEVEL, using default", "value", raw, "default", "info")
 	}
+}
+
+// metricsListenAddr reads METRICS_LISTEN_ADDR with whitespace and invisible
+// runes trimmed from its edges: an untrimmed " :9470" fails as a host lookup
+// the operator cannot see. Nothing else is checked; the bind is the check.
+func metricsListenAddr() string {
+	return strings.TrimFunc(envx.String("METRICS_LISTEN_ADDR"), func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) ||
+			unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r)
+	})
+}
+
+func completedStampPath() string {
+	return filepath.Join(baseDir(), completedStampName)
 }
 
 func baseDir() string {
@@ -129,25 +147,25 @@ func (v *baseDirVerifier) verifyAt(ctx context.Context, dir string) error {
 }
 
 func probeBaseDirWrite(ctx context.Context, dir string) error {
-	res, err := atomicfile.ProbeWritable(ctx, dir, atomicfile.WithMkdirMode(0o700))
+	res, err := filesafe.ProbeWritable(ctx, dir, filesafe.WithMkdirMode(0o700))
 	if err != nil {
 		return fmt.Errorf("base dir %q write probe not attempted: %w", dir, err)
 	}
 	return baseDirProbeResultError(dir, res)
 }
 
-func baseDirProbeResultError(dir string, res atomicfile.ProbeResult) error {
+func baseDirProbeResultError(dir string, res filesafe.ProbeResult) error {
 	if res.OK() {
 		return nil
 	}
 	if res.Writable() {
 		if res.Leaked {
-			return fmt.Errorf("base dir %q probe %q failed to %s and leaked its file: %w", dir, res.Name, res.Stage, res.Err)
+			return fmt.Errorf("base dir %q probe %q failed to %s and leaked its file: %w", dir, res.Name, res.Phase, res.Err)
 		}
 		slog.Warn("base dir probe wrote and flushed but could not clean up",
-			"path", dir, "stage", res.Stage, "name", res.Name,
+			"path", dir, "stage", res.Phase, "name", res.Name,
 			"leaked", res.Leaked, "error", res.Err)
 		return nil
 	}
-	return fmt.Errorf("base dir %q not writable, failed to %s: %w", dir, res.Stage, res.Err)
+	return fmt.Errorf("base dir %q not writable, failed to %s: %w", dir, res.Phase, res.Err)
 }

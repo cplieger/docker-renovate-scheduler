@@ -13,8 +13,8 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/cplieger/atomicfile/v4"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 func TestLoadInterval(t *testing.T) {
@@ -290,9 +290,9 @@ func TestProbeBaseDirWrite(t *testing.T) {
 	})
 	t.Run("reports a leaked probe file as a cleanup failure", func(t *testing.T) {
 		cause := errors.New("delete child denied")
-		res := atomicfile.ProbeResult{
+		res := filesafe.ProbeResult{
 			Name:   ".probe",
-			Stage:  atomicfile.ProbeStageRemove,
+			Phase:  filesafe.ProbePhaseRemove,
 			Leaked: true,
 			Err:    cause,
 		}

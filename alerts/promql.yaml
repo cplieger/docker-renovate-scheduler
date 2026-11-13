@@ -1,0 +1,69 @@
+# Alert rules for docker-renovate-scheduler as a Prometheus rule group, for any
+# ruler that reads them. Load this file or alerts/logql.yaml, not both. The
+# rules read the page served when METRICS_LISTEN_ADDR is set; scrape it as job
+# `renovate`, the name RenovateDown reads. Thresholds and severity labels are
+# starting points. RenovateNoRecentRun reads
+# renovate_scheduler_run_deadline_timestamp_seconds, which sizes itself from
+# your settings; its 14h window applies only while that reads 0
+# (RUN_INTERVAL=off). Load it with a release that exports that gauge.
+# RenovateDown exists only here; RenovateDaemonStopped covers it in
+# alerts/logql.yaml. Notes are in docs/monitoring.md.
+groups:
+  - name: renovate
+    rules:
+      # Two arms, because neither covers the other: `up == 0` catches a target
+      # that fails its scrape and keeps its labels, `absent(up{...})` catches a
+      # target that is gone. Use an exact job matcher, never a regex.
+      - alert: RenovateDown
+        expr: up{job="renovate"} == 0 or absent(up{job="renovate"})
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "docker-renovate-scheduler is not being scraped"
+          description: >
+            No successful scrape for 5m: the container is stopped, crash-looping
+            or refusing to start, or the scrape cannot reach METRICS_LISTEN_ADDR.
+            Check the container's state and its `daemon stopped` line.
+      # A scope's series appear at its first completed run, so a fresh install
+      # stays quiet, and the rule resolves at that scope's next good run, or at
+      # a restart, until that scope's next run.
+      - alert: RenovateRunFailed
+        expr: renovate_scheduler_last_run_ok == 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The last {{ $labels.scope }} Renovate run failed"
+          description: >
+            The latest completed run of this scope failed.
+            renovate_scheduler_last_run_result names the cause, and the
+            container log has the detail. Check RENOVATE_TOKEN or the GitHub
+            App settings, whether the platform is reachable, and the memory limit.
+      # The deadline decides while it is above 0: each complete full run moves
+      # it one health lease ahead (two intervals plus RUN_TIMEOUT, and the
+      # token request's budget in GitHub App mode), so a stopped schedule and
+      # runs that keep failing both cross it. The 14h window (50400 seconds,
+      # twice the sum of RUN_INTERVAL and RUN_TIMEOUT at the defaults) reads
+      # only while the deadline is 0; size it to your own scheduler. The full
+      # scope's last success is read back from RENOVATE_BASE_DIR after a
+      # restart; with none on record the last branch measures the wait from
+      # the process start, keeping only the targets that serve
+      # renovate_scheduler_build_info, under any scrape job name.
+      - alert: RenovateNoRecentRun
+        expr: |
+          (time() > renovate_scheduler_run_deadline_timestamp_seconds + 900 and renovate_scheduler_run_deadline_timestamp_seconds > 0)
+          or
+          (time() - renovate_scheduler_last_success_timestamp_seconds{scope="full"} > 50400 and on (job, instance) renovate_scheduler_run_deadline_timestamp_seconds == 0)
+          or
+          (time() - process_start_time_seconds > 50400 and on (job, instance) renovate_scheduler_build_info unless on (job, instance) renovate_scheduler_last_success_timestamp_seconds{scope="full"} and on (job, instance) renovate_scheduler_run_deadline_timestamp_seconds == 0)
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No full Renovate run has completed on schedule"
+          description: >
+            No complete full run by the run deadline, or in 14h while it
+            reads 0 (RUN_INTERVAL=off). Runs may be failing or tolerated, or
+            a scheduler stopped; scoped runs do not count. Check
+            renovate_scheduler_last_run_result and the container log.

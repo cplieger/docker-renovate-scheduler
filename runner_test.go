@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/scheduler/v4"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 func TestRenovateInvocation(t *testing.T) {
@@ -91,8 +91,8 @@ func TestRunRenovateOnce_EnvHandling(t *testing.T) {
 			t.Setenv("RENOVATE_TEST_MARKER", "inherited")
 			t.Setenv("RENOVATE_DAEMON_ONLY", "daemon")
 			runner := shellAssertRunner(tt.script)
-			if got := runRenovateOnce(t.Context(), time.Minute, "test", runPayload{Env: tt.env}, runner); got != runComplete {
-				t.Errorf("runRenovateOnce() = %v, want runComplete: the child did not see the expected environment (env=%v)", got, tt.env)
+			if got := runRenovateOnce(t.Context(), time.Minute, "test", runPayload{Env: tt.env}, runner).outcome; got != runComplete {
+				t.Errorf("runRenovateOnce().outcome = %v, want runComplete: the child did not see the expected environment (env=%v)", got, tt.env)
 			}
 		})
 	}
@@ -162,8 +162,8 @@ func TestRunRenovateOnce_EnvCarriesChildOverrides(t *testing.T) {
 			// The daemon environ must be overridden too.
 			t.Setenv("DUMB_INIT_SETSID", "1")
 			runner := shellAssertRunner(script)
-			if got := runRenovateOnce(t.Context(), time.Minute, "test", runPayload{Env: tt.env}, runner); got != runComplete {
-				t.Errorf("runRenovateOnce() = %v, want runComplete: child did not see the override (env=%v)", got, tt.env)
+			if got := runRenovateOnce(t.Context(), time.Minute, "test", runPayload{Env: tt.env}, runner).outcome; got != runComplete {
+				t.Errorf("runRenovateOnce().outcome = %v, want runComplete: child did not see the override (env=%v)", got, tt.env)
 			}
 		})
 	}
@@ -190,8 +190,8 @@ exec setsid -w sh -c 'echo $$ > "$0"; exec sleep 30' "$1"`
 		return cmd
 	}
 
-	if got := runRenovateOnce(t.Context(), 500*time.Millisecond, "test", runPayload{}, runner); got == runComplete {
-		t.Fatal("runRenovateOnce() = runComplete for a run that exceeded the timeout, want a failure outcome")
+	if got := runRenovateOnce(t.Context(), 500*time.Millisecond, "test", runPayload{}, runner).outcome; got == runComplete {
+		t.Fatal("runRenovateOnce().outcome = runComplete for a run that exceeded the timeout, want a failure outcome")
 	}
 
 	raw, err := os.ReadFile(pidPath)
@@ -209,9 +209,10 @@ exec setsid -w sh -c 'echo $$ > "$0"; exec sleep 30' "$1"`
 
 // TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly pins the distinct
 // ERROR messages for a timed-out run vs a genuine non-zero exit. The outcomes
-// differ too (runTimedOut vs runFailed) and their own tests pin those; alerting
-// keys on the message, so a mutation that swaps or downgrades either must fail
-// here even where the outcome is still right.
+// differ too (runTimedOut vs runFailed) and their own tests pin those; the
+// docs' message table lists both messages and the image smoke test reads
+// "renovate run failed", so a mutation that swaps or downgrades either must
+// fail here even where the outcome is still right.
 func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -237,9 +238,9 @@ func TestRunRenovateOnce_ClassifiesTimeoutAndFailureDistinctly(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := capture.Default(t)
-			got := runRenovateOnce(t.Context(), tt.timeout, "test", runPayload{}, tt.runner)
+			got := runRenovateOnce(t.Context(), tt.timeout, "test", runPayload{}, tt.runner).outcome
 			if got == runComplete {
-				t.Errorf("runRenovateOnce() = runComplete, want a failure outcome")
+				t.Errorf("runRenovateOnce().outcome = runComplete, want a failure outcome")
 			}
 			if got := rec.CountLevel(slog.LevelError, tt.wantMsg); got != 1 {
 				t.Errorf("ERROR records matching %q = %d, want 1; captured: %v", tt.wantMsg, got, rec.Messages())
@@ -264,10 +265,10 @@ func TestRunRenovateOnce_CleanExitWinsWhenDeadlineAlsoExpires(t *testing.T) {
 		return cmd
 	}
 
-	got := runRenovateOnce(t.Context(), 50*time.Millisecond, "test", runPayload{}, runner)
+	got := runRenovateOnce(t.Context(), 50*time.Millisecond, "test", runPayload{}, runner).outcome
 
 	if got != runComplete {
-		t.Fatalf("runRenovateOnce() = %v, want runComplete when the child exited zero and cancellation found it done", got)
+		t.Fatalf("runRenovateOnce().outcome = %v, want runComplete when the child exited zero and cancellation found it done", got)
 	}
 	if got := rec.CountLevel(slog.LevelInfo, "renovate run complete"); got != 1 {
 		t.Errorf("INFO records matching %q = %d, want 1; captured: %v", "renovate run complete", got, rec.Messages())
@@ -301,7 +302,7 @@ func TestRunRenovateOnce_CleanRunSweepsLeftoverGroupMember(t *testing.T) {
 
 	resultCh := make(chan runOutcome, 1)
 	go func() {
-		resultCh <- runRenovateOnce(t.Context(), time.Minute, "test", runPayload{}, runner)
+		resultCh <- runRenovateOnce(t.Context(), time.Minute, "test", runPayload{}, runner).outcome
 	}()
 
 	waitFor(t, 5*time.Second, func() bool {
@@ -326,7 +327,7 @@ func TestRunRenovateOnce_CleanRunSweepsLeftoverGroupMember(t *testing.T) {
 	// member is reaped BEFORE the executor is released to the next job, not
 	// that a completed run is reported failed.
 	if got != runComplete {
-		t.Fatalf("runRenovateOnce() = %v, want runComplete: a zero-exiting leader whose live group member was swept is still a successful run", got)
+		t.Fatalf("runRenovateOnce().outcome = %v, want runComplete: a zero-exiting leader whose live group member was swept is still a successful run", got)
 	}
 	member.awaitReap(t)
 	if got := member.exitSignal(); got != syscall.SIGKILL {
@@ -346,21 +347,20 @@ func TestRunRenovateOnce_EnvironmentValuesNeverReachLifecycleLogs(t *testing.T) 
 	}
 
 	got := runRenovateOnce(t.Context(), time.Minute, "external",
-		runPayload{Repos: []string{"owner/repo"}, Env: []string{"RENOVATE_TOKEN=" + secret}}, runner)
+		runPayload{Repos: []string{"owner/repo"}, Env: []string{"RENOVATE_TOKEN=" + secret}}, runner).outcome
 
 	if got != runComplete {
-		t.Fatalf("runRenovateOnce() = %v, want runComplete", got)
+		t.Fatalf("runRenovateOnce().outcome = %v, want runComplete", got)
 	}
 	if key, value, found := leakedRecord(rec, secret); found {
-		t.Errorf("runRenovateOnce() leaked a forwarded environment value in %s = %q", key, value)
+		t.Errorf("runRenovateOnce().outcome leaked a forwarded environment value in %s = %q", key, value)
 	}
 }
 
 // TestRunRenovateOnce_LifecycleRecordsCarryCorrelationAttributes pins that
 // every pass emits one "renovate run starting" record (trigger, repo scope,
 // timeout) and one terminal record (trigger, elapsed), so a terminal line ties
-// back to its start. The RenovateNoRecentRun rule in docs/monitoring.md keys on
-// the exact clean-run message at INFO; changing either fires it permanently.
+// back to its start. The image smoke test reads the clean-run message.
 // Serial: swaps slog.Default.
 func TestRunRenovateOnce_LifecycleRecordsCarryCorrelationAttributes(t *testing.T) {
 	tests := []struct {
@@ -418,7 +418,7 @@ func TestRunRenovateOnce_LifecycleRecordsCarryCorrelationAttributes(t *testing.T
 			rec := capture.Default(t)
 
 			_ = runRenovateOnce(t.Context(), tt.timeout, tt.trigger,
-				runPayload{Repos: tt.repos}, tt.runner)
+				runPayload{Repos: tt.repos}, tt.runner).outcome
 
 			if got := rec.CountExact("renovate run starting"); got != 1 {
 				t.Fatalf("records matching %q = %d, want 1; captured: %v", "renovate run starting", got, rec.Messages())
@@ -439,10 +439,10 @@ func TestRunRenovateOnce_LifecycleRecordsCarryCorrelationAttributes(t *testing.T
 			if got := rec.CountLevel(tt.terminalLevel, tt.terminalMsg); got != 1 {
 				t.Errorf("%s records matching %q = %d, want 1; captured: %v", tt.terminalLevel, tt.terminalMsg, got, rec.Messages())
 			}
-			if got, ok := rec.AttrValueExact(tt.terminalMsg, "trigger"); !ok || got != tt.trigger {
+			if got, ok := rec.AttrValueExact(capture.Message(tt.terminalMsg), "trigger"); !ok || got != tt.trigger {
 				t.Errorf("terminal record trigger = (%q, %v), want (%q, true)", got, ok, tt.trigger)
 			}
-			durationAttr, ok := rec.Attr(tt.terminalMsg, "duration_ms")
+			durationAttr, ok := rec.Attr(capture.Message(tt.terminalMsg), "duration_ms")
 			if !ok || durationAttr.Kind() != slog.KindInt64 {
 				t.Errorf("terminal record duration_ms = (%v, %v), want an int64 attribute", durationAttr, ok)
 			}
@@ -497,11 +497,11 @@ func TestDefaultCommandRunner_CancelSendsSIGTERMNotSIGKILL(t *testing.T) {
 // groupMember is a SIGTERM-ignoring process that has JOINED the runner child's
 // process group while remaining a direct child of the TEST binary, so the test
 // itself reaps it. A reaper goroutine collects it the instant it dies and
-// records when, which is the instant the process group actually became empty.
+// closes reaped.
 type groupMember struct {
 	pid    int
 	cmd    *exec.Cmd
-	reaped chan time.Time
+	reaped chan struct{}
 }
 
 // startTermIgnoringGroupMember adds a SIGTERM-ignoring process to pgid's
@@ -531,23 +531,13 @@ func startTermHonoringGroupMember(t *testing.T, pgid int) *groupMember {
 		"group member never started")
 }
 
-// startGroupMember starts `sh -c script` as a direct child of the TEST binary
-// joined into pgid's process group, waits for the readiness file the script
-// creates at "$1" (failing with readyMsg if it never appears), and asserts
-// the join. A reaper goroutine collects the member the instant it dies and
-// records when.
-//
-// It joins the group as a direct child of the TEST binary rather than being
-// forked as a descendant of the runner's own child, and that is what makes
-// every group-death assertion here deterministic. A descendant is orphaned the
-// moment the group leader exits and reparents to PID 1 — and a zombie is STILL
-// a process-group member as far as kill(2) is concerned, so
-// runProcessGroupGone cannot see the group empty until the ambient reaper
-// collects it. That probe IS the runner's group-death observation, so a fixture
-// built on an orphaned descendant measures the ambient reaper instead of the
-// code under test: it fails outright wherever PID 1 does not reap (any
-// app-as-PID-1 container) and flakes on a loaded CI runner, where the reap can
-// miss the bounded window. A direct child is reaped here, at a known instant.
+// startGroupMember starts `sh -c script` as a direct child of the test binary
+// joined into pgid's group, waits for the readiness file at "$1" (failing with
+// readyMsg), asserts the join, and reaps the member the instant it dies. A
+// descendant of the runner's child would be orphaned to PID 1 when the leader
+// exits, and its zombie still counts as a group member for kill(2), so
+// runProcessGroupGone would measure the ambient reaper: failing where PID 1
+// never reaps and flaking on a loaded runner.
 func startGroupMember(t *testing.T, pgid int, script, readyMsg string) *groupMember {
 	t.Helper()
 	readyPath := t.TempDir() + "/member-ready"
@@ -556,10 +546,10 @@ func startGroupMember(t *testing.T, pgid int, script, readyMsg string) *groupMem
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start group member: %v", err)
 	}
-	m := &groupMember{pid: cmd.Process.Pid, cmd: cmd, reaped: make(chan time.Time, 1)}
+	m := &groupMember{pid: cmd.Process.Pid, cmd: cmd, reaped: make(chan struct{})}
 	go func() {
 		_ = cmd.Wait()
-		m.reaped <- time.Now()
+		close(m.reaped)
 	}()
 	t.Cleanup(func() { _ = syscall.Kill(m.pid, syscall.SIGKILL) })
 
@@ -576,17 +566,13 @@ func startGroupMember(t *testing.T, pgid int, script, readyMsg string) *groupMem
 	return m
 }
 
-// awaitReap waits for the reaper goroutine to collect the member and returns
-// the instant it did, which is also when the process group emptied in every
-// fixture whose member outlives the runner's own child.
-func (m *groupMember) awaitReap(t *testing.T) time.Time {
+// awaitReap waits for the reaper goroutine to collect the member.
+func (m *groupMember) awaitReap(t *testing.T) {
 	t.Helper()
 	select {
-	case at := <-m.reaped:
-		return at
+	case <-m.reaped:
 	case <-time.After(30 * time.Second):
 		t.Fatal("group member was never reaped")
-		return time.Time{}
 	}
 }
 
@@ -629,8 +615,7 @@ func startTermHonoringChild(t *testing.T) (*exec.Cmd, func()) {
 // binary -- e.g. a base-image relocation that slipped past the Dockerfile's
 // build-time assert), runRenovateOnce reports runStartFailed
 // and logs the failure at ERROR, so the executor flips the health marker
-// unhealthy and the RenovateRunFailed alert fires, instead of reporting a
-// clean run. Serial: swaps slog.Default.
+// unhealthy instead of reporting a clean run. Serial: swaps slog.Default.
 func TestRunRenovateOnce_StartFailureIsARunFailureNotAPanic(t *testing.T) {
 	rec := capture.Default(t)
 
@@ -639,10 +624,10 @@ func TestRunRenovateOnce_StartFailureIsARunFailureNotAPanic(t *testing.T) {
 		return exec.CommandContext(ctx, missing)
 	}
 
-	got := runRenovateOnce(t.Context(), time.Minute, "test", runPayload{}, runner)
+	got := runRenovateOnce(t.Context(), time.Minute, "test", runPayload{}, runner).outcome
 
 	if got != runStartFailed {
-		t.Fatalf("runRenovateOnce() = %v for an unstartable child, want runStartFailed", got)
+		t.Fatalf("runRenovateOnce().outcome = %v for an unstartable child, want runStartFailed", got)
 	}
 	if got := rec.CountLevel(slog.LevelError, "renovate run failed"); got != 1 {
 		t.Errorf("ERROR records matching the run-failure line = %d, want 1; captured: %v", got, rec.Messages())
@@ -671,17 +656,11 @@ func TestDefaultCommandRunner_CancelOnExitedChildReportsProcessDone(t *testing.T
 	}
 }
 
-// TestDefaultCommandRunner_CancelSignalsTheWholeProcessGroup pins the target of
-// the Cancel closure's SIGTERM: the run's process GROUP, so the package-manager
-// toolchains Renovate installs at runtime stop with it instead of continuing to
-// write the base directory after the run timeout fired. os/exec's own WaitDelay
-// SIGKILL reaches the direct child only, so a signal aimed at the leader alone
-// leaves those processes for the post-timeout sweep — or, on the paths that do
-// not sweep, running against the next FIFO job's base directory.
-//
-// Read from the member's exit signal rather than from timing: SIGTERM means the
-// group was addressed, and a member that is never signalled at all outlives the
-// cancel entirely.
+// TestDefaultCommandRunner_CancelSignalsTheWholeProcessGroup pins Cancel's
+// SIGTERM to the run's process group, so the toolchains Renovate installs stop
+// with it rather than writing the base directory after the timeout: os/exec's
+// WaitDelay SIGKILL reaches the direct child only. It reads the member's exit
+// signal rather than timing: SIGTERM means the group was addressed.
 func TestDefaultCommandRunner_CancelSignalsTheWholeProcessGroup(t *testing.T) {
 	t.Parallel()
 	cmd, markReaped := startTermHonoringChild(t)
@@ -699,23 +678,13 @@ func TestDefaultCommandRunner_CancelSignalsTheWholeProcessGroup(t *testing.T) {
 	}
 }
 
-// TestRunRenovateOnce_TimeoutSweepObservesGroupDeath is the regression test
-// for the sweep's observation phase: kill(2) only queues SIGKILL, so a
-// forced cleanup that returns on signal submission alone can release the
-// executor to the next FIFO job while a package-manager descendant is still
-// alive against the same base directory. The leader spawns a TERM-ignoring
-// descendant (models a package manager that shrugs off the Cancel SIGTERM)
-// and then outlives the run timeout; when runRenovateOnce returns, the
-// descendant must ALREADY be gone — no post-return polling window — because
-// sweepRunProcessGroup must not return until the whole group has died.
-//
-// Unlike fixtures that keep the survivor as a test-owned group member, this
-// fixture keeps it as a DESCENDANT of the run child. The instantaneous
-// "already gone" assertion is what catches a submit-and-return sweep, and a
-// test-owned member would have to be reaped by a goroutine here, whose
-// scheduling cannot be ordered against the sweep's return. The cost is that
-// this one test needs an ambient reaper for the orphaned descendant's zombie,
-// so it passes under CI's init but not in a container whose PID 1 never reaps.
+// TestRunRenovateOnce_TimeoutSweepObservesGroupDeath: kill(2) only queues
+// SIGKILL, so sweepRunProcessGroup must not return until the group has died.
+// A TERM-ignoring descendant outlives the timeout and must already be gone
+// when runRenovateOnce returns. It stays a descendant of the run child, since
+// a test-owned member's reaper goroutine cannot be ordered against the sweep's
+// return; so it needs an ambient reaper for the orphan's zombie, and passes
+// under CI's init but not where PID 1 never reaps.
 func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
 	t.Parallel()
 	descPath := t.TempDir() + "/desc.pid"
@@ -729,9 +698,9 @@ func TestRunRenovateOnce_TimeoutSweepObservesGroupDeath(t *testing.T) {
 		return cmd
 	}
 
-	got := runRenovateOnce(t.Context(), 500*time.Millisecond, "test", runPayload{}, runner)
+	got := runRenovateOnce(t.Context(), 500*time.Millisecond, "test", runPayload{}, runner).outcome
 	if got != runTimedOut {
-		t.Errorf("runRenovateOnce() = %v for a run that exceeded the timeout whose group the sweep confirmed dead, want runTimedOut", got)
+		t.Errorf("runRenovateOnce().outcome = %v for a run that exceeded the timeout whose group the sweep confirmed dead, want runTimedOut", got)
 	}
 
 	raw, err := os.ReadFile(descPath)
@@ -850,8 +819,8 @@ func TestRunRenovateOnce_ChildGetsExitCodesForErrors(t *testing.T) {
 				}
 			}
 			runner := shellAssertRunner(`[ "$RENOVATE_EXIT_CODE_FOR_ERRORS" = "` + tt.want + `" ]`)
-			if got := runRenovateOnce(t.Context(), time.Minute, "test", runPayload{Env: tt.env}, runner); got != runComplete {
-				t.Errorf("runRenovateOnce() = %v, want runComplete: child did not see RENOVATE_EXIT_CODE_FOR_ERRORS=%s (env=%v)", got, tt.want, tt.env)
+			if got := runRenovateOnce(t.Context(), time.Minute, "test", runPayload{Env: tt.env}, runner).outcome; got != runComplete {
+				t.Errorf("runRenovateOnce().outcome = %v, want runComplete: child did not see RENOVATE_EXIT_CODE_FOR_ERRORS=%s (env=%v)", got, tt.want, tt.env)
 			}
 		})
 	}
@@ -902,7 +871,7 @@ func TestRunRenovateOnce_NonCleanRunsSweepAndReportContainment(t *testing.T) {
 		resultCh := make(chan runOutcome, 1)
 		go func() {
 			resultCh <- runRenovateOnce(t.Context(), time.Minute, "test",
-				runPayload{}, nonZeroLeader(leaderPath, releasePath))
+				runPayload{}, nonZeroLeader(leaderPath, releasePath)).outcome
 		}()
 
 		member := startTermIgnoringGroupMember(t, awaitLeaderPID(t, leaderPath))
@@ -911,7 +880,7 @@ func TestRunRenovateOnce_NonCleanRunsSweepAndReportContainment(t *testing.T) {
 		}
 
 		if got := <-resultCh; got != runFailed {
-			t.Fatalf("runRenovateOnce() = %v, want runFailed: a non-zero exit whose live group member was swept is a failed run, not a containment", got)
+			t.Fatalf("runRenovateOnce().outcome = %v, want runFailed: a non-zero exit whose live group member was swept is a failed run, not a containment", got)
 		}
 		member.awaitReap(t)
 		if got := member.exitSignal(); got != syscall.SIGKILL {
@@ -927,7 +896,7 @@ func TestRunRenovateOnce_NonCleanRunsSweepAndReportContainment(t *testing.T) {
 		resultCh := make(chan runOutcome, 1)
 		go func() {
 			resultCh <- runRenovateOnce(t.Context(), time.Minute, "test",
-				runPayload{}, nonZeroLeader(leaderPath, releasePath))
+				runPayload{}, nonZeroLeader(leaderPath, releasePath)).outcome
 		}()
 
 		// A holder joins the leader's group, is SIGKILLed but NOT reaped: the
@@ -951,21 +920,18 @@ func TestRunRenovateOnce_NonCleanRunsSweepAndReportContainment(t *testing.T) {
 		}
 
 		if got := <-resultCh; got != runContained {
-			t.Errorf("runRenovateOnce() = %v, want runContained: a non-zero run whose group death cannot be confirmed must raise the containment signal, not report a plain failure", got)
+			t.Errorf("runRenovateOnce().outcome = %v, want runContained: a non-zero run whose group death cannot be confirmed must raise the containment signal, not report a plain failure", got)
 		}
 	})
 }
 
 // TestRunRenovateOnce_CleanUnconfirmableGroupDeathReportsContainment pins the
-// arm where the two containment inputs disagree: Renovate exited ZERO but the
-// kill sweep could not confirm its process group dead. The run must report
-// runContained so daemon.execute halts admission, and it must NOT emit the
-// "renovate run complete" record the completion-absence alerting watches for --
-// the clean-arm sibling
-// (TestRunRenovateOnce_CleanRunSweepsLeftoverGroupMember) reaches runComplete
-// because its member is promptly reaped. The unconfirmable state is a
-// SIGKILLed-but-unreaped zombie joined into the leader's group, a direct child
-// of the TEST binary so the test owns the reap. Serial: swaps slog.Default.
+// arm where Renovate exited zero but the kill sweep could not confirm its
+// process group dead: the run reports runContained, so daemon.execute halts
+// admission, and writes no "renovate run complete" record, which the image
+// smoke test reads as success. The unconfirmable state is a SIGKILLed but
+// unreaped zombie in the leader's group, a child of the test binary so the
+// test owns the reap. Serial: swaps slog.Default.
 func TestRunRenovateOnce_CleanUnconfirmableGroupDeathReportsContainment(t *testing.T) {
 	rec := capture.Default(t)
 	dir := t.TempDir()
@@ -981,7 +947,7 @@ func TestRunRenovateOnce_CleanUnconfirmableGroupDeathReportsContainment(t *testi
 
 	resultCh := make(chan runOutcome, 1)
 	go func() {
-		resultCh <- runRenovateOnce(t.Context(), time.Minute, "test", runPayload{}, runner)
+		resultCh <- runRenovateOnce(t.Context(), time.Minute, "test", runPayload{}, runner).outcome
 	}()
 
 	waitFor(t, 5*time.Second, func() bool {
@@ -1014,7 +980,7 @@ func TestRunRenovateOnce_CleanUnconfirmableGroupDeathReportsContainment(t *testi
 	}
 
 	if got := <-resultCh; got != runContained {
-		t.Errorf("runRenovateOnce() = %v, want runContained: a zero exit whose group death cannot be confirmed must raise the containment signal, not report a completed run", got)
+		t.Errorf("runRenovateOnce().outcome = %v, want runContained: a zero exit whose group death cannot be confirmed must raise the containment signal, not report a completed run", got)
 	}
 	if got := rec.CountLevel(slog.LevelInfo, "renovate run complete"); got != 0 {
 		t.Errorf("INFO records matching %q = %d, want 0: a contained run must not log the completion line; captured: %v", "renovate run complete", got, rec.Messages())
@@ -1070,19 +1036,18 @@ func TestAbortDiagnosis_IgnoresANonExitError(t *testing.T) {
 }
 
 // TestRunRenovateOnce_AbortedRunNamesTheHeapCause pins the operator-facing
-// half: the message string stays exactly "renovate run failed" because the
-// RenovateRunFailed rule in docs/monitoring.md keys on the ERROR level and that wording,
-// and the diagnosis rides as attributes. Serial: swaps slog.Default.
+// half: the message string stays exactly "renovate run failed", which the image
+// smoke test reads, and the diagnosis rides as attributes. Serial: swaps slog.Default.
 func TestRunRenovateOnce_AbortedRunNamesTheHeapCause(t *testing.T) {
 	rec := capture.Default(t)
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "sh", "-c", "exit 134")
 	}
 
-	got := runRenovateOnce(t.Context(), time.Minute, "external", runPayload{}, runner)
+	got := runRenovateOnce(t.Context(), time.Minute, "external", runPayload{}, runner).outcome
 
 	if got != runFailed {
-		t.Fatalf("runRenovateOnce() = %v, want runFailed", got)
+		t.Fatalf("runRenovateOnce().outcome = %v, want runFailed", got)
 	}
 	if got := rec.CountLevel(slog.LevelError, "renovate run failed"); got != 1 {
 		t.Fatalf("ERROR records matching %q = %d, want 1; captured: %v",
@@ -1122,12 +1087,12 @@ func TestRepositoryErrorDiagnosis(t *testing.T) {
 	}
 }
 
-// TestRunRenovateOnce_RefusedCloneIsARepositoryErrorWarning pins the line an
-// operator reads when exitCodeForErrors turns a refused clone into exit 7: a
-// WARN naming the cause, never the ERROR `renovate run failed` the shipped
-// alert fires on, because the executor decides whether the run fails.
+// TestRunRenovateOnce_RefusedCloneIsARepositoryError pins how a refused clone,
+// which exitCodeForErrors turns into exit 7, reaches the executor: as a
+// repository error carrying Renovate's error, with no failure line written,
+// because only the executor knows whether the run is still tolerated.
 // Serial: swaps slog.Default.
-func TestRunRenovateOnce_RefusedCloneIsARepositoryErrorWarning(t *testing.T) {
+func TestRunRenovateOnce_RefusedCloneIsARepositoryError(t *testing.T) {
 	rec := capture.Default(t)
 	runner := func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
 		return exec.CommandContext(ctx, "sh", "-c", "exit 7")
@@ -1135,16 +1100,14 @@ func TestRunRenovateOnce_RefusedCloneIsARepositoryErrorWarning(t *testing.T) {
 
 	got := runRenovateOnce(t.Context(), time.Minute, "external", runPayload{}, runner)
 
-	if got != runRepositoryError {
-		t.Fatalf("runRenovateOnce() = %v, want runRepositoryError", got)
+	if got.outcome != runRepositoryError || got.exitCode != 7 {
+		t.Fatalf("runRenovateOnce() = %+v, want runRepositoryError with exit code 7", got)
 	}
-	const msg = "renovate run ended in a repository error"
-	if n := rec.CountLevel(slog.LevelWarn, msg); n != 1 {
-		t.Fatalf("WARN records matching %q = %d, want 1; captured: %v", msg, n, rec.Messages())
+	if diag, ok := repositoryErrorDiagnosis(got.err); !ok || !strings.Contains(diag.cause, "external host error") {
+		t.Errorf("result error %v diagnoses as (%+v, %v), want the external host error", got.err, diag, ok)
 	}
-	if !rec.AttrContains(msg, "likely_cause", "external host error") {
-		value, ok := rec.Attr(msg, "likely_cause")
-		t.Errorf("warning likely_cause = (%v, %v), want a value naming the external host error", value, ok)
+	if n := rec.CountLevel(slog.LevelWarn, ""); n != 0 {
+		t.Errorf("WARN records = %d, want 0; captured: %v", n, rec.Messages())
 	}
 	if n := rec.CountLevel(slog.LevelError, ""); n != 0 {
 		t.Errorf("ERROR records = %d, want 0 for a repository error; captured: %v", n, rec.Messages())
@@ -1160,10 +1123,10 @@ func TestRunRenovateOnce_OrdinaryFailureCarriesNoDiagnosis(t *testing.T) {
 		return exec.CommandContext(ctx, "false")
 	}
 
-	got := runRenovateOnce(t.Context(), time.Minute, "external", runPayload{}, runner)
+	got := runRenovateOnce(t.Context(), time.Minute, "external", runPayload{}, runner).outcome
 
 	if got != runFailed {
-		t.Fatalf("runRenovateOnce() = %v, want runFailed", got)
+		t.Fatalf("runRenovateOnce().outcome = %v, want runFailed", got)
 	}
 	if got := rec.CountLevel(slog.LevelError, "renovate run failed"); got != 1 {
 		t.Fatalf("ERROR records matching %q = %d, want 1; captured: %v",

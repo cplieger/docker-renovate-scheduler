@@ -1,0 +1,286 @@
+# promtool test rules alerts/promql_test.yaml
+rule_files:
+  - promql.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: a failing scrape pages after 5m and keeps the target's labels
+    interval: 1m
+    input_series:
+      - series: 'up{job="renovate", instance="renovate:9470"}'
+        values: "1 0x10"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RenovateDown
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: RenovateDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: renovate
+              instance: renovate:9470
+            exp_annotations:
+              summary: "docker-renovate-scheduler is not being scraped"
+              description: "No successful scrape for 5m: the container is stopped, crash-looping or refusing to start, or the scrape cannot reach METRICS_LISTEN_ADDR. Check the container's state and its `daemon stopped` line.\n"
+
+  - name: a target that is gone pages through the absent arm
+    interval: 1m
+    input_series:
+      - series: 'up{job="other", instance="x:1"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: RenovateDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: renovate
+            exp_annotations:
+              summary: "docker-renovate-scheduler is not being scraped"
+              description: "No successful scrape for 5m: the container is stopped, crash-looping or refusing to start, or the scrape cannot reach METRICS_LISTEN_ADDR. Check the container's state and its `daemon stopped` line.\n"
+
+  - name: RenovateRunFailed holds per scope while its last run failed and clears at its next good run
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_last_run_ok{job="renovate", instance="renovate:9470", scope="full"}'
+        values: "1 0x4 1x4"
+      - series: 'renovate_scheduler_last_run_ok{job="renovate", instance="renovate:9470", scope="scoped"}'
+        values: "1x9"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: RenovateRunFailed
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: RenovateRunFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: renovate
+              instance: renovate:9470
+              scope: full
+            exp_annotations:
+              summary: "The last full Renovate run failed"
+              description: "The latest completed run of this scope failed. renovate_scheduler_last_run_result names the cause, and the container log has the detail. Check RENOVATE_TOKEN or the GitHub App settings, whether the platform is reachable, and the memory limit.\n"
+      - eval_time: 7m
+        alertname: RenovateRunFailed
+        exp_alerts: []
+
+  - name: a fresh install with no completed run has no failed run
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_info{job="renovate", instance="renovate:9470", mode="built-in", auth="token"}'
+        values: "1x10"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RenovateRunFailed
+        exp_alerts: []
+
+  - name: with the deadline at 0, RenovateNoRecentRun fires 14h after the last complete full run, after its 30m for, whatever scoped runs do, and clears at the next one
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_run_deadline_timestamp_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1000"
+      - series: 'renovate_scheduler_last_success_timestamp_seconds{job="renovate", instance="renovate:9470", scope="full"}'
+        values: "60x899 54000x100"
+      - series: 'renovate_scheduler_last_success_timestamp_seconds{job="renovate", instance="renovate:9470", scope="scoped"}'
+        values: "60+60x1000"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1000"
+    alert_rule_test:
+      - eval_time: 14h20m
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+      - eval_time: 14h35m
+        alertname: RenovateNoRecentRun
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: renovate
+              instance: renovate:9470
+              scope: full
+            exp_annotations:
+              summary: "No full Renovate run has completed on schedule"
+              description: "No complete full run by the run deadline, or in 14h while it reads 0 (RUN_INTERVAL=off). Runs may be failing or tolerated, or a scheduler stopped; scoped runs do not count. Check renovate_scheduler_last_run_result and the container log.\n"
+      - eval_time: 15h5m
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+
+  - name: with the deadline at 0, RenovateNoRecentRun measures from the process start when no complete full run is on record
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_run_deadline_timestamp_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1000"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1000"
+      - series: 'renovate_scheduler_build_info{job="renovate", instance="renovate:9470", version="v4.0.0"}'
+        values: "1x1000"
+    alert_rule_test:
+      - eval_time: 14h20m
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+      - eval_time: 14h35m
+        alertname: RenovateNoRecentRun
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: renovate
+              instance: renovate:9470
+            exp_annotations:
+              summary: "No full Renovate run has completed on schedule"
+              description: "No complete full run by the run deadline, or in 14h while it reads 0 (RUN_INTERVAL=off). Runs may be failing or tolerated, or a scheduler stopped; scoped runs do not count. Check renovate_scheduler_last_run_result and the container log.\n"
+
+  - name: the process-start arm follows the app under any scrape job name
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_run_deadline_timestamp_seconds{job="renovate-scheduler", instance="scheduler:9470"}'
+        values: "0x1000"
+      - series: 'process_start_time_seconds{job="renovate-scheduler", instance="scheduler:9470"}'
+        values: "0x1000"
+      - series: 'renovate_scheduler_build_info{job="renovate-scheduler", instance="scheduler:9470", version="v4.0.0"}'
+        values: "1x1000"
+    alert_rule_test:
+      - eval_time: 14h20m
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+      - eval_time: 14h35m
+        alertname: RenovateNoRecentRun
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: renovate-scheduler
+              instance: scheduler:9470
+            exp_annotations:
+              summary: "No full Renovate run has completed on schedule"
+              description: "No complete full run by the run deadline, or in 14h while it reads 0 (RUN_INTERVAL=off). Runs may be failing or tolerated, or a scheduler stopped; scoped runs do not count. Check renovate_scheduler_last_run_result and the container log.\n"
+
+  - name: another job's process start beside a waiting renovate target raises the alert for the renovate target only
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_run_deadline_timestamp_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1000"
+      - series: 'process_start_time_seconds{job="node", instance="node:9100"}'
+        values: "0x1000"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1000"
+      - series: 'renovate_scheduler_build_info{job="renovate", instance="renovate:9470", version="v4.0.0"}'
+        values: "1x1000"
+    alert_rule_test:
+      - eval_time: 14h35m
+        alertname: RenovateNoRecentRun
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: renovate
+              instance: renovate:9470
+            exp_annotations:
+              summary: "No full Renovate run has completed on schedule"
+              description: "No complete full run by the run deadline, or in 14h while it reads 0 (RUN_INTERVAL=off). Runs may be failing or tolerated, or a scheduler stopped; scoped runs do not count. Check renovate_scheduler_last_run_result and the container log.\n"
+
+  - name: another job's process start never raises RenovateNoRecentRun
+    interval: 1m
+    input_series:
+      - series: 'process_start_time_seconds{job="node", instance="node:9100"}'
+        values: "0x1000"
+    alert_rule_test:
+      - eval_time: 14h35m
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+
+  - name: another job's process start beside a healthy renovate target never raises RenovateNoRecentRun
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_run_deadline_timestamp_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1000"
+      - series: 'process_start_time_seconds{job="node", instance="node:9100"}'
+        values: "0x1000"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1000"
+      - series: 'renovate_scheduler_build_info{job="renovate", instance="renovate:9470", version="v4.0.0"}'
+        values: "1x1000"
+      - series: 'renovate_scheduler_last_success_timestamp_seconds{job="renovate", instance="renovate:9470", scope="full"}'
+        values: "1+60x1000"
+    alert_rule_test:
+      - eval_time: 14h35m
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+
+  - name: with the deadline at 0, a complete full run every 6h, the default interval, never alerts
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_run_deadline_timestamp_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1439"
+      - series: 'renovate_scheduler_last_success_timestamp_seconds{job="renovate", instance="renovate:9470", scope="full"}'
+        values: "1x359 21601x359 43201x359 64801x359"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1439"
+    alert_rule_test:
+      - eval_time: 15h
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+      - eval_time: 23h
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+
+  - name: the deadline arm fires 15m past the deadline, after its 30m for, and resolves when a complete full run moves it
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_run_deadline_timestamp_seconds{job="renovate", instance="renovate:9470"}'
+        values: "3600x119 100000x880"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1000"
+      - series: 'renovate_scheduler_build_info{job="renovate", instance="renovate:9470", version="v4.0.0"}'
+        values: "1x1000"
+    alert_rule_test:
+      - eval_time: 1h44m
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+      - eval_time: 1h46m
+        alertname: RenovateNoRecentRun
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: renovate
+              instance: renovate:9470
+            exp_annotations:
+              summary: "No full Renovate run has completed on schedule"
+              description: "No complete full run by the run deadline, or in 14h while it reads 0 (RUN_INTERVAL=off). Runs may be failing or tolerated, or a scheduler stopped; scoped runs do not count. Check renovate_scheduler_last_run_result and the container log.\n"
+      - eval_time: 2h1m
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+
+  - name: a deadline still ahead keeps RenovateNoRecentRun quiet past the 14h window
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_run_deadline_timestamp_seconds{job="renovate", instance="renovate:9470"}'
+        values: "200000x1000"
+      - series: 'renovate_scheduler_last_success_timestamp_seconds{job="renovate", instance="renovate:9470", scope="full"}'
+        values: "60x1000"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1000"
+      - series: 'renovate_scheduler_build_info{job="renovate", instance="renovate:9470", version="v4.0.0"}'
+        values: "1x1000"
+    alert_rule_test:
+      - eval_time: 14h35m
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+
+  - name: a deadline of 0 never fires the deadline arm
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_run_deadline_timestamp_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1000"
+      - series: 'renovate_scheduler_last_success_timestamp_seconds{job="renovate", instance="renovate:9470", scope="full"}'
+        values: "1+60x1000"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x1000"
+      - series: 'renovate_scheduler_build_info{job="renovate", instance="renovate:9470", version="v4.0.0"}'
+        values: "1x1000"
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: RenovateNoRecentRun
+        exp_alerts: []
+      - eval_time: 14h35m
+        alertname: RenovateNoRecentRun
+        exp_alerts: []

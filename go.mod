@@ -1,15 +1,24 @@
 module github.com/cplieger/docker-renovate-scheduler
 
-go 1.27.3
+go 1.27.4
 
 require (
-	github.com/cplieger/atomicfile/v4 v4.2.0
-	github.com/cplieger/envx/v2 v2.1.0
-	github.com/cplieger/health v1.10.0
-	github.com/cplieger/httpx/v5 v5.3.0
-	github.com/cplieger/runesafe/v3 v3.2.0
-	github.com/cplieger/scheduler/v4 v4.3.0
-	github.com/cplieger/slogx v1.8.0
+	github.com/cplieger/forgeapi/v2 v2.0.0
+	github.com/cplieger/go/envx v1.1.0
+	github.com/cplieger/go/filesafe v1.1.0
+	github.com/cplieger/go/health/v2 v2.0.0
+	github.com/cplieger/go/httpserver v1.4.0
+	github.com/cplieger/go/measure v1.2.0
+	github.com/cplieger/go/scheduler v1.1.0
+	github.com/cplieger/go/slogx v1.1.0
 )
 
-require github.com/cplieger/pathinside/v2 v2.1.0 // indirect
+require (
+	github.com/cplieger/go/httpcache v1.1.0 // indirect
+	github.com/cplieger/go/httpclient v1.2.0 // indirect
+	github.com/cplieger/go/jsonx v1.1.0 // indirect
+	github.com/cplieger/go/pathinside v1.1.0 // indirect
+	github.com/cplieger/go/ssrf v1.1.0 // indirect
+	github.com/cplieger/go/textsafe v1.1.0 // indirect
+	github.com/cplieger/go/urlform v1.2.0 // indirect
+)

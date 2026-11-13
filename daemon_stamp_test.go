@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/scheduler/v4"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 const startupSkippedMsg = "startup run skipped: the last scheduled run succeeded within the interval"
@@ -257,7 +257,7 @@ func TestExecutor_ScheduledPreflightFailureRecordsFailure(t *testing.T) {
 
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
 	j := newJob("interval", nil, []string{"RENOVATE_BASE_DIR=" + badBaseDir})
-	d.execute(t.Context(), t.Context().Err, j)
+	d.execute(t.Context(), t.Context().Done(), j)
 
 	out := <-j.Result()
 	if out.OK {
@@ -281,7 +281,7 @@ func TestExecutor_PreflightTimeoutLeavesStampUntouched(t *testing.T) {
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
 
 	j := newJob("interval", nil, nil)
-	d.execute(runCtx, t.Context().Err, j)
+	d.execute(runCtx, t.Context().Done(), j)
 
 	if out := <-j.Result(); out.OK {
 		t.Error("preflight timeout outcome ok = true, want false")
@@ -299,12 +299,12 @@ func TestExecutor_ContainmentRecordsFailure(t *testing.T) {
 	ctx := t.Context()
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
 	seedStamp(t, d.stampPath, time.Now(), "ok") // a fresh success the halt must displace
-	d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
-		return runContained
+	d.runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
+		return runResult{outcome: runContained}
 	}
 
 	j := newJob("interval", nil, nil)
-	d.execute(context.WithoutCancel(ctx), ctx.Err, j)
+	d.execute(context.WithoutCancel(ctx), ctx.Done(), j)
 
 	select {
 	case <-j.Result():
@@ -334,7 +334,7 @@ func TestExecutor_RecordFailureWarnsAndKeepsRunResult(t *testing.T) {
 	ctx := t.Context()
 
 	j := newJob("interval", nil, nil)
-	d.execute(context.WithoutCancel(ctx), ctx.Err, j)
+	d.execute(context.WithoutCancel(ctx), ctx.Done(), j)
 
 	select {
 	case out := <-j.Result():

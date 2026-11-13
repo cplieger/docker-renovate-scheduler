@@ -1,0 +1,62 @@
+# Alert rules for docker-renovate-scheduler as a Loki ruler (LogQL) group. This
+# file is the alternative to alerts/promql.yaml: load one of the two, not both.
+# The rules read the `run finished` record, which every completed run writes once
+# at INFO, so keep LOG_LEVEL at info (Renovate reads the same setting). Change
+# the `container` selector to the label your log collector sets. Thresholds,
+# windows and severity labels are starting points. The 14h windows are twice
+# the sum of RUN_INTERVAL and RUN_TIMEOUT at the defaults; resize them to your
+# schedule.
+# RenovateDaemonStopped exists only in this file; in alerts/promql.yaml,
+# RenovateDown covers a stopped scheduler. Notes are in docs/monitoring.md.
+groups:
+  - name: renovate
+    rules:
+      # A state rule: it reads the latest record of each scope in the window,
+      # so it fires at the first failed run and resolves at the next good one.
+      # `| logfmt ok, scope` extracts only the two fields the rule reads. No
+      # label filter follows that field list, the shape Loki misreads (see
+      # RenovateNoRecentRun).
+      - alert: RenovateRunFailed
+        expr: |
+          last_over_time({container="renovate"} |= `msg="run finished"` | logfmt ok, scope | unwrap ok [14h]) by (container, scope) == 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The last {{ $labels.scope }} Renovate run failed"
+          description: >
+            The latest `run finished` record of this scope has ok=0. Its
+            `result` field names the cause, and the line before it has the
+            detail. Check RENOVATE_TOKEN or the GitHub App settings, and
+            whether the platform is reachable.
+      # The bare `| logfmt` is deliberate. Behind a field list such as
+      # `| logfmt scope, result`, Loki (seen on 3.7.9) drops every line at
+      # the label filters once a query aggregates, so this rule fired with
+      # every run healthy (grafana/loki#11334). absent_over_time keeps no
+      # series, so extracting every field costs nothing.
+      - alert: RenovateNoRecentRun
+        expr: |
+          absent_over_time({container="renovate"} |= `msg="run finished"` | logfmt | scope="full" | result="complete" [14h])
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No full Renovate run has completed in 14h"
+          description: >
+            No complete full run in 14h. Runs may be failing or tolerated,
+            the schedule or your own scheduler may have stopped, or the
+            container's logs may no longer reach Loki. Runs scoped to
+            repositories do not count.
+      - alert: RenovateDaemonStopped
+        expr: |
+          sum by (container) (count_over_time({container="renovate"} |= `msg="daemon stopped"` [15m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The Renovate scheduler stopped with an error"
+          description: >
+            The scheduler logged `daemon stopped` and exited. Its `error`
+            field names the cause, such as invalid GitHub App settings, an
+            unwritable base directory or a process that survived a run.
+            Docker's restart policy decides whether it starts again.

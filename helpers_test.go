@@ -9,9 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/health"
-	"github.com/cplieger/scheduler/v4"
-	"github.com/cplieger/scheduler/v4/trigger"
+	"github.com/cplieger/go/health/v2"
+	"github.com/cplieger/go/measure"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/scheduler/trigger"
 )
 
 func newJob(trig string, repos, env []string) *trigger.Job[runPayload] {
@@ -23,21 +24,28 @@ func newBareDaemon(t *testing.T, runner scheduler.CommandRunner) (*daemon, strin
 	t.Helper()
 	dir := t.TempDir()
 	markerPath := filepath.Join(dir, "marker")
-	marker := health.NewMarker(markerPath)
+	st := health.NewStatus(health.WithMarker(markerPath))
 	stampFile := filepath.Join(dir, stampName)
 	d := &daemon{
 		queue:     trigger.NewQueue[runPayload](queueCapacity),
-		marker:    marker,
-		health:    health.NewLatch(marker),
+		status:    st,
 		verifier:  newBaseDirVerifier(),
 		stamp:     scheduler.NewStamp(stampFile),
+		completed: scheduler.NewStamp(filepath.Join(dir, completedStampName)),
+		metrics:   testMetrics(),
 		newCmd:    runner,
 		runOnce:   runRenovateOnce,
+		now:       time.Now,
 		stampPath: stampFile,
 		timeout:   time.Minute,
 		fatal:     make(chan error, 1),
 	}
 	return d, markerPath
+}
+
+// testMetrics returns run metrics on a registry of their own.
+func testMetrics() *runMetrics {
+	return newRunMetrics(measure.NewRegistry(metricsPrefix), "external", "token", runBoot{})
 }
 
 // maxSunPath is the longest usable unix-socket path: Linux sun_path is
@@ -108,14 +116,14 @@ func gatedRunner(t *testing.T) (runner scheduler.CommandRunner, awaitEntered, re
 // gatedRunOnce returns a runOnce seam that signals entry after execute's
 // shutdown preflight check, a boundary gatedRunner's readiness file cannot
 // observe, then blocks until released and reports a clean outcome.
-func gatedRunOnce(t *testing.T) (runOnce func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome, awaitEntered, release func()) {
+func gatedRunOnce(t *testing.T) (runOnce func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult, awaitEntered, release func()) {
 	t.Helper()
 	entered := make(chan struct{})
 	proceed := make(chan struct{})
-	runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runOutcome {
+	runOnce = func(context.Context, time.Duration, string, runPayload, scheduler.CommandRunner) runResult {
 		close(entered)
 		<-proceed
-		return runComplete
+		return runResult{outcome: runComplete}
 	}
 	awaitEntered = func() {
 		select {
@@ -135,5 +143,15 @@ func seedStamp(t *testing.T, path string, ts time.Time, outcome string) {
 	line := ts.UTC().Format(time.RFC3339Nano) + " " + outcome + "\n"
 	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
 		t.Fatalf("seed stamp file %s: %v", path, err)
+	}
+}
+
+// clearAppEnv unsets every GitHub App setting for the test, so a shell or CI
+// job that carries App settings cannot switch the code under test into App
+// mode.
+func clearAppEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{envAppID, envAppInstallationID, envAppKeyFile, envAppKeyInline} {
+		t.Setenv(key, "")
 	}
 }

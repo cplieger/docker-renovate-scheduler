@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 // The leader exits before its deadline; an unreaped member holds the sweep open.
@@ -35,11 +35,11 @@ func TestRunRenovateOnce_DeadlineCrossedDuringSweepStillLogsFailure(t *testing.T
 
 	resultCh := make(chan runOutcome, 1)
 	go func() {
-		resultCh <- runRenovateOnce(t.Context(), timeout, "test", runPayload{}, runner)
+		resultCh <- runRenovateOnce(t.Context(), timeout, "test", runPayload{}, runner).outcome
 	}()
 	deadline := <-deadlineCh
 	if deadline.IsZero() {
-		t.Fatal("runRenovateOnce() runner context has no deadline, want the run timeout deadline")
+		t.Fatal("runRenovateOnce().outcome runner context has no deadline, want the run timeout deadline")
 	}
 
 	waitFor(t, 5*time.Second, func() bool {
@@ -92,7 +92,7 @@ func TestRunRenovateOnce_DeadlineCrossedDuringSweepStillLogsFailure(t *testing.T
 	_ = holder.Wait()
 
 	if got := <-resultCh; got != runFailed {
-		t.Errorf("runRenovateOnce() = %v, want runFailed: a non-zero exit inside the deadline stays a failure however long the sweep runs", got)
+		t.Errorf("runRenovateOnce().outcome = %v, want runFailed: a non-zero exit inside the deadline stays a failure however long the sweep runs", got)
 	}
 	if got := rec.CountLevel(slog.LevelError, "renovate run failed"); got != 1 {
 		t.Errorf("ERROR records matching %q = %d, want 1; captured: %v", "renovate run failed", got, rec.Messages())

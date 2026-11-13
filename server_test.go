@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/scheduler/v4"
-	"github.com/cplieger/scheduler/v4/trigger"
-	"github.com/cplieger/slogx/capture"
+	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/scheduler/trigger"
+	"github.com/cplieger/go/slogx/capture"
 )
 
 // startTestServer wires a queue + executor + trigger server on a temp socket
@@ -32,14 +32,15 @@ func startTestServer(t *testing.T, runner scheduler.CommandRunner) string {
 	execDone := make(chan struct{})
 	go func() { defer close(execDone); d.runJobs(ctx) }()
 	srv := &trigger.Server[runPayload]{Queue: d.queue}
-	srv.Serve(ln)
+	served := make(chan struct{})
+	go func() { defer close(served); _ = srv.Serve(ctx, ln) }()
 
 	t.Cleanup(func() {
 		_ = ln.Close()
 		cancel()
 		d.queue.Close()
 		<-execDone
-		srv.Wait()
+		<-served
 	})
 	return sock
 }
@@ -121,7 +122,7 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	d, _ := newBareDaemon(t, recordingRunner("true", nil))
 	// Read inflightCtx only after execDone closes.
 	var inflightCtx context.Context
-	d.runOnce = func(runCtx context.Context, timeout time.Duration, trig string, p runPayload, newCmd scheduler.CommandRunner) runOutcome {
+	d.runOnce = func(runCtx context.Context, timeout time.Duration, trig string, p runPayload, newCmd scheduler.CommandRunner) runResult {
 		inflightCtx = runCtx
 		return runOnce(runCtx, timeout, trig, p, newCmd)
 	}
@@ -132,22 +133,23 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	execDone := make(chan struct{})
 	go func() { defer close(execDone); d.runJobs(ctx) }()
 	srv := &trigger.Server[runPayload]{Queue: d.queue}
-	srv.Serve(ln)
+	served := make(chan struct{})
+	go func() { defer close(served); _ = srv.Serve(ctx, ln) }()
 	// A mid-test Fatal must not leave the executor parked in the gated
 	// runOnce, the listener open, or executor/handler goroutines running
 	// past the test's TempDir cleanup. Shutdown is established BEFORE the
 	// gate is released so a queued request can't be dequeued in the
 	// release-to-cancel race, then both owned components are joined.
 	// release is idempotent; the repeated cancel/ln.Close/queue.Close and
-	// the re-receive/re-Wait on the normal path are tolerated
-	// (closed-flag close, closed channel, completed WaitGroup).
+	// the re-receives on the normal path are tolerated
+	// (closed-flag close, closed channels).
 	t.Cleanup(func() {
 		cancel()
 		_ = ln.Close()
 		d.queue.Close()
 		release()
 		<-execDone
-		srv.Wait()
+		<-served
 	})
 
 	// Occupy the executor, then queue a second request over the wire.
@@ -191,7 +193,7 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 	}
 
 	<-execDone
-	srv.Wait()
+	<-served
 	// A drained run's context must outlive shutdown.
 	if err := inflightCtx.Err(); err != nil {
 		t.Errorf("in-flight run context Err() = %v, want nil: the executor must hand the run a context shutdown cannot cancel", err)

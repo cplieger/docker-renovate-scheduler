@@ -7,15 +7,17 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 COPY *.go ./
+# The release pipeline passes the channel tag; a local build reports dev.
+ARG BUILD_VERSION=dev
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /docker-renovate-scheduler .
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${BUILD_VERSION}" -o /docker-renovate-scheduler .
 COPY LICENSE NOTICE ./
 COPY scripts/collect-licenses.sh scripts/
 RUN --mount=type=cache,target=/go/pkg/mod \
     sh scripts/collect-licenses.sh --name docker-renovate-scheduler .
 
-FROM renovate/renovate:44.222.0@sha256:a8cb8222b49d15da701436954b7463427d535eae2203b294655c9a29675c47d1
+FROM renovate/renovate:44.237.2@sha256:6da02401977f6c9658a268e296b98e0f6fac5f9ac2ef8cd80a05feafe24ca566
 
 USER root
 
@@ -53,7 +55,7 @@ ENV RENOVATE_BASE_DIR=/data
 # so Renovate's on-demand Go install fails and every Go PR ships a stale go.sum;
 # installed as root, Go is usable by any UID (docs/configuration.md "Running as another user").
 # renovate: datasource=golang-version depName=go
-ARG GOLANG_VERSION=1.27.3
+ARG GOLANG_VERSION=1.27.4
 RUN install-tool golang "${GOLANG_VERSION}"
 
 COPY --chmod=755 --from=go-builder /docker-renovate-scheduler /usr/local/bin/docker-renovate-scheduler
