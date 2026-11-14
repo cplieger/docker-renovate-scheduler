@@ -3,27 +3,27 @@
 [![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/docker-renovate-scheduler/badges/size.json)](https://github.com/cplieger/docker-renovate-scheduler/pkgs/container/docker-renovate-scheduler) [![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)](https://github.com/cplieger/docker-renovate-scheduler/pkgs/container/docker-renovate-scheduler) [![base: renovate/renovate](https://img.shields.io/badge/base-renovate%2Frenovate-1A1F6C)](https://github.com/cplieger/docker-renovate-scheduler/blob/main/Dockerfile) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/docker-renovate-scheduler/badges/mutation.json)](https://github.com/cplieger/docker-renovate-scheduler/issues?q=label%3Agremlins-tracker) [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/docker-renovate-scheduler/releases)
 
 <!-- hub-overview BEGIN -->
-docker-renovate-scheduler keeps your self-hosted [Renovate](https://github.com/renovatebot/renovate) bot in one always-on container that runs it on a schedule or when your own scheduler asks. It opens no port unless you ask for a metrics page.
+docker-renovate-scheduler runs your self-hosted [Renovate](https://github.com/renovatebot/renovate) in one always-on container, on a schedule or when your own scheduler asks, with no cron job. It is Renovate's official image plus a scheduler. It opens no port unless you ask for a metrics page, and it does not answer webhooks.
 
 ## What it does
 
-docker-renovate-scheduler keeps dependency pull requests coming from your Renovate bot, with no cron job to write:
+docker-renovate-scheduler keeps dependency pull requests coming from your Renovate bot:
 
-- Runs Renovate every 6 hours by default and keeps that rhythm when the container restarts or updates.
-- Also starts a run on request, from `docker exec` or your own scheduler, for all repositories or only named ones.
-- Runs one pass at a time and queues the others, each with its own result.
+- Runs Renovate every 6 hours by default. A restart or update after a good run neither adds a run nor delays the next.
+- Starts a run when you ask, for every repository or only the ones you name.
+- Runs one pass at a time and queues the rest.
 - Keeps clones and caches on `/data` between runs.
-- Marks itself unhealthy when a run fails, until the next good run. A repository error or a GitHub App token outage counts only once it has lasted 2 hours, because a platform outage causes most of them.
+- Tells you when runs fail or stop, through alert rules for Prometheus and Loki.
 
 ## Who it is for
 
-docker-renovate-scheduler is built for people who self-host Renovate on a Docker host and want it to run like their other always-on containers, not from cron. It is Renovate's official image plus a scheduler, and passes your `RENOVATE_*` settings on unchanged. You need a bot account's token or a GitHub App.
+docker-renovate-scheduler is built for people who self-host Renovate on a Docker host, next to their other always-on containers. Your `RENOVATE_*` settings go to Renovate unchanged, so it works with the platforms Renovate supports. You need a bot account's token, or a GitHub App on github.com, and at least 3 GB of memory.
 
-Other ways to run Renovate suit a different setup:
+Other ways to run Renovate suit other setups:
 
-- Consider the [Mend Renovate App](https://github.com/apps/renovate) if you would rather host nothing. You install it on GitHub for the repositories you pick.
-- Consider [Mend Renovate Community Edition](https://github.com/mend/renovate-ce-ee) if you want runs that answer webhooks, with merged PRs handled ahead of scheduled jobs.
-- Consider [renovatebot/github-action](https://github.com/renovatebot/github-action) if you want Renovate to run on GitHub Actions runners.
+- Consider the [Mend Renovate App](https://github.com/apps/renovate) if your repositories are on GitHub and you would rather host nothing.
+- Consider [Mend Renovate Community Edition](https://github.com/mend/renovate-ce-ee) if you want Renovate to answer webhooks and handle merged PRs ahead of scheduled jobs.
+- Consider [renovatebot/github-action](https://github.com/renovatebot/github-action) if you want Renovate on GitHub Actions runners.
 
 docker-renovate-scheduler is free software under the Apache-2.0 license.
 <!-- hub-overview END -->
@@ -77,17 +77,17 @@ The scheduler reads these settings once at start, so recreate the container afte
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `RUN_INTERVAL` | Time between runs, such as `1h` or `30m`. `off` waits for your own scheduler to start each run | `6h` |
+| `RUN_INTERVAL` | Time between runs, such as `1h` or `30m`. `off` waits for your own scheduler, such as a cron job, to start each run | `6h` |
 | `RUN_TIMEOUT` | Longest time one run may take before it is stopped and fails | `1h` |
-| `LOG_LEVEL` | `debug`, `info`, `warn` or `error`, for the scheduler and Renovate. `trace` and `fatal` work for Renovate only. Any other value stops Renovate. The log alert rules need `info` or `debug` | `info` |
-| `METRICS_LISTEN_ADDR` | Address for a Prometheus metrics page and `/healthz`, for example `:9470`. Empty opens no port. An address the container cannot listen on stops it at start | none |
-| `GITHUB_APP_ID` | Your GitHub App's ID. With `GITHUB_APP_PRIVATE_KEY_FILE`, every run gets a fresh App installation token instead of `RENOVATE_TOKEN` | none |
-| `GITHUB_APP_PRIVATE_KEY_FILE` | Path inside the container to the App's private key file, such as a read-only mount | none |
-| `GITHUB_APP_INSTALLATION_ID` | The installation to use. Unset, the scheduler uses the App's only installation | none |
+| `LOG_LEVEL` | `debug`, `info`, `warn` or `error`. Renovate also takes `trace` and `fatal`. Any other value stops Renovate. Log alert rules need `info` or `debug` | `info` |
+| `METRICS_LISTEN_ADDR` | Address for a Prometheus metrics page and `/healthz`, such as `:9470`. Empty opens no port. An unusable address stops the container at start | _(unset)_ |
+| `GITHUB_APP_ID` | Your GitHub App's ID. With `GITHUB_APP_PRIVATE_KEY_FILE`, every run gets a fresh App installation token instead of `RENOVATE_TOKEN` | _(unset)_ |
+| `GITHUB_APP_PRIVATE_KEY_FILE` | Path inside the container to the App's private key file, such as a read-only mount | _(unset)_ |
+| `GITHUB_APP_INSTALLATION_ID` | The installation to use. Unset, the scheduler uses the App's only installation | _(unset)_ |
 
-Leave the three `GITHUB_APP_*` settings unset to keep using `RENOVATE_TOKEN`. [GitHub App authentication](docs/configuration.md#github-app-authentication) explains when an App is worth it and how to set one up.
+Leave the three `GITHUB_APP_*` settings unset to keep using `RENOVATE_TOKEN`. [GitHub App authentication](docs/configuration.md#github-app-authentication) explains when an App is worth it and how to set one up. [Settings](docs/configuration.md#settings) says how the scheduler treats `trace` and `fatal`.
 
-Unless you set it, Renovate runs with `RENOVATE_EXIT_CODE_FOR_ERRORS=true`, so a repository that ends in an error, such as a refused clone, is noticed. A platform outage causes most of these, so the scheduler logs them as warnings and reports a failed run only once they have lasted 2 hours. [Renovate's own settings](docs/configuration.md#renovates-own-settings) has the details and how to turn it off.
+Unless you set it, Renovate runs with `RENOVATE_EXIT_CODE_FOR_ERRORS=true`, so Renovate exits with an error code when a repository ends in an error, such as a refused clone. Most come from a platform outage. The scheduler logs them as warnings and reports a failed run only once they have lasted 2 hours. [Renovate's own settings](docs/configuration.md#renovates-own-settings) has the details and how to turn it off.
 
 | Mount | Description |
 | --- | --- |
@@ -97,7 +97,7 @@ Unless you set it, Renovate runs with `RENOVATE_EXIT_CODE_FOR_ERRORS=true`, so a
 
 To start a run yourself, run `docker exec renovate docker-renovate-scheduler run`, or add repository names after `run` to process only those.
 
-Keep the container's default user. Without the extra cache settings, another user cannot write Renovate's tool caches, and its PRs arrive without updated lockfiles. [Configuration](docs/configuration.md) has the settings that make another user work, both scheduling modes, an Ofelia example and the memory a run needs.
+Keep the container's default user, UID 12021. Under another user, Renovate cannot write its tool caches, so its PRs arrive without updated lockfiles unless you add the cache settings in [Running as another user](docs/configuration.md#running-as-another-user). [Configuration](docs/configuration.md) also covers both scheduling modes, an Ofelia example and the memory a run needs.
 
 ## Security
 
@@ -107,28 +107,28 @@ The scheduler never logs your platform token, a GitHub App token or the App's pr
 
 ## Troubleshooting
 
-The healthcheck reads the health file the scheduler refreshes after each run at `/dev/shm/docker-renovate-scheduler.healthy`. Unhealthy means the last run failed, and the next good run makes it healthy again. Repository errors and GitHub App token outages make it unhealthy only once they have lasted 2 hours. With the built-in schedule, it also turns unhealthy when no run has finished for 13 hours with the defaults, which is twice `RUN_INTERVAL` plus `RUN_TIMEOUT`. GitHub App mode adds 2 minutes for the token request. A run waiting out a GitHub App token rate limit keeps a healthy verdict fresh, so that wait does not count as a stopped schedule. The image allows 10 minutes at start for a slow first run. An unhealthy container notifies nobody. [Knowing the app is alive](docs/monitoring.md#knowing-the-app-is-alive) says what does.
+The healthcheck reads a health file the scheduler refreshes after each run. Unhealthy means the last run failed, and the next good run makes it healthy again. Repository errors and GitHub App token outages make it unhealthy only once they have lasted 2 hours. With the built-in schedule, it also turns unhealthy when no run finishes within twice `RUN_INTERVAL` plus `RUN_TIMEOUT`, 13 hours at the defaults. An unhealthy container notifies nobody. [Knowing the app is alive](docs/monitoring.md#knowing-the-app-is-alive) says what does.
 
-- The container restarts with `base directory preflight failed`. The `data` folder does not belong to user 12021. Repeat step 1 of the quick start.
-- A run fails with `exit status 134` and a `likely_cause` field. Node most likely ran out of heap memory, often after Renovate raised its PRs. Set `mem_limit` to 3g or more and keep `RENOVATE_X_SQLITE_PACKAGE_CACHE=true`, as [Memory and the package cache](docs/configuration.md#memory-and-the-package-cache) explains.
-- A `docker exec` run fails with `cannot reach the scheduler daemon`. The command ran as a user other than the container's. Run it as that user, and set Ofelia's `user` label to match.
-- Renovate's PRs fail CI on a stale `go.sum` or `package-lock.json`. The container runs as another user. See [Running as another user](docs/configuration.md#running-as-another-user).
-- A run is cut off when the container is recreated. Raise `stop_grace_period`, 10 minutes in the example, above your slowest run, as [Shutdown](docs/how-it-works.md#shutdown) explains.
+- The container restarts with `base directory preflight failed`. The `data` folder does not belong to user 12021, so repeat step 1 of the quick start.
+- A run fails with `exit status 134` and a `likely_cause` field. Node most likely ran out of heap memory. Set `mem_limit` to 3g or more and keep `RENOVATE_X_SQLITE_PACKAGE_CACHE=true`, as [Memory and the package cache](docs/configuration.md#memory-and-the-package-cache) explains.
+- A `docker exec` run fails with `cannot reach the scheduler daemon`. It ran as another user, so run it as the container's user and set Ofelia's `user` label to match.
+- Renovate's PRs fail CI on a stale `go.sum` or `package-lock.json`. The container runs as another user, so see [Running as another user](docs/configuration.md#running-as-another-user).
+- A run is cut off when the container is recreated. Raise `stop_grace_period` above your slowest run, as [Shutdown](docs/how-it-works.md#shutdown) explains.
 
 ## Monitoring
 
-docker-renovate-scheduler logs one `run finished` record per run and can serve a Prometheus metrics page when `METRICS_LISTEN_ADDR` is set, for example `:9470`. Alert rules for Prometheus and for Loki ship in [`alerts/`](alerts/). Load one of the two files. [Monitoring and alerts](docs/monitoring.md) lists them and says who tells you the schedule stopped. The image has a Docker healthcheck. [Knowing the app is alive](docs/monitoring.md#knowing-the-app-is-alive) says what it proves and who is told.
+docker-renovate-scheduler logs one `run finished` record per run and can serve a Prometheus metrics page when `METRICS_LISTEN_ADDR` is set. Alert rules for Prometheus and for Loki ship in [`alerts/`](alerts/), and you load one of the two files. The image also has a Docker healthcheck. [Monitoring and alerts](docs/monitoring.md) lists the rules, what the healthcheck proves and who tells you the schedule stopped.
 
 ## Documentation
 
-- [Configuration](docs/configuration.md) covers both scheduling modes, Ofelia, another user and the memory a run needs.
+- [Configuration](docs/configuration.md) covers every setting, GitHub App sign-in, both scheduling modes, Ofelia, another user and the memory a run needs.
 - [How it works](docs/how-it-works.md) explains the queue, the schedule, shutdown and the health rules.
 - [Monitoring and alerts](docs/monitoring.md) lists the metrics, the `run finished` record, both rule files, and who tells you the schedule stopped.
 - [Security](docs/hardening.md) covers what the container accepts and what the image contains.
 
 ## Credits
 
-This image packages [Renovate](https://github.com/renovatebot/renovate) by [Mend.io](https://www.mend.io/) (AGPL-3.0). All credit for the dependency-update engine goes to its maintainers. This project adds the scheduler and a Go toolchain that every user can run.
+This image packages [Renovate](https://github.com/renovatebot/renovate) by [Mend.io](https://www.mend.io/) (AGPL-3.0). All credit for the dependency-update engine goes to its maintainers. This project adds the scheduler. It also installs a Go toolchain every user can run, so Renovate can update Go modules when the container runs as another user.
 
 ## Contributing
 

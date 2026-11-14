@@ -77,10 +77,10 @@ These lines are for reading a run by hand. No alert rule reads them.
 | `github app installation resolved` | INFO | `installation_id`. Logged when `GITHUB_APP_INSTALLATION_ID` is unset, with the first token, and again with the first token after a reinstall gives the installation a new ID |
 | `github app installation token issued` | INFO | `trigger`, `installation_id`, `expires_at` |
 | `github app token request failed` | ERROR | `trigger`, `error`, `hint`. The run fails and Renovate does not start |
-| `renovate run delayed: github app token rate-limited` | WARN | `trigger`, `error`, `retry_after`. GitHub rate-limited the token request; the run asks again after `retry_after` and starts then. The wait is not a failure |
+| `renovate run delayed: github app token rate-limited` | WARN | `trigger`, `error`, `retry_after`. GitHub rate-limited the token request. The run asks again after `retry_after` and starts then. The wait is not a failure |
 | `renovate run skipped: github app token unavailable` | WARN, or ERROR once such failures have lasted 2h | `trigger`, `error`, `failing_for`. GitHub kept failing or did not answer the token request, see [Repository errors](#repository-errors) |
-| `forgeapi credential refresh` | INFO or WARN | `family`, `instance`, `state`, `status`, `failure`. One line per token request the scheduler sends, after its retries, with the final status, `0` when GitHub never answered; WARN when no token came of it |
-| `forgeapi request` | WARN | `op`, `status`, `kind`, `attempt`, `error` and forgeapi's other request fields. One line per failed request to GitHub during a token request or installation lookup, each retry included; a request that succeeds logs below WARN |
+| `forgeapi credential refresh` | INFO or WARN | `family`, `instance`, `state`, `status`, `failure`. One line per token request the scheduler sends, after its retries, with the final status, `0` when GitHub never answered. WARN when no token came of it |
+| `forgeapi request` | WARN | `op`, `status`, `kind`, `attempt`, `error` and forgeapi's other request fields. One line per failed request to GitHub during a token request or installation lookup, each retry included. A request that succeeds logs below WARN |
 | `startup run skipped: the last scheduled run succeeded within the interval` | INFO | `last_success`, `interval` |
 | `renovate run starting` | INFO | `trigger`, `repos`, `timeout` |
 | `renovate run complete` | INFO | `trigger`, `duration_ms` |
