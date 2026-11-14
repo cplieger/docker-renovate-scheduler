@@ -14,8 +14,8 @@ github.com/cplieger/go/httpserver v1.5.0-dev.2 h1:PXRoXCN/C9CSHG/jx8lX7VNSndNwi4
 github.com/cplieger/go/httpserver v1.5.0-dev.2/go.mod h1:MuZxKRRjQG6DAJBO88cTGhVdhSCmBu2PMeA/DWRbiTQ=
 github.com/cplieger/go/jsonx v1.1.0 h1:/XBHr3vJVqKYVDteO8cZEMAdTgmT3Df/SeyNw1pdak8=
 github.com/cplieger/go/jsonx v1.1.0/go.mod h1:ry6co0JYAadIhjHtkktBSK3to4YdtEak1P7mdmQlr7U=
-github.com/cplieger/go/measure v1.2.0 h1:z1XR86jCx65RPQX+p6IRghfS41PdpidYaH+oGIN1J/U=
-github.com/cplieger/go/measure v1.2.0/go.mod h1:oH0qxNStRZYbEn3iHpXv/7jKcrjg/EzsxrhLhBK6BC0=
+github.com/cplieger/go/measure v1.3.0-dev.1 h1:TEqZtk/CrcVMwhY56s9hobL1PV7uwgfJnk8e2K1U55M=
+github.com/cplieger/go/measure v1.3.0-dev.1/go.mod h1:oH0qxNStRZYbEn3iHpXv/7jKcrjg/EzsxrhLhBK6BC0=
 github.com/cplieger/go/pathinside v1.1.0 h1:INqhQezkPwf/gA4fGxVuTBvV4bh4CedFGKm36c+GeIQ=
 github.com/cplieger/go/pathinside v1.1.0/go.mod h1:fIyGk/T2XYqVLJ5/cXOFkjk202Mwbdu0aXhH7Ky1/kI=
 github.com/cplieger/go/scheduler v1.1.0 h1:AzmRDvZ/wEEwK7Ab5Uz0Pa5Xx67oWndalpVknoWsGDQ=
