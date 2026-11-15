@@ -1,12 +1,12 @@
 # Monitoring and alerts
 
-This page covers what docker-renovate-scheduler reports, how to get alerts from it and who tells you when it stops. docker-renovate-scheduler writes one `run finished` record per run to its log and can serve a Prometheus metrics page. The same alerts ship twice, in [`alerts/promql.yaml`](../alerts/promql.yaml) for a metric store and in [`alerts/logql.yaml`](../alerts/logql.yaml) for Loki. Load one of the two.
+This page covers what docker-renovate-scheduler reports, how to get alerts from it, its Grafana dashboard and who tells you when it stops. docker-renovate-scheduler writes one `run finished` record per run to its log and can serve a Prometheus metrics page. The same alerts ship twice, in [`alerts/promql.yaml`](../alerts/promql.yaml) for a metric store and in [`alerts/logql.yaml`](../alerts/logql.yaml) for Loki. Load one of the two.
 
 ## What you get
 
 | You run | You get | You set up |
 | --- | --- | --- |
-| Prometheus, Mimir or VictoriaMetrics, with Alertmanager | Three alerts, `RenovateDown` included, and graphs of each run | `METRICS_LISTEN_ADDR`, a scrape job named `renovate`, and `alerts/promql.yaml` |
+| Prometheus, Mimir or VictoriaMetrics, with Alertmanager | Three alerts, `RenovateDown` included, and the [dashboard](#dashboard) | `METRICS_LISTEN_ADDR`, a scrape job named `renovate`, and `alerts/promql.yaml` |
 | Loki and Alertmanager, no metric store | Three alerts, `RenovateDaemonStopped` in place of `RenovateDown` | `alerts/logql.yaml`, with `LOG_LEVEL` left at `info` |
 | Grafana-managed alerting only | The same alerts, as Grafana rules | One of the two files imported into Grafana, with its data source |
 | Docker or Unraid only | The container log and Docker's health status, which notify nobody | `METRICS_LISTEN_ADDR` and an uptime prober on `/healthz`, or something that watches Docker health |
@@ -33,12 +33,6 @@ Every series starts with `renovate_scheduler_`. `scope` is `full` for a run over
 | `build_info` | gauge | `version` | Always 1. `version` is the release the image was built from |
 
 `result` is one of `complete`, `failed`, `aborted`, `timed_out`, `start_failed`, `repository_error`, `token_unavailable`, `token_failed`, `preflight_failed` and `contained`. The page also carries the Go runtime and process families (`go_*`, `process_*`) under the names Go's official Prometheus client uses, so stock Go dashboards work.
-
-No dashboard ships. These queries are a start in Grafana's Metrics Drilldown:
-
-- Runs per day by result: `increase(renovate_scheduler_runs_total[1d])`
-- Run time of full runs: `renovate_scheduler_last_run_duration_seconds{scope="full"}`
-- Hours since the last complete full run: `(time() - renovate_scheduler_last_success_timestamp_seconds{scope="full"}) / 3600`
 
 ## Logs
 
@@ -118,6 +112,20 @@ Thresholds and the `severity` labels are starting points. The 14-hour window of 
 `RenovateNoRecentRun` fires when no complete full run has finished in time. Runs scoped to repositories do not count, so frequent scoped runs cannot hide a full pass that stopped. A tolerated run is not a complete run, so one such run doubles the gap the rule sees. In `alerts/promql.yaml` it has two arms, and `renovate_scheduler_run_deadline_timestamp_seconds` picks one. While the deadline is above 0, which is the built-in schedule, the rule turns pending 15 minutes after the deadline passes and fires after its 30-minute `for`. The scheduler works the deadline out from `RUN_INTERVAL` and `RUN_TIMEOUT`, so this arm has no window to change. The deadline holds two intervals, so one failed or tolerated full run between two complete ones does not reach it. While the deadline reads 0, with `RUN_INTERVAL=off`, the rule fires when no complete full run has finished in 14 hours, and a container with no complete full run on record counts from its start. Load the rule file of the release you run, because an older image serves no deadline and neither arm can fire. `alerts/logql.yaml` has the 14-hour window only. The window arms fire on silence, so they also catch a scheduler of your own that stopped calling `run` and, in `alerts/logql.yaml`, logs that stopped reaching Loki.
 
 `RenovateDaemonStopped` fires once per stop, at the `daemon stopped` record. A stop with no record, such as a killed container, leaves it quiet, and `RenovateNoRecentRun` reports that later. `RenovateDown` covers both cases in `alerts/promql.yaml`.
+
+## Dashboard
+
+[`grafana-dashboard.json`](../grafana-dashboard.json) imports as the Renovate Scheduler dashboard. It reads the metrics above from a Prometheus data source and needs Grafana 13.2 or newer. It needs no setting beyond `METRICS_LISTEN_ADDR` and a scrape of the page, under any job name. When you run more than one scheduler, the Scheduler variable picks the instance to show. It has one page of three rows:
+
+- Needs attention appears only while `RenovateRunFailed`, `RenovateNoRecentRun` or `RenovateDown` fires, with one tile per rule. Each tile reads its rule's `ALERTS` series, which Prometheus and the Mimir ruler store beside your metrics. The row stays hidden while those rules are not loaded.
+- Runs shows whether the latest full run passed and when the last complete one ended. It also shows when the next one is due and since when full runs have been failing. Its Last run of each scope table has one row per scope, with how the latest run ended, Renovate's exit code, the run time and the end time.
+- History charts the completed runs by scope and result, with the totals for the selected range in the legend. It also charts how long the latest run of each scope took.
+
+The panels read `last_run_ok`, `last_run_result`, `last_run_exit_code`, `last_run_duration_seconds`, `last_run_timestamp_seconds`, `last_success_timestamp_seconds`, `failing_since_timestamp_seconds`, `run_deadline_timestamp_seconds` and `runs_total`. The Scheduler variable reads `build_info`. After a start, the Last full run tile and each scope's table row stay empty until that scope's first completed run. With `RUN_INTERVAL=off`, Next full run due stays empty, because your own scheduler sets the pace.
+
+The dashboard is versioned with the image, and the `grafana-dashboard.json` of release `<tag>` matches the metrics that image serves. Each release attaches it with its checksum at `https://github.com/cplieger/docker-renovate-scheduler/releases/download/<tag>/grafana-dashboard.json`. Each image publish also pushes it as the OCI artifact `ghcr.io/cplieger/docker-renovate-scheduler/dashboard:<tag>`.
+
+[Importing an app's dashboard](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#importing-an-apps-dashboard) shows how to load it into Grafana. The file sets `metadata.name` to `docker-renovate-scheduler`, which Grafana uses as the dashboard UID. Importing a newer copy over the old one updates it in place.
 
 ## Repository errors
 

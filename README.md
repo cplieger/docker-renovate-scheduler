@@ -117,13 +117,13 @@ The healthcheck reads a health file the scheduler refreshes after each run. Unhe
 
 ## Monitoring
 
-docker-renovate-scheduler logs one `run finished` record per run and can serve a Prometheus metrics page when `METRICS_LISTEN_ADDR` is set. Alert rules for Prometheus and for Loki ship in [`alerts/`](alerts/), and you load one of the two files. The image also has a Docker healthcheck. [Monitoring and alerts](docs/monitoring.md) lists the rules, what the healthcheck proves and who tells you the schedule stopped.
+docker-renovate-scheduler logs one `run finished` record per run and can serve a Prometheus metrics page when `METRICS_LISTEN_ADDR` is set. Alert rules for Prometheus and for Loki ship in [`alerts/`](alerts/), and you load one of the two files. [`grafana-dashboard.json`](grafana-dashboard.json) is a dashboard of the runs for Grafana 13.2 or newer. The image also has a Docker healthcheck. [Monitoring and alerts](docs/monitoring.md) lists the rules, what the healthcheck proves and who tells you the schedule stopped.
 
 ## Documentation
 
 - [Configuration](docs/configuration.md) covers every setting, GitHub App sign-in, both scheduling modes, Ofelia, another user and the memory a run needs.
 - [How it works](docs/how-it-works.md) explains the queue, the schedule, shutdown and the health rules.
-- [Monitoring and alerts](docs/monitoring.md) lists the metrics, the `run finished` record, both rule files, and who tells you the schedule stopped.
+- [Monitoring and alerts](docs/monitoring.md) lists the metrics, the `run finished` record, both rule files, the dashboard, and who tells you the schedule stopped.
 - [Security](docs/hardening.md) covers what the container accepts and what the image contains.
 
 ## Credits
