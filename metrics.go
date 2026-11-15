@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/cplieger/go/httpserver"
-	"github.com/cplieger/go/measure"
+	"github.com/cplieger/go/measure/v2"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
 )
@@ -42,14 +42,14 @@ var (
 type runMetrics struct {
 	runs         *measure.LabeledCounter
 	lastOK       *measure.LabeledGauge
-	lastResult   *measure.LabeledGauge
+	lastResult   *measure.StateSet
 	lastExitCode *measure.LabeledGauge
 	lastRun      *measure.LabeledGauge
 	lastSuccess  *measure.LabeledGauge
 	lastDuration *measure.LabeledGauge
 	failingSince *measure.LabeledGauge
 	rejected     *measure.LabeledCounter
-	info         *measure.LabeledGauge
+	info         *measure.Info
 	deadline     *measure.Gauge
 	gap          time.Duration
 }
@@ -72,42 +72,45 @@ type runBoot struct {
 // at its first run.
 func newRunMetrics(reg *measure.Registry, mode, auth string, boot runBoot) *runMetrics {
 	scope := []string{keyScope}
+	scopeSeeds := make([][]string, 0, len(runScopes))
+	runSeeds := make([][]string, 0, len(runScopes)*len(runResults))
+	for _, s := range runScopes {
+		scopeSeeds = append(scopeSeeds, []string{s})
+		for _, r := range runResults {
+			runSeeds = append(runSeeds, []string{s, r})
+		}
+	}
 	m := &runMetrics{
 		runs: measure.NewLabeledCounter("runs_total",
-			"Completed runs by scope and how they ended.", []string{keyScope, "result"}),
+			"Completed runs by scope and how they ended.", measure.UnitCount, []string{keyScope, "result"},
+			measure.WithSeed(runSeeds...)),
 		lastOK: measure.NewLabeledGauge("last_run_ok",
-			"1 when the scope's last completed run passed, a tolerated failure included, else 0.", scope),
-		lastResult: measure.NewLabeledGauge("last_run_result",
-			"1 for how the scope's last completed run ended, 0 for the other results.", []string{keyScope, "result"}),
+			"1 when the scope's last completed run passed, a tolerated failure included, else 0.", measure.UnitNone, scope),
+		lastResult: measure.NewStateSet("last_run_result",
+			"1 for how the scope's last completed run ended, 0 for the other results.", []string{keyScope, "result"}, runResults),
 		lastExitCode: measure.NewLabeledGauge("last_run_exit_code",
-			"Renovate's exit code in the scope's last completed run; -1 when Renovate did not run or a signal ended it.", scope),
+			"Renovate's exit code in the scope's last completed run; -1 when Renovate did not run or a signal ended it.", measure.UnitNone, scope),
 		lastRun: measure.NewLabeledGauge("last_run_timestamp_seconds",
-			"Unix time the scope's last completed run ended.", scope),
+			"Unix time the scope's last completed run ended.", measure.UnitSeconds, scope),
 		lastSuccess: measure.NewLabeledGauge("last_success_timestamp_seconds",
-			"Unix time the scope's last complete run ended; for the full scope, read back from RENOVATE_BASE_DIR after a restart.", scope),
+			"Unix time the scope's last complete run ended; for the full scope, read back from RENOVATE_BASE_DIR after a restart.", measure.UnitSeconds, scope),
 		lastDuration: measure.NewLabeledGauge("last_run_duration_seconds",
-			"How long the scope's last completed run took.", scope),
+			"How long the scope's last completed run took.", measure.UnitSeconds, scope),
 		failingSince: measure.NewLabeledGauge("failing_since_timestamp_seconds",
-			"Unix time the scope's current series of tolerable failures began; 0 when runs are not failing.", scope),
+			"Unix time the scope's current series of tolerable failures began; 0 when runs are not failing.", measure.UnitSeconds, scope,
+			measure.WithSeed(scopeSeeds...)),
 		rejected: measure.NewLabeledCounter("trigger_rejected_total",
-			"Run requests the queue refused, because it was full or the daemon was shutting down.", []string{"reason"}),
-		info: measure.NewLabeledGauge("info",
+			"Run requests the queue refused, because it was full or the daemon was shutting down.", measure.UnitCount, []string{"reason"},
+			measure.WithSeed([]string{rejectFull}, []string{rejectClosing})),
+		info: measure.NewInfo("info",
 			"Always 1; the labels name the scheduling mode and the GitHub auth mode.", []string{"mode", "auth"}),
 		deadline: measure.NewGauge("run_deadline_timestamp_seconds",
-			"Unix time by which the next complete full run is due; 0 while RUN_INTERVAL is off."),
+			"Unix time by which the next complete full run is due; 0 while RUN_INTERVAL is off.", measure.UnitSeconds),
 		gap: boot.gap,
 	}
 	reg.MustRegister(m.runs, m.lastOK, m.lastResult, m.lastExitCode, m.lastRun, m.lastSuccess,
 		m.lastDuration, m.failingSince, m.rejected, m.info, m.deadline)
-	for _, s := range runScopes {
-		for _, r := range runResults {
-			m.runs.Add(0, s, r)
-		}
-		m.failingSince.Set(0, s)
-	}
-	m.rejected.Add(0, rejectFull)
-	m.rejected.Add(0, rejectClosing)
-	m.info.Set(1, mode, auth)
+	m.info.Set(mode, auth)
 	lastSuccess := boot.start
 	if boot.known && boot.last.OK {
 		lastSuccess = boot.last.Time
@@ -138,10 +141,10 @@ func newMetricsRegistry(mode, auth string, completed *scheduler.Stamp, gap time.
 // registerBuildInfo serves build_info at 1, labelled with the release this
 // process runs, for a rule to join on whatever the target's scrape job is.
 func registerBuildInfo(reg *measure.Registry) {
-	info := measure.NewLabeledGauge("build_info",
+	info := measure.NewInfo("build_info",
 		"Always 1; the version label is the release this process runs.", []string{"version"})
 	reg.MustRegister(info)
-	info.Set(1, version)
+	info.Set(version)
 }
 
 func unixSeconds(t time.Time) float64 {
@@ -150,9 +153,7 @@ func unixSeconds(t time.Time) float64 {
 
 func (m *runMetrics) observe(scope string, v runVerdict, elapsed time.Duration, at, failingSince time.Time) {
 	m.runs.Add(1, scope, v.result)
-	for _, r := range runResults {
-		m.lastResult.Set(float64(boolDigit(r == v.result)), scope, r)
-	}
+	m.lastResult.Set(v.result, scope)
 	m.lastOK.Set(float64(boolDigit(v.ok)), scope)
 	m.lastExitCode.Set(float64(v.exitCode), scope)
 	m.lastRun.Set(unixSeconds(at), scope)

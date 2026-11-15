@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/cplieger/forgeapi/v2"
-	"github.com/cplieger/go/measure"
+	"github.com/cplieger/go/measure/v2"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
 	"github.com/cplieger/go/slogx"

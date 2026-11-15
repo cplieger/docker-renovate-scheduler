@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/cplieger/go/health/v2"
-	"github.com/cplieger/go/measure"
+	"github.com/cplieger/go/measure/v2"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
 )
