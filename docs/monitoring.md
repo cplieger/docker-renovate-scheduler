@@ -121,7 +121,9 @@ Thresholds and the `severity` labels are starting points. The 14-hour window of 
 - Runs shows whether the latest full run passed and when the last complete one ended. It also shows when the next one is due and since when full runs have been failing. Its Last run of each scope table has one row per scope. It shows how the latest run ended, Renovate's exit code, the run time and the end time.
 - History charts the completed runs by scope and result, with the totals for the selected range in the legend. It also charts how long the latest run of each scope took.
 
-The panels read `last_run_ok`, `last_run_result`, `last_run_exit_code`, `last_run_duration_seconds`, `last_run_timestamp_seconds`, `last_success_timestamp_seconds`, `failing_since_timestamp_seconds`, `run_deadline_timestamp_seconds` and `runs_total`. The Scheduler variable reads `build_info`. After a start, the Last full run tile and each scope's table row stay empty until that scope's first completed run. With `RUN_INTERVAL=off`, Next full run due stays empty, because your own scheduler sets the pace.
+The panels read `last_run_ok`, `last_run_result`, `last_run_exit_code`, `last_run_duration_seconds`, `last_run_timestamp_seconds`, `last_success_timestamp_seconds`, `failing_since_timestamp_seconds`, `run_deadline_timestamp_seconds` and `runs_total`. The Scheduler variable reads `build_info`.
+
+After a start, the Last full run tile reads No run yet and each scope's table row stays empty until that scope's first completed run. With `RUN_INTERVAL=off`, Next full run due reads No schedule, because your own scheduler sets the pace. A tile that reads Not scraped means Prometheus has no fresh sample from the scheduler.
 
 The dashboard is versioned with the image, and the `grafana-dashboard.json` of release `<tag>` matches the metrics that image serves. Each release attaches it with its checksum at `https://github.com/cplieger/docker-renovate-scheduler/releases/download/<tag>/grafana-dashboard.json`. Each image publish also pushes it as the OCI artifact `ghcr.io/cplieger/docker-renovate-scheduler/dashboard:<tag>`.
 

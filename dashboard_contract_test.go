@@ -27,6 +27,10 @@ type dashQuery struct {
 	} `json:"spec"`
 }
 
+type valueMapping struct {
+	Options map[string]json.RawMessage `json:"options"`
+}
+
 type dashPanel struct {
 	Spec struct {
 		Title       string `json:"title"`
@@ -44,7 +48,8 @@ type dashPanel struct {
 			Spec  struct {
 				FieldConfig struct {
 					Defaults struct {
-						NoValue string `json:"noValue"`
+						NoValue  string         `json:"noValue"`
+						Mappings []valueMapping `json:"mappings"`
 					} `json:"defaults"`
 				} `json:"fieldConfig"`
 			} `json:"spec"`
@@ -405,5 +410,45 @@ func TestDashboardPanelsExplainThemselves(t *testing.T) {
 				t.Errorf("%s %q has no no-value text", name, p.Spec.Title)
 			}
 		}
+	}
+}
+
+var idleArmRe = regexp.MustCompile(` or on \(instance\) \((-?\d+) \* max by \(instance\) \(` +
+	metricsPrefix + `_build_info\{instance="\$instance"\}\)\)$`)
+
+// TestDashboardRunTilesTellIdleFromUnscraped fails when a Runs tile can show
+// its idle text for a scheduler Prometheus does not scrape. Each tile falls
+// back to a mapped sentinel only while build_info answers, so an empty answer
+// means not scraped and reads so.
+func TestDashboardRunTilesTellIdleFromUnscraped(t *testing.T) {
+	d := loadDashboard(t)
+	tiles := 0
+	for _, it := range dashboardRow(t, &d, "Runs").Spec.Layout.Spec.Items {
+		p := d.Spec.Elements[it.Spec.Element.Name]
+		if p.Spec.VizConfig.Group != "stat" {
+			continue
+		}
+		tiles++
+		defaults := p.Spec.VizConfig.Spec.FieldConfig.Defaults
+		if defaults.NoValue != "Not scraped" {
+			t.Errorf("%q reads %q with no answer, want Not scraped", p.Spec.Title, defaults.NoValue)
+		}
+		for _, e := range panelExprs(&p) {
+			m := idleArmRe.FindStringSubmatch(e)
+			if m == nil {
+				t.Errorf("%q has no idle arm on build_info: %s", p.Spec.Title, e)
+				continue
+			}
+			mapped := slices.ContainsFunc(defaults.Mappings, func(mp valueMapping) bool {
+				_, ok := mp.Options[m[1]]
+				return ok
+			})
+			if !mapped {
+				t.Errorf("%q idle value %s has no value mapping", p.Spec.Title, m[1])
+			}
+		}
+	}
+	if tiles == 0 {
+		t.Fatal("the Runs row holds no stat tile")
 	}
 }

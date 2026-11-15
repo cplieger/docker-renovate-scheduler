@@ -326,7 +326,7 @@
         "spec": {
           "id": 10,
           "title": "Last full run",
-          "description": "Whether the latest run over every repository passed. A failure that GitHub or the platform caused counts as passed for its first 2 hours, and the Failing since tile shows it. No value means no full run has ended since the start, or the scheduler was not scraped.",
+          "description": "Whether the latest run over every repository passed. A repository error or a GitHub App token outage counts as passed for its first 2 hours, and the Failing since tile shows it. No run yet means no full run has ended since the start. Not scraped means Prometheus has no fresh sample from the scheduler.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -343,7 +343,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "renovate_scheduler_last_run_ok{scope=\"full\", instance=\"$instance\"}",
+                        "expr": "renovate_scheduler_last_run_ok{scope=\"full\", instance=\"$instance\"} or on (instance) (-1 * max by (instance) (renovate_scheduler_build_info{instance=\"$instance\"}))",
                         "legendFormat": "",
                         "instant": true,
                         "range": false
@@ -382,7 +382,7 @@
               "fieldConfig": {
                 "defaults": {
                   "unit": "none",
-                  "noValue": "No run yet",
+                  "noValue": "Not scraped",
                   "color": {
                     "mode": "thresholds"
                   },
@@ -408,6 +408,11 @@
                           "index": 1,
                           "text": "Failed",
                           "color": "red"
+                        },
+                        "-1": {
+                          "index": 2,
+                          "text": "No run yet",
+                          "color": "text"
                         }
                       }
                     }
@@ -424,7 +429,7 @@
         "spec": {
           "id": 11,
           "title": "Last complete full run",
-          "description": "When the latest full run that ended with no error finished, kept across a restart. Failed and tolerated runs do not move it. No value means none is on record, or the scheduler was not scraped.",
+          "description": "When the latest full run that ended with no error finished, kept across a restart. Failed and tolerated runs do not move it. None on record means no complete full run is on record. Not scraped means Prometheus has no fresh sample from the scheduler.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -441,7 +446,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "(renovate_scheduler_last_success_timestamp_seconds{scope=\"full\", instance=\"$instance\"} > 0) * 1000",
+                        "expr": "((renovate_scheduler_last_success_timestamp_seconds{scope=\"full\", instance=\"$instance\"} > 0) * 1000) or on (instance) (0 * max by (instance) (renovate_scheduler_build_info{instance=\"$instance\"}))",
                         "legendFormat": "",
                         "instant": true,
                         "range": false
@@ -480,7 +485,7 @@
               "fieldConfig": {
                 "defaults": {
                   "unit": "dateTimeFromNow",
-                  "noValue": "None on record",
+                  "noValue": "Not scraped",
                   "color": {
                     "mode": "fixed",
                     "fixedColor": "text"
@@ -493,7 +498,19 @@
                         "color": "text"
                       }
                     ]
-                  }
+                  },
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "index": 0,
+                          "text": "None on record",
+                          "color": "text"
+                        }
+                      }
+                    }
+                  ]
                 },
                 "overrides": []
               }
@@ -506,7 +523,7 @@
         "spec": {
           "id": 12,
           "title": "Next full run due",
-          "description": "The time by which the next complete full run is due. That is the last one plus two RUN_INTERVAL periods and one RUN_TIMEOUT, and 2 minutes more in GitHub App mode. Past it, the Full runs tile lights up after 45 minutes. No value means RUN_INTERVAL is off, so your own scheduler sets the pace, or the scheduler was not scraped.",
+          "description": "The next complete full run is due by the last one plus two RUN_INTERVAL periods and one RUN_TIMEOUT, plus 2 minutes in GitHub App mode. Past it, the Full runs tile lights up after 45 minutes. No schedule means RUN_INTERVAL is off, so your own scheduler sets the pace. Not scraped means Prometheus has no fresh sample from the scheduler.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -523,7 +540,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "(renovate_scheduler_run_deadline_timestamp_seconds{instance=\"$instance\"} > 0) * 1000",
+                        "expr": "((renovate_scheduler_run_deadline_timestamp_seconds{instance=\"$instance\"} > 0) * 1000) or on (instance) (0 * max by (instance) (renovate_scheduler_build_info{instance=\"$instance\"}))",
                         "legendFormat": "",
                         "instant": true,
                         "range": false
@@ -562,7 +579,7 @@
               "fieldConfig": {
                 "defaults": {
                   "unit": "dateTimeFromNow",
-                  "noValue": "No schedule",
+                  "noValue": "Not scraped",
                   "color": {
                     "mode": "fixed",
                     "fixedColor": "text"
@@ -575,7 +592,19 @@
                         "color": "text"
                       }
                     ]
-                  }
+                  },
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "index": 0,
+                          "text": "No schedule",
+                          "color": "text"
+                        }
+                      }
+                    }
+                  ]
                 },
                 "overrides": []
               }
@@ -588,7 +617,7 @@
         "spec": {
           "id": 13,
           "title": "Failing since",
-          "description": "When full runs began to end in repository errors or GitHub App token outages. These pass as warnings for 2 hours, then each run fails until a good one. No value means full runs are not failing this way.",
+          "description": "When full runs began to end in repository errors or GitHub App token outages. These pass as warnings for 2 hours, then each run fails until a good one. Not failing means full runs are not failing this way. Not scraped means Prometheus has no fresh sample from the scheduler.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -605,7 +634,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "(renovate_scheduler_failing_since_timestamp_seconds{scope=\"full\", instance=\"$instance\"} > 0) * 1000",
+                        "expr": "((renovate_scheduler_failing_since_timestamp_seconds{scope=\"full\", instance=\"$instance\"} > 0) * 1000) or on (instance) (0 * max by (instance) (renovate_scheduler_build_info{instance=\"$instance\"}))",
                         "legendFormat": "",
                         "instant": true,
                         "range": false
@@ -644,7 +673,7 @@
               "fieldConfig": {
                 "defaults": {
                   "unit": "dateTimeFromNow",
-                  "noValue": "Not failing",
+                  "noValue": "Not scraped",
                   "color": {
                     "mode": "fixed",
                     "fixedColor": "text"
@@ -657,7 +686,19 @@
                         "color": "text"
                       }
                     ]
-                  }
+                  },
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "index": 0,
+                          "text": "Not failing",
+                          "color": "text"
+                        }
+                      }
+                    }
+                  ]
                 },
                 "overrides": []
               }
@@ -1029,8 +1070,8 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "round(sum by (scope, result) (renovate_scheduler_runs_total{instance=\"$instance\"} - renovate_scheduler_runs_total{instance=\"$instance\"} offset $__interval)) > 0",
-                        "legendFormat": "{{scope}} {{result}}",
+                        "expr": "label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(round(sum by (scope, result) (renovate_scheduler_runs_total{instance=\"$instance\"} - renovate_scheduler_runs_total{instance=\"$instance\"} offset $__interval)) > 0, \"scope\", \"Full\", \"scope\", \"full\"), \"scope\", \"Scoped\", \"scope\", \"scoped\"), \"result\", \"Complete\", \"result\", \"complete\"), \"result\", \"Failed\", \"result\", \"failed\"), \"result\", \"Aborted\", \"result\", \"aborted\"), \"result\", \"Timed out\", \"result\", \"timed_out\"), \"result\", \"Did not start\", \"result\", \"start_failed\"), \"result\", \"Repository error\", \"result\", \"repository_error\"), \"result\", \"Token unavailable\", \"result\", \"token_unavailable\"), \"result\", \"Token request failed\", \"result\", \"token_failed\"), \"result\", \"Base folder check failed\", \"result\", \"preflight_failed\"), \"result\", \"Process left running\", \"result\", \"contained\")",
+                        "legendFormat": "{{scope}}: {{result}}",
                         "range": true,
                         "instant": false
                       }
@@ -1118,7 +1159,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "renovate_scheduler_last_run_duration_seconds{instance=\"$instance\"}",
+                        "expr": "label_replace(label_replace(renovate_scheduler_last_run_duration_seconds{instance=\"$instance\"}, \"scope\", \"Full\", \"scope\", \"full\"), \"scope\", \"Scoped\", \"scope\", \"scoped\")",
                         "legendFormat": "{{scope}}",
                         "range": true,
                         "instant": false
