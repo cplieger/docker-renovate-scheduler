@@ -14,10 +14,10 @@ import (
 	"github.com/cplieger/go/scheduler"
 )
 
-// promqlWords are the PromQL keywords and functions the shipped rules may use;
-// every other identifier in an expression is a series name.
+// promqlWords are the PromQL keywords, offset included, and the functions the
+// shipped rules may use; every other identifier in an expression is a series name.
 var promqlWords = []string{
-	"and", "or", "unless", "on", "ignoring", "group_left", "group_right", "by", "without", "bool",
+	"and", "or", "unless", "on", "ignoring", "group_left", "group_right", "by", "without", "bool", "offset",
 	"sum", "min", "max", "avg", "count", "absent", "time", "rate", "increase", "changes", "resets",
 	"min_over_time", "max_over_time", "avg_over_time", "sum_over_time", "count_over_time",
 	"last_over_time", "present_over_time", "absent_over_time",

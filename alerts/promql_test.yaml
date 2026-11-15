@@ -284,3 +284,108 @@ tests:
       - eval_time: 14h35m
         alertname: RenovateNoRecentRun
         exp_alerts: []
+
+  # The dashboard's Runs by result query, with $instance and its 5m slot filled in.
+  # TestDashboardRunsByResultIsTheTestedQuery fails when the two differ.
+  - name: "Runs by result: a slot counts the runs that ended in it"
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_runs_total{job="renovate", instance="renovate:9470", scope="full", result="failed"}'
+        values: "0+1x30"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x30"
+    promql_expr_test:
+      - expr: &runs_by_result 'label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(round(sum by (scope, result) (((renovate_scheduler_runs_total{instance="renovate:9470"} - renovate_scheduler_runs_total{instance="renovate:9470"} offset 5m) unless on (instance) ((process_start_time_seconds{instance="renovate:9470"} != process_start_time_seconds{instance="renovate:9470"} offset 5m) or (process_start_time_seconds{instance="renovate:9470"} > time() - 300000 / 1000))) or (renovate_scheduler_runs_total{instance="renovate:9470"} and on (instance) ((process_start_time_seconds{instance="renovate:9470"} != process_start_time_seconds{instance="renovate:9470"} offset 5m) or (process_start_time_seconds{instance="renovate:9470"} > time() - 300000 / 1000))) or (renovate_scheduler_runs_total{instance="renovate:9470"} - min_over_time(renovate_scheduler_runs_total{instance="renovate:9470"}[5m])))) > 0, "scope", "Full", "scope", "full"), "scope", "Scoped", "scope", "scoped"), "result", "Complete", "result", "complete"), "result", "Failed", "result", "failed"), "result", "Aborted", "result", "aborted"), "result", "Timed out", "result", "timed_out"), "result", "Did not start", "result", "start_failed"), "result", "Repository error", "result", "repository_error"), "result", "Token unavailable", "result", "token_unavailable"), "result", "Token request failed", "result", "token_failed"), "result", "Base folder check failed", "result", "preflight_failed"), "result", "Process left running", "result", "contained")'
+        eval_time: 20m
+        exp_samples:
+          - labels: '{result="Failed", scope="Full"}'
+            value: 5
+  - name: "Runs by result: a slot with no run draws no bar"
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_runs_total{job="renovate", instance="renovate:9470", scope="full", result="failed"}'
+        values: "5x40"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x40"
+    promql_expr_test:
+      - expr: *runs_by_result
+        eval_time: 30m
+        exp_samples: []
+  - name: "Runs by result: a restart counts the startup run even when its total matches the old one"
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_runs_total{job="renovate", instance="renovate:9470", scope="full", result="failed"}'
+        values: "1x29 1x20"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x29 1770x20"
+    promql_expr_test:
+      - expr: *runs_by_result
+        eval_time: 34m
+        exp_samples:
+          - labels: '{result="Failed", scope="Full"}'
+            value: 1
+  - name: "Runs by result: a failed scrape during the restart does not hide it"
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_runs_total{job="renovate", instance="renovate:9470", scope="full", result="failed"}'
+        values: "1x28 stale 1x20"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x28 stale 1770x20"
+    promql_expr_test:
+      - expr: *runs_by_result
+        eval_time: 34m
+        exp_samples:
+          - labels: '{result="Failed", scope="Full"}'
+            value: 1
+  - name: "Runs by result: a restart counts the new total, not the drop from the old one"
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_runs_total{job="renovate", instance="renovate:9470", scope="full", result="failed"}'
+        values: "3x29 0 2 3 4x20"
+      - series: 'renovate_scheduler_runs_total{job="renovate", instance="renovate:9470", scope="full", result="complete"}'
+        values: "5x29 0x20"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x29 1770x20"
+    promql_expr_test:
+      - expr: *runs_by_result
+        eval_time: 34m
+        exp_samples:
+          - labels: '{result="Failed", scope="Full"}'
+            value: 4
+  - name: "Runs by result: the slot after a restart draws no bar"
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_runs_total{job="renovate", instance="renovate:9470", scope="full", result="failed"}'
+        values: "1x29 1x20"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x29 1770x20"
+    promql_expr_test:
+      - expr: *runs_by_result
+        eval_time: 39m
+        exp_samples: []
+  - name: "Runs by result: a start just before a slot ends counts in the slot of its first scrape"
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_runs_total{job="renovate", instance="renovate:9470", scope="full", result="failed"}'
+        values: "3x29 _ 1x20"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x29 _ 1794x20"
+    promql_expr_test:
+      - expr: *runs_by_result
+        eval_time: 35m
+        exp_samples:
+          - labels: '{result="Failed", scope="Full"}'
+            value: 1
+  - name: "Runs by result: a first scrape counts the growth inside the slot, not the lifetime total"
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_runs_total{job="renovate", instance="renovate:9470", scope="full", result="failed"}'
+        values: "_x29 7 7 8x10"
+      - series: 'process_start_time_seconds{job="renovate", instance="renovate:9470"}'
+        values: "_x29 0x12"
+    promql_expr_test:
+      - expr: *runs_by_result
+        eval_time: 34m
+        exp_samples:
+          - labels: '{result="Failed", scope="Full"}'
+            value: 1
