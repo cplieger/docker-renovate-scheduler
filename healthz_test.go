@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/cplieger/go/health/v2"
-	"github.com/cplieger/go/measure"
+	"github.com/cplieger/go/measure/v2"
 	"github.com/cplieger/go/slogx/capture"
 )
 
@@ -166,7 +166,9 @@ func TestServeMetricsLogsStraysButNotScrapes(t *testing.T) {
 			return true
 		})
 	}
-	if got, want := lines[slog.LevelDebug], []string{"/metrics", "/healthz"}; !slices.Equal(got, want) {
+	// A handler logs after it replies, so the next request's line can come first.
+	slices.Sort(lines[slog.LevelDebug])
+	if got, want := lines[slog.LevelDebug], []string{"/healthz", "/metrics"}; !slices.Equal(got, want) {
 		t.Errorf("Debug access lines = %q, want %q", got, want)
 	}
 	if got, want := lines[slog.LevelInfo], []string{"/stray"}; !slices.Equal(got, want) {
