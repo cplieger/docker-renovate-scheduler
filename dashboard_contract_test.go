@@ -258,22 +258,32 @@ func TestDashboardReadsOnlyExportedSeries(t *testing.T) {
 // TestDashboardScopesEveryQueryToTheInstance fails when a query reads a series
 // without the picked instance, matches a label the user's own config names,
 // or a legend shows a label that is the same on every series of one instance.
+// The instance is matched exactly, never as a regular expression, because
+// Grafana does not escape a single-select value: an IPv6 target's brackets or
+// a host name's dots would match other instances. instance="" passes only
+// beside instance="$instance", for the alert absent() raises with no instance.
 func TestDashboardScopesEveryQueryToTheInstance(t *testing.T) {
 	d := loadDashboard(t)
 	for where, expr := range allQueries(&d) {
+		type pick struct{ series, matcher string }
+		var picks []pick
+		pinned := false
 		for _, sel := range selectorRe.FindAllStringSubmatch(expr, -1) {
-			scoped := false
+			p := pick{series: sel[1]}
 			for _, m := range valueMatcherRe.FindAllStringSubmatch(sel[2], -1) {
 				switch {
 				case slices.Contains(userLabels, m[1]):
 					t.Errorf("%s matches %s on %s, a label the user's own config names", where, m[1], sel[1])
 				case m[1] == "instance":
-					scoped = m[2] == "=" && m[3] == "$instance" ||
-						m[2] == "=~" && slices.Contains(strings.Split(m[3], "|"), "$instance")
+					p.matcher = m[2] + `"` + m[3] + `"`
 				}
 			}
-			if !scoped {
-				t.Errorf("%s reads %s without instance=\"$instance\"", where, sel[1])
+			pinned = pinned || p.matcher == `="$instance"`
+			picks = append(picks, p)
+		}
+		for _, p := range picks {
+			if p.matcher != `="$instance"` && (p.matcher != `=""` || !pinned) {
+				t.Errorf("%s reads %s with instance%s, want instance=\"$instance\"", where, p.series, p.matcher)
 			}
 		}
 		// The instance variable lists every instance, so it alone reads unscoped.
@@ -345,12 +355,12 @@ func TestDashboardAttentionTilesMirrorEveryShippedRule(t *testing.T) {
 		var conds []string
 		if cr != nil {
 			for _, c := range cr.Spec.Items {
-				conds = append(conds, c.Kind)
+				conds = append(conds, fmt.Sprintf("%s=%v", c.Kind, c.Spec.Value))
 			}
 		}
 		slices.Sort(conds)
 		if cr == nil || cr.Spec.Visibility != "show" || cr.Spec.Condition != "or" ||
-			!slices.Equal(conds, []string{"ConditionalRenderingData", "ConditionalRenderingTimeRangeSize"}) ||
+			!slices.Equal(conds, []string{"ConditionalRenderingData=true", "ConditionalRenderingTimeRangeSize=0s"}) ||
 			p.Spec.Data.Spec.QueryOptions.MaxDataPoints <= 0 {
 			t.Errorf("%q does not show exactly while its query answers: want a shown group or'ing a has-data rule with a 0s range rule, and a maxDataPoints pin", p.Spec.Title)
 		}

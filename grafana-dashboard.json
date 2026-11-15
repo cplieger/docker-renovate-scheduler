@@ -247,7 +247,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "0 * max(ALERTS{alertname=\"RenovateDown\", alertstate=\"firing\", instance=~\"$instance|\"})",
+                        "expr": "0 * max((ALERTS{alertname=\"RenovateDown\", alertstate=\"firing\", instance=\"$instance\"} or ALERTS{alertname=\"RenovateDown\", alertstate=\"firing\", instance=\"\"}))",
                         "legendFormat": "",
                         "instant": true,
                         "range": false
@@ -670,7 +670,7 @@
         "spec": {
           "id": 20,
           "title": "Last run of each scope",
-          "description": "One row per scope: Full is a run over every repository, Scoped a run that named repositories. Shows how the latest run ended, Renovate's exit code, how long the run took and when it ended. A repository error or a token outage shows in yellow, because it passes as a warning for its first 2 hours. A scope appears at its first run after a start.",
+          "description": "One row per scope from its first run after a start: Full is a run over every repository, Scoped a run that named repositories. Each row shows how the latest run ended, Renovate's exit code, the run time and the end time. A repository error or a token outage shows in yellow. It passes as a warning for its first 2 hours, then the run counts as failed and Needs attention shows it.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1029,7 +1029,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "round(sum by (scope, result) (increase(renovate_scheduler_runs_total{instance=\"$instance\"}[$__interval]))) > 0",
+                        "expr": "round(sum by (scope, result) (renovate_scheduler_runs_total{instance=\"$instance\"} - renovate_scheduler_runs_total{instance=\"$instance\"} offset $__interval)) > 0",
                         "legendFormat": "{{scope}} {{result}}",
                         "range": true,
                         "instant": false
@@ -1101,7 +1101,7 @@
         "spec": {
           "id": 31,
           "title": "Run time",
-          "description": "How long the latest run of each scope took, over the selected range. A full run that grows toward RUN_TIMEOUT will soon time out: raise the timeout or give Renovate fewer repositories. A gap means the scheduler was not scraped.",
+          "description": "How long the latest run of each scope took, over the selected range. A full run that grows toward RUN_TIMEOUT will soon time out: raise the timeout or give Renovate fewer repositories.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1535,10 +1535,10 @@
               "name": "${datasource}"
             },
             "spec": {
-              "query": "query_result(count(label_replace(count(0 * max(ALERTS{alertname=\"RenovateRunFailed\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"1\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"RenovateNoRecentRun\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"2\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"RenovateDown\", alertstate=\"firing\", instance=~\"$instance|\"})), \"tile\", \"3\", \"\", \"\")) or vector(0))"
+              "query": "query_result(count(label_replace(count(0 * max(ALERTS{alertname=\"RenovateRunFailed\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"1\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"RenovateNoRecentRun\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"2\", \"\", \"\") or label_replace(count(0 * max((ALERTS{alertname=\"RenovateDown\", alertstate=\"firing\", instance=\"$instance\"} or ALERTS{alertname=\"RenovateDown\", alertstate=\"firing\", instance=\"\"}))), \"tile\", \"3\", \"\", \"\")) or vector(0))"
             }
           },
-          "definition": "query_result(count(label_replace(count(0 * max(ALERTS{alertname=\"RenovateRunFailed\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"1\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"RenovateNoRecentRun\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"2\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"RenovateDown\", alertstate=\"firing\", instance=~\"$instance|\"})), \"tile\", \"3\", \"\", \"\")) or vector(0))",
+          "definition": "query_result(count(label_replace(count(0 * max(ALERTS{alertname=\"RenovateRunFailed\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"1\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"RenovateNoRecentRun\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"2\", \"\", \"\") or label_replace(count(0 * max((ALERTS{alertname=\"RenovateDown\", alertstate=\"firing\", instance=\"$instance\"} or ALERTS{alertname=\"RenovateDown\", alertstate=\"firing\", instance=\"\"}))), \"tile\", \"3\", \"\", \"\")) or vector(0))",
           "regex": "/^\\{\\} ([0-9]+) /",
           "sort": "disabled",
           "options": [],
