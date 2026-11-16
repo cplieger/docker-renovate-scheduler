@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/go/measure"
+	"github.com/cplieger/go/measure/v2"
 	"github.com/cplieger/go/scheduler"
 	"github.com/cplieger/go/scheduler/trigger"
 )
@@ -481,5 +481,55 @@ func TestRestartSeedsLastSuccessFromTheLastCompleteFullRun(t *testing.T) {
 	}
 	if got := sampleValue(t, body, metricsPrefix+"_run_deadline_timestamp_seconds"); got != 0 {
 		t.Errorf("run_deadline_timestamp_seconds in external mode = %v, want 0", got)
+	}
+}
+
+// TestPerRunSeriesAppearAtTheFirstRun: before any run the page carries the
+// seeded counters and failure clocks but no per-run series; a scope's first
+// run adds that scope's per-run series and no other scope's.
+func TestPerRunSeriesAppearAtTheFirstRun(t *testing.T) {
+	reg, m := newMetricsRegistry("built-in", "app", scheduler.NewStamp(filepath.Join(t.TempDir(), "completed")), 0)
+	page := func() string {
+		rec := httptest.NewRecorder()
+		reg.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody))
+		return rec.Body.String()
+	}
+	perRun := []string{"last_run_ok", "last_run_result", "last_run_exit_code", "last_run_timestamp_seconds", "last_run_duration_seconds"}
+	has := func(body, family, scope string) bool {
+		for line := range strings.Lines(body) {
+			if strings.HasPrefix(line, metricsPrefix+"_"+family+"{") && strings.Contains(line, `scope="`+scope+`"`) {
+				return true
+			}
+		}
+		return false
+	}
+
+	before := page()
+	for _, family := range perRun {
+		for _, scope := range runScopes {
+			if has(before, family, scope) {
+				t.Errorf("%s has a %s series before any run, want none:\n%s", family, scope, before)
+			}
+		}
+	}
+	for _, want := range []string{
+		metricsPrefix + `_runs_total{result="complete",scope="full"} 0`,
+		metricsPrefix + `_trigger_rejected_total{reason="closing"} 0`,
+		metricsPrefix + `_failing_since_timestamp_seconds{scope="scoped"} 0`,
+	} {
+		if !strings.Contains(before, want+"\n") {
+			t.Errorf("page before any run lacks %q:\n%s", want, before)
+		}
+	}
+
+	m.observe(scopeFull, runVerdict{result: resultComplete, ok: true}, time.Minute, time.Now(), time.Time{})
+	after := page()
+	for _, family := range perRun {
+		if !has(after, family, scopeFull) {
+			t.Errorf("%s has no full-scope series after a full run:\n%s", family, after)
+		}
+		if has(after, family, scopeScoped) {
+			t.Errorf("%s has a scoped series after a full run only:\n%s", family, after)
+		}
 	}
 }

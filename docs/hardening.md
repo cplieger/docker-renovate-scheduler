@@ -39,7 +39,7 @@ A read-only root filesystem is not supported, because Renovate installs the tool
 | [`github.com/cplieger/go/envx`](https://github.com/cplieger/go/tree/main/envx) | reading environment variables |
 | [`github.com/cplieger/go/health/v2`](https://github.com/cplieger/go/tree/main/health) | the health verdict, its health file for the healthcheck, and the `/healthz` answer |
 | [`github.com/cplieger/go/httpserver`](https://github.com/cplieger/go/tree/main/httpserver) | the optional metrics listener's routes, timeouts, panic recovery, access log and shutdown |
-| [`github.com/cplieger/go/measure`](https://github.com/cplieger/go/tree/main/measure) | the optional metrics page |
+| [`github.com/cplieger/go/measure/v2`](https://github.com/cplieger/go/tree/main/measure) | the optional metrics page |
 | [`github.com/cplieger/forgeapi`](https://github.com/cplieger/forgeapi) | the GitHub App token request: signing, retries, and redacting and capping GitHub's error text before it is logged |
 | [`github.com/cplieger/go/scheduler`](https://github.com/cplieger/go/tree/main/scheduler) | interval parsing, the run loop, the command runner and the socket queue |
 | [`github.com/cplieger/go/slogx`](https://github.com/cplieger/go/tree/main/slogx) | the logging setup, logfmt with UTC times |

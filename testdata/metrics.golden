@@ -1,0 +1,81 @@
+# HELP renovate_scheduler_runs_total Completed runs by scope and how they ended.
+# TYPE renovate_scheduler_runs_total counter
+renovate_scheduler_runs_total{result="aborted",scope="full"} 1
+renovate_scheduler_runs_total{result="complete",scope="full"} 0
+renovate_scheduler_runs_total{result="contained",scope="full"} 0
+renovate_scheduler_runs_total{result="failed",scope="full"} 0
+renovate_scheduler_runs_total{result="preflight_failed",scope="full"} 0
+renovate_scheduler_runs_total{result="repository_error",scope="full"} 0
+renovate_scheduler_runs_total{result="start_failed",scope="full"} 0
+renovate_scheduler_runs_total{result="timed_out",scope="full"} 0
+renovate_scheduler_runs_total{result="token_failed",scope="full"} 0
+renovate_scheduler_runs_total{result="token_unavailable",scope="full"} 0
+renovate_scheduler_runs_total{result="aborted",scope="scoped"} 0
+renovate_scheduler_runs_total{result="complete",scope="scoped"} 1
+renovate_scheduler_runs_total{result="contained",scope="scoped"} 0
+renovate_scheduler_runs_total{result="failed",scope="scoped"} 0
+renovate_scheduler_runs_total{result="preflight_failed",scope="scoped"} 0
+renovate_scheduler_runs_total{result="repository_error",scope="scoped"} 1
+renovate_scheduler_runs_total{result="start_failed",scope="scoped"} 0
+renovate_scheduler_runs_total{result="timed_out",scope="scoped"} 0
+renovate_scheduler_runs_total{result="token_failed",scope="scoped"} 0
+renovate_scheduler_runs_total{result="token_unavailable",scope="scoped"} 0
+# HELP renovate_scheduler_trigger_rejected_total Run requests the queue refused, because it was full or the daemon was shutting down.
+# TYPE renovate_scheduler_trigger_rejected_total counter
+renovate_scheduler_trigger_rejected_total{reason="closing"} 2
+renovate_scheduler_trigger_rejected_total{reason="full"} 1
+# HELP renovate_scheduler_build_info Always 1; the version label is the release this process runs.
+# TYPE renovate_scheduler_build_info gauge
+renovate_scheduler_build_info{version="1.2.3"} 1
+# HELP renovate_scheduler_last_run_ok 1 when the scope's last completed run passed, a tolerated failure included, else 0.
+# TYPE renovate_scheduler_last_run_ok gauge
+renovate_scheduler_last_run_ok{scope="full"} 0
+renovate_scheduler_last_run_ok{scope="scoped"} 1
+# HELP renovate_scheduler_last_run_result 1 for how the scope's last completed run ended, 0 for the other results.
+# TYPE renovate_scheduler_last_run_result gauge
+renovate_scheduler_last_run_result{result="aborted",scope="full"} 1
+renovate_scheduler_last_run_result{result="complete",scope="full"} 0
+renovate_scheduler_last_run_result{result="contained",scope="full"} 0
+renovate_scheduler_last_run_result{result="failed",scope="full"} 0
+renovate_scheduler_last_run_result{result="preflight_failed",scope="full"} 0
+renovate_scheduler_last_run_result{result="repository_error",scope="full"} 0
+renovate_scheduler_last_run_result{result="start_failed",scope="full"} 0
+renovate_scheduler_last_run_result{result="timed_out",scope="full"} 0
+renovate_scheduler_last_run_result{result="token_failed",scope="full"} 0
+renovate_scheduler_last_run_result{result="token_unavailable",scope="full"} 0
+renovate_scheduler_last_run_result{result="aborted",scope="scoped"} 0
+renovate_scheduler_last_run_result{result="complete",scope="scoped"} 0
+renovate_scheduler_last_run_result{result="contained",scope="scoped"} 0
+renovate_scheduler_last_run_result{result="failed",scope="scoped"} 0
+renovate_scheduler_last_run_result{result="preflight_failed",scope="scoped"} 0
+renovate_scheduler_last_run_result{result="repository_error",scope="scoped"} 1
+renovate_scheduler_last_run_result{result="start_failed",scope="scoped"} 0
+renovate_scheduler_last_run_result{result="timed_out",scope="scoped"} 0
+renovate_scheduler_last_run_result{result="token_failed",scope="scoped"} 0
+renovate_scheduler_last_run_result{result="token_unavailable",scope="scoped"} 0
+# HELP renovate_scheduler_last_run_exit_code Renovate's exit code in the scope's last completed run; -1 when Renovate did not run or a signal ended it.
+# TYPE renovate_scheduler_last_run_exit_code gauge
+renovate_scheduler_last_run_exit_code{scope="full"} -1
+renovate_scheduler_last_run_exit_code{scope="scoped"} 1
+# HELP renovate_scheduler_last_run_timestamp_seconds Unix time the scope's last completed run ended.
+# TYPE renovate_scheduler_last_run_timestamp_seconds gauge
+renovate_scheduler_last_run_timestamp_seconds{scope="full"} 1772366400
+renovate_scheduler_last_run_timestamp_seconds{scope="scoped"} 1772373600
+# HELP renovate_scheduler_last_success_timestamp_seconds Unix time the scope's last complete run ended; for the full scope, read back from RENOVATE_BASE_DIR after a restart.
+# TYPE renovate_scheduler_last_success_timestamp_seconds gauge
+renovate_scheduler_last_success_timestamp_seconds{scope="full"} 1772344800
+renovate_scheduler_last_success_timestamp_seconds{scope="scoped"} 1772370000
+# HELP renovate_scheduler_last_run_duration_seconds How long the scope's last completed run took.
+# TYPE renovate_scheduler_last_run_duration_seconds gauge
+renovate_scheduler_last_run_duration_seconds{scope="full"} 270.5
+renovate_scheduler_last_run_duration_seconds{scope="scoped"} 42.25
+# HELP renovate_scheduler_failing_since_timestamp_seconds Unix time the scope's current series of tolerable failures began; 0 when runs are not failing.
+# TYPE renovate_scheduler_failing_since_timestamp_seconds gauge
+renovate_scheduler_failing_since_timestamp_seconds{scope="full"} 0
+renovate_scheduler_failing_since_timestamp_seconds{scope="scoped"} 1772361000
+# HELP renovate_scheduler_info Always 1; the labels name the scheduling mode and the GitHub auth mode.
+# TYPE renovate_scheduler_info gauge
+renovate_scheduler_info{auth="app",mode="built-in"} 1
+# HELP renovate_scheduler_run_deadline_timestamp_seconds Unix time by which the next complete full run is due; 0 while RUN_INTERVAL is off.
+# TYPE renovate_scheduler_run_deadline_timestamp_seconds gauge
+renovate_scheduler_run_deadline_timestamp_seconds 1772391600
