@@ -32,7 +32,7 @@ var scrapeLabels = []string{"job", "instance"}
 var seriesOutsideTheApp = []string{"up"}
 
 var (
-	selectorRe     = regexp.MustCompile(`([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}`)
+	selectorRe     = regexp.MustCompile(`([a-zA-Z_:][a-zA-Z0-9_:]*)\s*\{([^}]*)\}`)
 	matcherNameRe  = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)\s*(=~|!~|!=|=)`)
 	labelMatcherRe = regexp.MustCompile(`\{[^}]*\}`)
 	groupingRe     = regexp.MustCompile(`\b(by|without|on|ignoring|group_left|group_right)\s*\([^)]*\)`)
@@ -73,6 +73,22 @@ func seriesNames(expr string) []string {
 		}
 	}
 	return names
+}
+
+// quotesAName reports whether the selector text names a label or series in
+// quotes, which PromQL accepts and matcherNameRe cannot read: a string there
+// follows no matcher operator.
+func quotesAName(sel string) bool {
+	for i := 0; i < len(sel); i++ {
+		if c := sel[i]; c == '"' || c == '\'' || c == '`' {
+			before := strings.TrimRight(sel[:i], " \t\r\n")
+			if !strings.HasSuffix(before, "=") && !strings.HasSuffix(before, "~") {
+				return true
+			}
+			i = skipString(sel, i) - 1
+		}
+	}
+	return false
 }
 
 // exportedFamilies builds the registry runDaemon serves, and runs one complete
@@ -116,10 +132,16 @@ func familyLabels(t *testing.T, reg *measure.Registry) map[string][]string {
 // TestPromQLRulesReadOnlyExportedSeries fails when a shipped PromQL rule reads
 // a series, or matches a label, that the registry runDaemon serves does not
 // export, so a renamed or dropped series fails the build instead of silencing
-// an alert.
+// an alert. It also fails a label or series named in quotes, which it cannot
+// read.
 func TestPromQLRulesReadOnlyExportedSeries(t *testing.T) {
 	exported := exportedFamilies(t)
 	for alert, expr := range ruleExprs(t, "alerts/promql.yaml") {
+		for _, sel := range selectors(expr) {
+			if quotesAName(sel.text) {
+				t.Errorf("%s names a label or series in quotes, which this check cannot read: %s", alert, sel.text)
+			}
+		}
 		names := seriesNames(expr)
 		if len(names) == 0 {
 			t.Errorf("%s reads no series: %s", alert, expr)

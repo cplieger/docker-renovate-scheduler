@@ -1053,7 +1053,7 @@
         "spec": {
           "id": 30,
           "title": "Runs by result",
-          "description": "Completed runs in each time slot, by scope and how they ended, with the total for the selected range in the legend. A run of failures shows when the trouble began and whether good runs came between. A run that ended shortly before a restart, in the same slot, is not counted. Neither is a run that ended while Prometheus could not scrape the scheduler for longer than a slot.",
+          "description": "Completed runs in each time slot, by scope and how they ended, with the total for the selected range in the legend. A run of failures shows when the trouble began and whether good runs came between. A slot near a container restart, a failed scrape or a scrape outage can show fewer or more than happened.",
           "links": [],
           "data": {
             "kind": "QueryGroup",

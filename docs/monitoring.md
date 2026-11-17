@@ -119,9 +119,11 @@ Thresholds and the `severity` labels are starting points. The 14-hour window of 
 
 - Needs attention appears only while `RenovateRunFailed`, `RenovateNoRecentRun` or `RenovateDown` fires, with one tile per rule. Each tile reads its rule's `ALERTS` series, which Prometheus and the Mimir ruler store beside your metrics. The row stays hidden while those rules are not loaded. `RenovateDown` matches the job name `renovate`, so name your scrape job that or edit the rule.
 - Runs shows whether the latest full run passed and when the last complete one ended. It also shows when the next one is due and since when full runs have been failing. Its Last run of each scope table has one row per scope. It shows how the latest run ended, Renovate's exit code, the run time and the end time.
-- History charts the completed runs by scope and result, with the totals for the selected range in the legend. A run that ended shortly before a restart, in the same time slot, is not counted. Neither is a run that ended while Prometheus could not scrape the scheduler for longer than a slot. It also charts how long the latest run of each scope took.
+- History charts the completed runs by scope and result, with the totals for the selected range in the legend. A slot near a container restart, a failed scrape or a scrape outage can show fewer or more than happened. It also charts how long the latest run of each scope took.
 
-The panels read `last_run_ok`, `last_run_result`, `last_run_exit_code`, `last_run_duration_seconds`, `last_run_timestamp_seconds`, `last_success_timestamp_seconds`, `failing_since_timestamp_seconds`, `run_deadline_timestamp_seconds` and `runs_total`, with `process_start_time_seconds` to tell a restart apart. The Scheduler variable reads `build_info`.
+The panels read `last_run_ok`, `last_run_result`, `last_run_exit_code`, `last_run_duration_seconds`, `last_run_timestamp_seconds`, `last_success_timestamp_seconds`, `failing_since_timestamp_seconds`, `run_deadline_timestamp_seconds` and `runs_total`. The Scheduler variable reads `build_info`.
+
+The Runs by result chart in History also reads `process_start_time_seconds` to find a container restart. Keep the `process_*` series in your scrape, or the slot of a restart shows fewer runs than happened.
 
 After a start, the Last full run tile reads No run yet and each scope's table row stays empty until that scope's first completed run. With `RUN_INTERVAL=off`, Next full run due reads No schedule, because your own scheduler sets the pace. A tile that reads Not scraped means Prometheus has no fresh sample from the scheduler.
 
