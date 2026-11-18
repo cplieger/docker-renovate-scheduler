@@ -5,6 +5,8 @@
 <!-- hub-overview BEGIN -->
 docker-renovate-scheduler runs your self-hosted [Renovate](https://github.com/renovatebot/renovate) in one always-on container, on a schedule or when your own scheduler asks, with no cron job. It is Renovate's official image plus a scheduler. It opens no port unless you ask for a metrics page, and it does not answer webhooks.
 
+![The bundled Grafana dashboard showing the last full run passed, the last complete full run and the failing state, a table of the last run of each scope, and charts of the runs by result and the run time over 7 days](docs/images/header.png)
+
 ## What it does
 
 docker-renovate-scheduler keeps dependency pull requests coming from your Renovate bot:
