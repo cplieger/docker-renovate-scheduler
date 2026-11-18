@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/go/scheduler"
-	"github.com/cplieger/go/scheduler/trigger"
+	"github.com/cplieger/go/ownersock"
+	"github.com/cplieger/go/scheduler/v2"
+	"github.com/cplieger/go/scheduler/v2/trigger"
 	"github.com/cplieger/go/slogx/capture"
 )
 
@@ -25,9 +26,9 @@ func startTestServer(t *testing.T, runner scheduler.CommandRunner) string {
 	// context.Background() (not t.Context()): this ctx is cancelled by t.Cleanup below, and t.Context() is already cancelled before cleanups run.
 	ctx, cancel := context.WithCancel(context.Background())
 	d, _ := newBareDaemon(t, runner)
-	ln, err := trigger.Listen(sock)
+	ln, err := ownersock.Listen(ownersock.Config{Path: sock})
 	if err != nil {
-		t.Fatalf("trigger.Listen() = %v", err)
+		t.Fatalf("ownersock.Listen() = %v", err)
 	}
 	execDone := make(chan struct{})
 	go func() { defer close(execDone); d.runJobs(ctx) }()
@@ -126,9 +127,9 @@ func TestServer_ShutdownCancelsQueuedRequestWithExplicitResult(t *testing.T) {
 		inflightCtx = runCtx
 		return runOnce(runCtx, timeout, trig, p, newCmd)
 	}
-	ln, err := trigger.Listen(sock)
+	ln, err := ownersock.Listen(ownersock.Config{Path: sock})
 	if err != nil {
-		t.Fatalf("trigger.Listen() = %v", err)
+		t.Fatalf("ownersock.Listen() = %v", err)
 	}
 	execDone := make(chan struct{})
 	go func() { defer close(execDone); d.runJobs(ctx) }()

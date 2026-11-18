@@ -12,11 +12,11 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/cplieger/go/envx"
 	"github.com/cplieger/go/filesafe"
-	"github.com/cplieger/go/scheduler"
+	"github.com/cplieger/go/httpserver/v2"
+	"github.com/cplieger/go/scheduler/v2"
 	"github.com/cplieger/go/slogx"
 )
 
@@ -25,8 +25,10 @@ const (
 	defaultRunTimeout  = time.Hour
 	baseDirProbeBudget = 10 * time.Second
 	defaultBaseDir     = "/tmp/renovate"
-	// The owner-only socket limits trigger authority to the container user.
-	socketPath = "/tmp/docker-renovate-scheduler.sock"
+	// The socket sits in a directory of its own that ownersock creates at mode
+	// 0700, and only the container user can connect: that limits trigger
+	// authority to it.
+	socketPath = "/tmp/docker-renovate-scheduler/trigger.sock"
 	stampName  = ".docker-renovate-scheduler-last-run"
 	// completedStampName seeds the full scope's last-success series after a
 	// restart.
@@ -42,14 +44,16 @@ func setupLogger() {
 	}
 }
 
-// metricsListenAddr reads METRICS_LISTEN_ADDR with whitespace and invisible
-// runes trimmed from its edges: an untrimmed " :9470" fails as a host lookup
-// the operator cannot see. Nothing else is checked; the bind is the check.
+// metricsListenAddr is METRICS_LISTEN_ADDR read as httpserver.ListenAddr reads it;
+// empty opens no listener.
 func metricsListenAddr() string {
-	return strings.TrimFunc(envx.String("METRICS_LISTEN_ADDR"), func(r rune) bool {
-		return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) ||
-			unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r)
-	})
+	return httpserver.ListenAddr(envx.String("METRICS_LISTEN_ADDR"), "")
+}
+
+// allowedHosts is ALLOWED_HOSTS' entries for the ops listener. None serves
+// every Host.
+func allowedHosts() []string {
+	return strings.Split(envx.String("ALLOWED_HOSTS"), ",")
 }
 
 func completedStampPath() string {

@@ -30,8 +30,8 @@ import (
 	"github.com/cplieger/forgeapi/v2"
 	"github.com/cplieger/forgeapi/v2/creds"
 	"github.com/cplieger/go/measure/v2"
-	"github.com/cplieger/go/scheduler"
-	"github.com/cplieger/go/scheduler/trigger"
+	"github.com/cplieger/go/scheduler/v2"
+	"github.com/cplieger/go/scheduler/v2/trigger"
 	"github.com/cplieger/go/slogx/capture"
 )
 

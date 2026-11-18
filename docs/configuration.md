@@ -15,7 +15,7 @@ The scheduler reads these environment variables at start. They sit outside the `
 
 Set `METRICS_LISTEN_ADDR` to an address the container can listen on, such as `:9470`, and publish that port to reach it from another host. The address then serves `GET /metrics`, the page `alerts/promql.yaml` reads, and `GET /healthz`, the same verdict as the healthcheck. Unset or empty, the image opens no port. Spaces and invisible characters around the value are ignored.
 
-The container listens before its first run. An address it cannot listen on, malformed or already in use, stops it at start with `cannot listen on METRICS_LISTEN_ADDR` and one `daemon stopped` line, and it never falls back to another address. [Monitoring and alerts](monitoring.md#metrics) lists the series.
+The container listens before its first run. An address it cannot listen on, malformed or already in use, stops it at start with `cannot start the ops listener` and one `daemon stopped` line, and it never falls back to another address. [Monitoring and alerts](monitoring.md#metrics) lists the series.
 
 ## Renovate's own settings
 

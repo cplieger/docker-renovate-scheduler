@@ -6,7 +6,7 @@ This page covers what the container accepts, where it writes and what the image 
 
 The image opens no port and runs no web server unless `METRICS_LISTEN_ADDR` is set. That listener serves only `GET /metrics` and `GET /healthz`, answers any other path with 404 and any other method with 405, and has no login, so keep it on your network. It cuts off a client that takes over 10 seconds to send its request or 30 seconds to read the answer.
 
-The only way to start a run from outside the scheduler is a `docker exec` of the `run` command, which talks to the scheduler through a socket at `/tmp/docker-renovate-scheduler.sock`. Only the container's own user can open that socket, and only from inside the container, which is the same boundary `docker exec` already enforces. A `run` from another user fails at once with `permission denied`.
+The only way to start a run from outside the scheduler is a `docker exec` of the `run` command, which talks to the scheduler through a socket at `/tmp/docker-renovate-scheduler/trigger.sock`, in a directory only the container's own user can open. The server checks the user of every connection, so a `run` from another user, root included, is refused: run `docker exec --user` with the container's user.
 
 The container runs as Renovate's non-root user, UID 12021, or as the user Compose `user:` sets. The socket belongs to that user, so `docker exec` runs must use it too. [Running as another user](configuration.md#running-as-another-user) explains what another user needs.
 
@@ -23,7 +23,7 @@ The image removes the `docker` command-line tool from Renovate's base image, so 
 | Folder | What it holds |
 | --- | --- |
 | `/data` | `RENOVATE_BASE_DIR` in this image: Renovate's clones and caches, and the scheduler's run records |
-| `/tmp` | the trigger socket `/tmp/docker-renovate-scheduler.sock`. The scheduler stops at start when it cannot create it |
+| `/tmp` | the trigger socket `/tmp/docker-renovate-scheduler/trigger.sock`, in a directory the scheduler creates. The scheduler stops at start when it cannot create it |
 | `/opt/containerbase` and the home folder | the tools Renovate installs at run time, and their caches |
 | `/dev/shm` | the health file `docker-renovate-scheduler.healthy` |
 

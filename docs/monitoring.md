@@ -13,7 +13,7 @@ This page covers what docker-renovate-scheduler reports, how to get alerts from 
 
 ## Metrics
 
-Set `METRICS_LISTEN_ADDR` to an address such as `:9470`, and publish that port. The container then serves Prometheus metrics at `/metrics` and a health check at `/healthz` on it. Left unset, the image opens no port. The page has no login, so keep the port on your network. An address the container cannot listen on stops it at start with `cannot listen on METRICS_LISTEN_ADDR`.
+Set `METRICS_LISTEN_ADDR` to an address such as `:9470`, and publish that port. The container then serves Prometheus metrics at `/metrics` and a health check at `/healthz` on it. Left unset, the image opens no port. The page has no login, so keep the port on your network. `ALLOWED_HOSTS` limits the `Host` names it serves: a request whose `Host` is not listed gets `403` with the code `host_not_allowed`, a request from the container itself always passes, and unset serves every `Host`. An address the container cannot listen on stops it at start with `cannot start the ops listener`.
 
 Every series starts with `renovate_scheduler_`. `scope` is `full` for a run over every repository and `scoped` for a run that named repositories, and a scope's run series appear at its first completed run. After a restart, the counters start again from 0, and the full scope's last success comes back from `/data`.
 
@@ -84,7 +84,7 @@ These lines are for reading a run by hand. No alert rule reads them.
 | `renovate runs recovered` | INFO | `trigger`, `scope`, `failing_for`. The first good run after repository errors or token outages |
 | `renovate run timed out` | ERROR | `trigger`, `duration_ms`, `timeout` |
 | `base directory preflight failed` | ERROR | `path`, `error`, `hint` |
-| `cannot listen on METRICS_LISTEN_ADDR` | ERROR | `value`, `error`. The container stops |
+| `cannot start the ops listener` | ERROR | `value`, `error`. The container stops |
 | `halting run admission: renovate run process group survived the kill sweep` | ERROR | `trigger` |
 | `trigger request rejected` | WARN | `repos`, `reason` |
 | `run cancelled by shutdown` | WARN | `stage`, `trigger`, `repos` |

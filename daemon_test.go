@@ -18,8 +18,9 @@ import (
 	"time"
 
 	"github.com/cplieger/go/health/v2"
-	"github.com/cplieger/go/scheduler"
-	"github.com/cplieger/go/scheduler/trigger"
+	"github.com/cplieger/go/ownersock"
+	"github.com/cplieger/go/scheduler/v2"
+	"github.com/cplieger/go/scheduler/v2/trigger"
 	"github.com/cplieger/go/slogx/capture"
 )
 
@@ -921,7 +922,7 @@ func TestRunDaemon_BootFailureUpdatesMarkerOnlyAfterAcquiringSocket(t *testing.T
 			t.Fatalf("setup: %v", err)
 		}
 		t.Setenv("RENOVATE_BASE_DIR", file)
-		sock := filepath.Join(t.TempDir(), "trigger.sock")
+		sock := testSocketPath(t)
 		if err := runDaemon(t.Context(), sock, recordingRunner("true", nil)); err == nil {
 			t.Fatal("runDaemon() = nil, want error")
 		}
@@ -934,7 +935,7 @@ func TestRunDaemon_BootFailureUpdatesMarkerOnlyAfterAcquiringSocket(t *testing.T
 			t.Fatalf("setup previous life's marker: %v", err)
 		}
 		t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
-		sock := filepath.Join(t.TempDir(), "trigger.sock")
+		sock := testSocketPath(t)
 		ln, err := net.Listen("unix", sock)
 		if err != nil {
 			t.Fatalf("listen on trigger socket: %v", err)
@@ -1091,9 +1092,9 @@ func TestRunDaemon_LateContainmentLossAfterShutdownReturnsError(t *testing.T) {
 	}
 
 	sock := testSocketPath(t)
-	ln, err := trigger.Listen(sock)
+	ln, err := ownersock.Listen(ownersock.Config{Path: sock})
 	if err != nil {
-		t.Fatalf("trigger.Listen(%q) = %v", sock, err)
+		t.Fatalf("ownersock.Listen(%q) = %v", sock, err)
 	}
 	st := health.NewStatus(health.WithMarker(healthMarkerPath))
 	d := &daemon{
@@ -1194,9 +1195,9 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 	}
 
 	sock := testSocketPath(t)
-	ln, err := trigger.Listen(sock)
+	ln, err := ownersock.Listen(ownersock.Config{Path: sock})
 	if err != nil {
-		t.Fatalf("trigger.Listen(%q) = %v", sock, err)
+		t.Fatalf("ownersock.Listen(%q) = %v", sock, err)
 	}
 	st := health.NewStatus(health.WithMarker(healthMarkerPath))
 	d := &daemon{

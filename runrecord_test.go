@@ -18,8 +18,9 @@ import (
 
 	"github.com/cplieger/forgeapi/v2"
 	"github.com/cplieger/go/measure/v2"
-	"github.com/cplieger/go/scheduler"
-	"github.com/cplieger/go/scheduler/trigger"
+	"github.com/cplieger/go/ownersock"
+	"github.com/cplieger/go/scheduler/v2"
+	"github.com/cplieger/go/scheduler/v2/trigger"
 	"github.com/cplieger/go/slogx"
 	"github.com/cplieger/go/slogx/capture"
 )
@@ -451,7 +452,7 @@ func TestRunDaemonErrorReturnsLogDaemonStopped(t *testing.T) {
 // the sweep, which stops the daemon with an error.
 func runContainedDaemon(t *testing.T, sock string) error {
 	t.Helper()
-	ln, err := trigger.Listen(sock)
+	ln, err := ownersock.Listen(ownersock.Config{Path: sock})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +480,7 @@ func runContainedDaemon(t *testing.T, sock string) error {
 func TestDaemonNeverLogsDaemonStoppedOnACleanShutdown(t *testing.T) {
 	t.Setenv("RENOVATE_BASE_DIR", t.TempDir())
 	sock := testSocketPath(t)
-	ln, err := trigger.Listen(sock)
+	ln, err := ownersock.Listen(ownersock.Config{Path: sock})
 	if err != nil {
 		t.Fatal(err)
 	}
