@@ -3,11 +3,12 @@ module github.com/cplieger/docker-renovate-scheduler
 go 1.27.4
 
 require (
-	github.com/cplieger/forgeapi/v2 v2.0.0
-	github.com/cplieger/go/envx v1.1.0
+	github.com/cplieger/forgeapi/v3 v3.0.0-dev.7
+	github.com/cplieger/go/envx/v2 v2.0.0-dev.1
 	github.com/cplieger/go/filesafe v1.2.0-dev.2
 	github.com/cplieger/go/health/v2 v2.0.0
 	github.com/cplieger/go/httpserver/v2 v2.0.0-dev.10
+	github.com/cplieger/go/masked v1.0.0-dev.1
 	github.com/cplieger/go/measure/v2 v2.1.0-dev.2
 	github.com/cplieger/go/ownersock v1.0.0-dev.4
 	github.com/cplieger/go/scheduler/v2 v2.0.0-dev.1
