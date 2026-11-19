@@ -1,7 +1,7 @@
-github.com/cplieger/forgeapi/v2 v2.0.0 h1:xYwpa34gfKVtLYrTAhU7OBZO7/1mTMsz1qLOwYJP2Kc=
-github.com/cplieger/forgeapi/v2 v2.0.0/go.mod h1:NQTQ1VhjJxbh+qSuKKhlPtAg/T6nPwaRQDHFxcadqbk=
-github.com/cplieger/go/envx v1.1.0 h1:AfJm5r7oR3zHmpplYwpNQL6yB7b50bmNAaOAijeG9aM=
-github.com/cplieger/go/envx v1.1.0/go.mod h1:USzzGAzdJGsU8ZYRmVaMGvKzgEGDDhXvUUsckSv4VfM=
+github.com/cplieger/forgeapi/v3 v3.0.0-dev.7 h1:F5sg1RaG0FAknUqdfJVJ9lkLs0wdmSW0MxpNpNP6NbE=
+github.com/cplieger/forgeapi/v3 v3.0.0-dev.7/go.mod h1:YjaRFZ4/tuTGuZeqbHJebHKVY1nJEdCuZUaIRJ5Z7iE=
+github.com/cplieger/go/envx/v2 v2.0.0-dev.1 h1:wD/C4/xfT68gAKUgWMlb2Ev4A0dGGS3ZzW0i69kMXpQ=
+github.com/cplieger/go/envx/v2 v2.0.0-dev.1/go.mod h1:8tW2M5tRWGVUD/meU45+zATd4Ir2p6VqpdqCVF+Isoo=
 github.com/cplieger/go/filesafe v1.2.0-dev.2 h1:KzGIp+fvRgpUCJc4ndztIKm56kzMAx5fYM7xeGbPAvA=
 github.com/cplieger/go/filesafe v1.2.0-dev.2/go.mod h1:ji4TnJD8S8kgKelJlCQxlHyX0UXQGTW1ylSBqH5xqhI=
 github.com/cplieger/go/health/v2 v2.0.0 h1:WHZiSYIyvmaFvkohJopPptEg9oW4QxRSV5HUxaeFUKo=
@@ -14,6 +14,8 @@ github.com/cplieger/go/httpserver/v2 v2.0.0-dev.10 h1:hTa8RA2RVzXAFJA0KkNwkZFS0c
 github.com/cplieger/go/httpserver/v2 v2.0.0-dev.10/go.mod h1:IUzAOZzxsi24r2nK1aTp2uIMi3Y1+67hBcng8bcQj6w=
 github.com/cplieger/go/jsonx v1.1.0 h1:/XBHr3vJVqKYVDteO8cZEMAdTgmT3Df/SeyNw1pdak8=
 github.com/cplieger/go/jsonx v1.1.0/go.mod h1:ry6co0JYAadIhjHtkktBSK3to4YdtEak1P7mdmQlr7U=
+github.com/cplieger/go/masked v1.0.0-dev.1 h1:Do4+avpvVJP//Jm4LLH1y468Rxrz966dAgESVp/z7wU=
+github.com/cplieger/go/masked v1.0.0-dev.1/go.mod h1:jRx6ZGlfjrDaAQ5n8MTd023wl5rLuacKmtDbnJgrD+g=
 github.com/cplieger/go/measure/v2 v2.1.0-dev.2 h1:Y0zNUFSubYyBdMqS1MpDX5x2qc7Rdr3dnQf/isRAWvI=
 github.com/cplieger/go/measure/v2 v2.1.0-dev.2/go.mod h1:gG4hr0jum0sVWiAppZwHPdvHNIVPBbryOCxzCoPSo84=
 github.com/cplieger/go/ownersock v1.0.0-dev.4 h1:J1DIXj7Q4YQ+II3V3vdpsn2uRfQmn+hTJPHzzibjZX4=

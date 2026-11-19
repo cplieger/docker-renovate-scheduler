@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cplieger/forgeapi/v2/creds"
+	"github.com/cplieger/forgeapi/v3/creds"
 	"github.com/cplieger/go/health/v2"
 	"github.com/cplieger/go/ownersock"
 	"github.com/cplieger/go/scheduler/v2"

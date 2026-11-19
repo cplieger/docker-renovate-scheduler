@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/go/envx"
+	"github.com/cplieger/go/envx/v2"
 	"github.com/cplieger/go/filesafe"
 	"github.com/cplieger/go/httpserver/v2"
 	"github.com/cplieger/go/scheduler/v2"

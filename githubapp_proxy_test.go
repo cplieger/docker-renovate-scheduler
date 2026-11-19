@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/forgeapi/v2"
-	"github.com/cplieger/forgeapi/v2/creds"
+	"github.com/cplieger/forgeapi/v3"
+	"github.com/cplieger/forgeapi/v3/creds"
 	"github.com/cplieger/go/slogx/capture"
 )
 
@@ -145,16 +145,16 @@ var proxyScenarios = map[string]func(*testing.T){
 		t.Setenv("NO_PROXY", "api.github.com")
 		app := loadProxyConfig(t)
 
-		if app.proxy != "" {
-			t.Errorf("app proxy = %q, want none: NO_PROXY names GitHub's API", app.proxy)
+		if app.proxy.url != "" {
+			t.Errorf("app proxy = %q, want none: NO_PROXY names GitHub's API", app.proxy.url)
 		}
 		requirePrivateRefused(t, app)
 	},
 	"no proxy variable": func(t *testing.T) {
 		app := loadProxyConfig(t)
 
-		if app.proxy != "" {
-			t.Errorf("app proxy = %q, want none with no proxy variable set", app.proxy)
+		if app.proxy.url != "" {
+			t.Errorf("app proxy = %q, want none with no proxy variable set", app.proxy.url)
 		}
 		requirePrivateRefused(t, app)
 	},
@@ -230,8 +230,8 @@ var proxyScenarios = map[string]func(*testing.T){
 func portlessProxyScenario(value, want string) func(*testing.T) {
 	return func(t *testing.T) {
 		t.Setenv("HTTPS_PROXY", value)
-		if app := loadProxyConfig(t); app.proxy != want {
-			t.Errorf("app proxy = %q, want %q", app.proxy, want)
+		if app := loadProxyConfig(t); app.proxy.url != want {
+			t.Errorf("app proxy = %q, want %q", app.proxy.url, want)
 		}
 
 		_, err := proxiedSource(t).Mint(t.Context())

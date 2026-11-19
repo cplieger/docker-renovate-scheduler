@@ -16,9 +16,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/forgeapi/v2"
-	"github.com/cplieger/forgeapi/v2/creds"
-	"github.com/cplieger/go/envx"
+	"github.com/cplieger/forgeapi/v3"
+	"github.com/cplieger/forgeapi/v3/creds"
+	"github.com/cplieger/go/envx/v2"
+	"github.com/cplieger/go/masked"
 )
 
 // The scheduler's GitHub App settings stay outside RENOVATE_* so Renovate
@@ -52,7 +53,7 @@ const (
 // the App settings are absent and Renovate uses its own token.
 type appConfig struct {
 	key            *creds.AppKey
-	proxy          string // the proxy the token requests leave through, "" for a direct dial
+	proxy          proxySetting // the proxy the token requests leave through; zero is a direct dial
 	appID          int
 	installationID int64 // 0 resolves the App's single installation at first use
 }
@@ -113,24 +114,46 @@ func loadAppConfig() (*appConfig, error) {
 // default transport reads them, since forgeapi reads neither. A value that is
 // no proxy URL is refused, where net/http would dial directly or misread it.
 // net/http reads the variables once per process.
-func githubAPIProxy() (string, error) {
+func githubAPIProxy() (proxySetting, error) {
 	raw := cmp.Or(envx.String("HTTPS_PROXY"), envx.String("https_proxy"))
 	if raw == "" {
-		return "", nil
+		return proxySetting{}, nil
 	}
 	// No error quotes the value, which can hold the proxy's password.
 	refused := errors.New("HTTPS_PROXY (or https_proxy) does not hold a proxy URL")
 	if !isProxyURL(raw) {
-		return "", refused
+		return proxySetting{}, refused
 	}
 	u, err := http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Scheme: "https", Host: githubAPIHost}})
 	if err != nil {
-		return "", refused
+		return proxySetting{}, refused
 	}
 	if u == nil {
-		return "", nil
+		return proxySetting{}, nil
 	}
-	return u.String(), nil
+	return splitProxy(u), nil
+}
+
+// proxySetting is a proxy URL with its credentials split out, as forgeapi
+// takes them: a Connection.Proxy holding userinfo is refused.
+type proxySetting struct {
+	password masked.Secret
+	url      string
+	username string
+}
+
+func splitProxy(u *url.URL) proxySetting {
+	p := proxySetting{}
+	if u.User != nil {
+		p.username = u.User.Username()
+		if pw, ok := u.User.Password(); ok {
+			p.password = masked.NewSecret(pw)
+		}
+	}
+	bare := *u
+	bare.User = nil
+	p.url = bare.String()
+	return p
 }
 
 // isProxyURL reports whether raw names a proxy forgeapi dials: an http,
@@ -199,7 +222,9 @@ func newAppSource(app *appConfig, opts ...forgeapi.Option) (*creds.AppSource, er
 	if app.installationID != 0 {
 		install = creds.InstallationByID(app.installationID)
 	}
-	return creds.NewAppSource(forgeapi.Connection{WebBaseURL: githubWebBase, Proxy: app.proxy}, app.key,
+	return creds.NewAppSource(forgeapi.Connection{
+		WebBaseURL: githubWebBase, Proxy: app.proxy.url, ProxyUsername: app.proxy.username, ProxyPassword: app.proxy.password,
+	}, app.key,
 		creds.AppSourceConfig{Installation: install, Grant: creds.FullGrant()},
 		slices.Concat(appSourceOptions(app), opts)...)
 }
@@ -211,7 +236,7 @@ func appSourceOptions(app *appConfig) []forgeapi.Option {
 		forgeapi.WithRetries(tokenMintRetries),
 		forgeapi.WithOperationTimeout(tokenMintBudget),
 	}
-	if app.proxy != "" {
+	if app.proxy.url != "" {
 		// The operator named the proxy in the environment, and the proxy, not
 		// this process, dials GitHub, so the address policy only judges the proxy.
 		opts = append(opts, forgeapi.WithPrivateAddresses(true))
