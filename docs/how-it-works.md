@@ -10,7 +10,7 @@ The image removes the `docker` command-line tool that the base image carries. Re
 
 ## One process runs every Renovate run
 
-The container's main process, the scheduler, starts every Renovate run as its own child process, whichever mode or request asked for it. The `run` command is a small client. It sends its repository names and its whole environment to the scheduler over a socket at `/tmp/docker-renovate-scheduler.sock`, then waits and exits with that run's result.
+The container's main process, the scheduler, starts every Renovate run as its own child process, whichever mode or request asked for it. The `run` command is a small client. It sends its repository names and its whole environment to the scheduler over a socket at `/tmp/docker-renovate-scheduler/trigger.sock`, then waits and exits with that run's result.
 
 | Command | What it does |
 | --- | --- |
