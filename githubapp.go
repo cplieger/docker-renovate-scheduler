@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/forgeapi/v2"
-	"github.com/cplieger/forgeapi/v2/creds"
-	"github.com/cplieger/go/envx"
+	"github.com/cplieger/forgeapi/v3"
+	"github.com/cplieger/forgeapi/v3/creds"
+	"github.com/cplieger/go/envx/v2"
 )
 
 // The scheduler's GitHub App settings stay outside RENOVATE_* so Renovate
