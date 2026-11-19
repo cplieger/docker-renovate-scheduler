@@ -13,8 +13,9 @@ import (
 
 	"github.com/cplieger/forgeapi/v2/creds"
 	"github.com/cplieger/go/health/v2"
-	"github.com/cplieger/go/scheduler"
-	"github.com/cplieger/go/scheduler/trigger"
+	"github.com/cplieger/go/ownersock"
+	"github.com/cplieger/go/scheduler/v2"
+	"github.com/cplieger/go/scheduler/v2/trigger"
 )
 
 var errContainmentLost = errors.New("renovate run process group survived the kill sweep")
@@ -80,7 +81,7 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 		return daemonStopped(err)
 	}
 
-	ln, err := trigger.Listen(socketPath)
+	ln, err := ownersock.Listen(ownersock.Config{Path: socketPath})
 	if err != nil {
 		slog.Error("cannot bind trigger socket", "path", socketPath, "error", err)
 		return daemonStopped(err)
@@ -116,7 +117,6 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	// One lease for /healthz, the probe and the run deadline's gap.
 	lease := runLease(interval, scheduleEnabled, runTimeout, app != nil)
 	reg, metrics := newMetricsRegistry(modeName(scheduleEnabled), authName(app), completed, lease)
-	metricsAddr := metricsListenAddr()
 	d := &daemon{
 		queue:          trigger.NewQueue[runPayload](queueCapacity),
 		status:         st,
@@ -136,13 +136,13 @@ func runDaemon(ctx context.Context, socketPath string, newCmd scheduler.CommandR
 	}
 	// /healthz reads the daemon's own lease, the one its rate-limit wait
 	// refreshes on, so the two cannot disagree.
-	stopMetrics, err := serveMetrics(ctx, metricsAddr, reg, newHealthz(st, d.lease))
+	stopOps, err := serveOps(ctx, metricsListenAddr(), allowedHosts(), reg, newHealthz(st, d.lease))
 	if err != nil {
-		slog.Error("cannot listen on METRICS_LISTEN_ADDR", "value", metricsAddr, "error", err)
+		slog.Error("cannot start the ops listener", "value", metricsListenAddr(), "error", err)
 		_ = ln.Close()
 		return daemonStopped(err)
 	}
-	defer stopMetrics()
+	defer stopOps()
 
 	return d.run(ctx, ln, socketPath, interval, scheduleEnabled, remaining)
 }

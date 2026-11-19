@@ -83,6 +83,7 @@ The scheduler reads these settings once at start, so recreate the container afte
 | `RUN_TIMEOUT` | Longest time one run may take before it is stopped and fails | `1h` |
 | `LOG_LEVEL` | `debug`, `info`, `warn` or `error`. Renovate also takes `trace` and `fatal`. Any other value stops Renovate. Log alert rules need `info` or `debug` | `info` |
 | `METRICS_LISTEN_ADDR` | Address for a Prometheus metrics page and `/healthz`, such as `:9470`. Empty opens no port. An unusable address stops the container at start | _(unset)_ |
+| `ALLOWED_HOSTS` | Comma-separated `Host` names or IPs that port serves, such as `renovate-scheduler,192.0.2.10`. Unset serves every `Host`. A request from the container itself is always served. An entry no `Host` can match stops the container at start | _(unset)_ |
 | `GITHUB_APP_ID` | Your GitHub App's ID. With `GITHUB_APP_PRIVATE_KEY_FILE`, every run gets a fresh App installation token instead of `RENOVATE_TOKEN` | _(unset)_ |
 | `GITHUB_APP_PRIVATE_KEY_FILE` | Path inside the container to the App's private key file, such as a read-only mount | _(unset)_ |
 | `GITHUB_APP_INSTALLATION_ID` | The installation to use. Unset, the scheduler uses the App's only installation | _(unset)_ |

@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -63,10 +64,10 @@ func TestServeMetricsServesHealthz(t *testing.T) {
 	lease := runLease(time.Hour, true, 30*time.Minute, false)
 	addr := freeAddr(t)
 	ctx, cancel := context.WithCancel(t.Context())
-	stop, err := serveMetrics(ctx, addr, measure.NewRegistry(metricsPrefix), newHealthz(st, lease))
+	stop, err := serveOps(ctx, addr, nil, measure.NewRegistry(metricsPrefix), newHealthz(st, lease))
 	if err != nil {
 		cancel()
-		t.Fatalf("serveMetrics(%q) error = %v", addr, err)
+		t.Fatalf("serveOps(%q) error = %v", addr, err)
 	}
 	t.Cleanup(func() {
 		cancel()
@@ -138,9 +139,9 @@ func TestServeMetricsLogsStraysButNotScrapes(t *testing.T) {
 	rec := capture.Default(t)
 	st := health.NewStatus()
 	addr := freeAddr(t)
-	stop, err := serveMetrics(t.Context(), addr, measure.NewRegistry(metricsPrefix), newHealthz(st, time.Hour))
+	stop, err := serveOps(t.Context(), addr, nil, measure.NewRegistry(metricsPrefix), newHealthz(st, time.Hour))
 	if err != nil {
-		t.Fatalf("serveMetrics(%q) error = %v", addr, err)
+		t.Fatalf("serveOps(%q) error = %v", addr, err)
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	for _, path := range []string{"/metrics", "/healthz", "/stray"} {
@@ -326,5 +327,52 @@ func TestDaemonServesHealthzOnTheMetricsAddress(t *testing.T) {
 	}
 	if code, _, body := getHealthz(t, client, url); code != http.StatusServiceUnavailable || len(body.Reasons) != 1 || body.Reasons[0] != reasonRunFailed {
 		t.Errorf("GET /healthz after a failed run = %d %q, want 503 with only %q", code, body.Reasons, reasonRunFailed)
+	}
+}
+
+// ALLOWED_HOSTS reaches the listener: an unset list serves every Host, a set
+// one refuses an unlisted Host with host_not_allowed, and a malformed entry
+// stops the start naming the setting.
+func TestServeOpsAppliesAllowedHosts(t *testing.T) {
+	t.Setenv("ALLOWED_HOSTS", " renovate , 192.0.2.10 ")
+	if got := allowedHosts(); len(got) != 2 {
+		t.Fatalf("allowedHosts() = %q, want two entries", got)
+	}
+	reg := measure.NewRegistry(metricsPrefix)
+	healthz := newHealthz(health.NewStatus(), time.Hour)
+	get := func(hosts []string, host string) (int, string) {
+		t.Helper()
+		addr := freeAddr(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		stop, err := serveOps(ctx, addr, hosts, reg, healthz)
+		if err != nil {
+			cancel()
+			t.Fatalf("serveOps = %v", err)
+		}
+		t.Cleanup(func() { cancel(); stop() })
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/metrics", http.NoBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = host
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+	if code, _ := get([]string{""}, "anything.example"); code != http.StatusOK {
+		t.Errorf("an unset ALLOWED_HOSTS answered %d for a foreign Host, want 200", code)
+	}
+	if code, _ := get([]string{"renovate"}, "renovate:9470"); code != http.StatusOK {
+		t.Errorf("a listed Host answered %d, want 200", code)
+	}
+	if code, body := get([]string{"renovate"}, "attacker.example"); code != http.StatusForbidden || !strings.Contains(body, "host_not_allowed") {
+		t.Errorf("an unlisted Host answered %d %q, want 403 host_not_allowed", code, body)
+	}
+	if _, err := serveOps(t.Context(), freeAddr(t), []string{"https://bad"}, reg, healthz); err == nil || !strings.Contains(err.Error(), "ALLOWED_HOSTS") {
+		t.Errorf("a malformed entry gave %v, want an error naming ALLOWED_HOSTS", err)
 	}
 }

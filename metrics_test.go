@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"github.com/cplieger/go/measure/v2"
-	"github.com/cplieger/go/scheduler"
-	"github.com/cplieger/go/scheduler/trigger"
+	"github.com/cplieger/go/scheduler/v2"
+	"github.com/cplieger/go/scheduler/v2/trigger"
 )
 
 func TestMetricsListenAddrTrimsInvisibleEdges(t *testing.T) {
@@ -225,7 +225,7 @@ func TestDaemonRefusesAMetricsAddressItCannotBind(t *testing.T) {
 			}
 			var naming int
 			for _, l := range read() {
-				if strings.Contains(l, "level=ERROR") && strings.Contains(l, `msg="cannot listen on METRICS_LISTEN_ADDR"`) {
+				if strings.Contains(l, "level=ERROR") && strings.Contains(l, `msg="cannot start the ops listener"`) {
 					naming++
 				}
 				if strings.Contains(l, `msg="container started"`) {
