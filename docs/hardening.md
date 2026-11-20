@@ -23,7 +23,7 @@ The image removes the `docker` command-line tool from Renovate's base image, so 
 | Folder | What it holds |
 | --- | --- |
 | `/data` | `RENOVATE_BASE_DIR` in this image: Renovate's clones and caches, and the scheduler's run records |
-| `/tmp` | the trigger socket `/tmp/docker-renovate-scheduler/trigger.sock`, in a directory the scheduler creates. The scheduler stops at start when it cannot create it |
+| `/tmp` | the trigger socket `/tmp/docker-renovate-scheduler/trigger.sock` and its lock file `trigger.sock.lock` beside it, in a directory the scheduler creates. The scheduler stops at start when it cannot create them |
 | `/opt/containerbase` and the home folder | the tools Renovate installs at run time, and their caches |
 | `/dev/shm` | the health file `docker-renovate-scheduler.healthy` |
 
