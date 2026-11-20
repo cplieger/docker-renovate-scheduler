@@ -51,6 +51,7 @@ type runMetrics struct {
 	rejected     *measure.LabeledCounter
 	info         *measure.Info
 	deadline     *measure.Gauge
+	next         *measure.Gauge
 	gap          time.Duration
 }
 
@@ -106,10 +107,12 @@ func newRunMetrics(reg *measure.Registry, mode, auth string, boot runBoot) *runM
 			"Always 1; the labels name the scheduling mode and the GitHub auth mode.", []string{"mode", "auth"}),
 		deadline: measure.NewGauge("run_deadline_timestamp_seconds",
 			"Unix time by which the next complete full run is due; 0 while RUN_INTERVAL is off.", measure.UnitSeconds),
+		next: measure.NewGauge("next_run_timestamp_seconds",
+			"Unix time the built-in schedule next starts a full run; 0 while RUN_INTERVAL is off.", measure.UnitSeconds),
 		gap: boot.gap,
 	}
 	reg.MustRegister(m.runs, m.lastOK, m.lastResult, m.lastExitCode, m.lastRun, m.lastSuccess,
-		m.lastDuration, m.failingSince, m.rejected, m.info, m.deadline)
+		m.lastDuration, m.failingSince, m.rejected, m.info, m.deadline, m.next)
 	m.info.Set(mode, auth)
 	lastSuccess := boot.start
 	if boot.known && boot.last.OK {
@@ -118,6 +121,11 @@ func newRunMetrics(reg *measure.Registry, mode, auth string, boot runBoot) *runM
 	}
 	m.setDeadline(lastSuccess)
 	return m
+}
+
+// setNextRun records at as the time the built-in schedule next starts a full run.
+func (m *runMetrics) setNextRun(at time.Time) {
+	m.next.Set(unixSeconds(at))
 }
 
 // setDeadline dates the run deadline one gap after a complete full run at

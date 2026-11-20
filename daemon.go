@@ -235,6 +235,7 @@ func startTicker(ctx context.Context, d *daemon, interval time.Duration, enabled
 	go func() {
 		defer close(done)
 		if remaining == 0 {
+			d.metrics.setNextRun(time.Now())
 			d.tick("startup")
 		}
 		scheduler.RunLoop(ctx, func(context.Context) {
@@ -245,6 +246,7 @@ func startTicker(ctx context.Context, d *daemon, interval time.Duration, enabled
 			// Phase the first tick from the recorded previous run, so a
 			// restart neither adds a run nor delays the cadence.
 			FirstDelay: remaining,
+			Scheduled:  d.metrics.setNextRun,
 		})
 	}()
 	return done

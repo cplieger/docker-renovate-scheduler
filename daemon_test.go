@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cplieger/go/health/v2"
+	"github.com/cplieger/go/measure/v2"
 	"github.com/cplieger/go/ownersock"
 	"github.com/cplieger/go/scheduler/v2"
 	"github.com/cplieger/go/scheduler/v2/trigger"
@@ -1244,5 +1245,58 @@ func TestRunDaemon_ContainmentLossWhileRunningShutsDownWithError(t *testing.T) {
 	}
 	if !errors.Is(runErr, errContainmentLost) {
 		t.Errorf("daemon.run() = %v, want errContainmentLost (a mid-operation containment loss must exit non-zero without an external stop)", runErr)
+	}
+}
+
+// TestStartTicker_ReportsTheNextRun pins next_run_timestamp_seconds, which the
+// Next run tile reads: a due startup run serves now while it runs, then each
+// arm of the interval loop serves the time its run starts, and a run that is
+// not due serves the loop's first arm.
+func TestStartTicker_ReportsTheNextRun(t *testing.T) {
+	const interval = time.Hour
+	for _, tt := range []struct {
+		name               string
+		remaining          time.Duration
+		armed, afterOneRun time.Duration
+	}{
+		{name: "startup due", remaining: 0, armed: interval, afterOneRun: 2 * interval},
+		{name: "startup not due", remaining: 30 * time.Minute, armed: 30 * time.Minute, afterOneRun: 30*time.Minute + interval},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				d, _ := newBareDaemon(t, nil)
+				reg := measure.NewRegistry(metricsPrefix)
+				d.metrics = newRunMetrics(reg, "built-in", "token", runBoot{})
+				next := func() float64 { return series(t, reg)[seriesKey("next_run_timestamp_seconds")] }
+				ctx, cancel := context.WithCancel(t.Context())
+				t0 := time.Now()
+
+				done := startTicker(ctx, d, interval, true, tt.remaining)
+				if tt.remaining == 0 {
+					j := <-d.queue.Jobs()
+					if got, want := next(), float64(t0.Unix()); got != want {
+						t.Errorf("next_run_timestamp_seconds while the startup run runs = %v, want now %v", got, want)
+					}
+					j.Finish(trigger.Result{OK: true})
+				}
+				synctest.Wait()
+				if got, want := next(), float64(t0.Add(tt.armed).Unix()); got != want {
+					t.Errorf("next_run_timestamp_seconds once the loop arms = %v, want t0+%v", got, tt.armed)
+				}
+
+				go func() {
+					for j := range d.queue.Jobs() {
+						j.Finish(trigger.Result{OK: true})
+					}
+				}()
+				synctest.Sleep(tt.armed + time.Minute)
+				if got, want := next(), float64(t0.Add(tt.afterOneRun).Unix()); got != want {
+					t.Errorf("next_run_timestamp_seconds after the first interval run = %v, want t0+%v", got, tt.afterOneRun)
+				}
+				cancel()
+				<-done
+				d.queue.Close()
+			})
+		})
 	}
 }

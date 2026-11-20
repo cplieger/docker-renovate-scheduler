@@ -685,31 +685,38 @@ func TestDashboardRunTilesTellIdleFromUnscraped(t *testing.T) {
 	}
 }
 
-// TestDashboardRunsByResultIsTheTestedQuery fails when the Runs by result
-// query differs from the one alerts/promql_test.yaml evaluates across
-// restarts, so a change to its slot arithmetic runs through promtool in CI.
-func TestDashboardRunsByResultIsTheTestedQuery(t *testing.T) {
+// TestDashboardQueriesAreTheTestedOnes fails when a tile's query differs from
+// the one alerts/promql_test.yaml evaluates, so a change to Runs by result's
+// slot arithmetic or to Next full run's idle arm runs through promtool in CI.
+func TestDashboardQueriesAreTheTestedOnes(t *testing.T) {
 	d := loadDashboard(t)
-	var exprs []string
-	for _, p := range d.Spec.Elements {
-		if p.Spec.Title == "Runs by result" {
-			exprs = append(exprs, panelExprs(&p)...)
-		}
-	}
-	if len(exprs) != 1 {
-		t.Fatalf("found %d Runs by result queries, want 1", len(exprs))
-	}
-	want := strings.NewReplacer(`$instance`, "renovate:9470", `${__interval_ms}`, "300000",
-		`$__interval`, "5m").Replace(exprs[0])
 	raw, err := os.ReadFile("alerts/promql_test.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`(?m)expr: &runs_by_result '([^']*)'$`).FindSubmatch(raw)
-	if m == nil {
-		t.Fatal("alerts/promql_test.yaml has no expr anchored as runs_by_result")
-	}
-	if string(m[1]) != want {
-		t.Errorf("alerts/promql_test.yaml tests\n%s\nthe dashboard reads, with its variables filled in,\n%s", m[1], want)
+	for _, c := range []struct{ title, anchor string }{
+		{"Runs by result", "runs_by_result"},
+		{"Next full run", "next_run_tile"},
+	} {
+		t.Run(c.anchor, func(t *testing.T) {
+			var exprs []string
+			for _, p := range d.Spec.Elements {
+				if p.Spec.Title == c.title {
+					exprs = append(exprs, panelExprs(&p)...)
+				}
+			}
+			if len(exprs) != 1 {
+				t.Fatalf("found %d %s queries, want 1", len(exprs), c.title)
+			}
+			want := strings.NewReplacer(`$instance`, "renovate:9470", `${__interval_ms}`, "300000",
+				`$__interval`, "5m").Replace(exprs[0])
+			m := regexp.MustCompile(`(?m)expr: &` + c.anchor + ` '([^']*)'$`).FindSubmatch(raw)
+			if m == nil {
+				t.Fatalf("alerts/promql_test.yaml has no expr anchored as %s", c.anchor)
+			}
+			if string(m[1]) != want {
+				t.Errorf("alerts/promql_test.yaml tests\n%s\nthe %q tile reads, with its variables filled in,\n%s", m[1], c.title, want)
+			}
+		})
 	}
 }
