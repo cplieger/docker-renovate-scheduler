@@ -79,3 +79,6 @@ renovate_scheduler_info{auth="app",mode="built-in"} 1
 # HELP renovate_scheduler_run_deadline_timestamp_seconds Unix time by which the next complete full run is due; 0 while RUN_INTERVAL is off.
 # TYPE renovate_scheduler_run_deadline_timestamp_seconds gauge
 renovate_scheduler_run_deadline_timestamp_seconds 1772391600
+# HELP renovate_scheduler_next_run_timestamp_seconds Unix time the built-in schedule next starts a full run; 0 while RUN_INTERVAL is off.
+# TYPE renovate_scheduler_next_run_timestamp_seconds gauge
+renovate_scheduler_next_run_timestamp_seconds 0

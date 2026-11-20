@@ -389,3 +389,43 @@ tests:
         exp_samples:
           - labels: '{result="Failed", scope="Full"}'
             value: 1
+
+  # The dashboard's Next full run tile, with $instance filled in.
+  # TestDashboardQueriesAreTheTestedOnes fails when the two differ.
+  - name: "Next full run tile: the scheduled start in milliseconds, on the picked instance only"
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_next_run_timestamp_seconds{job="renovate", instance="renovate:9470"}'
+        values: "1794720600x10"
+      - series: 'renovate_scheduler_build_info{job="renovate", instance="renovate:9470", version="v1.0.0"}'
+        values: "1x10"
+      - series: 'renovate_scheduler_next_run_timestamp_seconds{job="renovate", instance="other:9470"}'
+        values: "1794000000x10"
+    promql_expr_test:
+      - expr: &next_run_tile '((renovate_scheduler_next_run_timestamp_seconds{instance="renovate:9470"} > 0) * 1000) or on (instance) (0 * max by (instance) (renovate_scheduler_build_info{instance="renovate:9470"}))'
+        eval_time: 5m
+        exp_samples:
+          - labels: '{instance="renovate:9470", job="renovate"}'
+            value: 1794720600000
+  - name: "Next full run tile: RUN_INTERVAL=off serves 0, which reads No schedule"
+    interval: 1m
+    input_series:
+      - series: 'renovate_scheduler_next_run_timestamp_seconds{job="renovate", instance="renovate:9470"}'
+        values: "0x10"
+      - series: 'renovate_scheduler_build_info{job="renovate", instance="renovate:9470", version="v1.0.0"}'
+        values: "1x10"
+    promql_expr_test:
+      - expr: *next_run_tile
+        eval_time: 5m
+        exp_samples:
+          - labels: '{instance="renovate:9470"}'
+            value: 0
+  - name: "Next full run tile: an unscraped scheduler answers nothing, which reads Not scraped"
+    interval: 1m
+    input_series:
+      - series: 'up{job="renovate", instance="renovate:9470"}'
+        values: "0x10"
+    promql_expr_test:
+      - expr: *next_run_tile
+        eval_time: 5m
+        exp_samples: []
