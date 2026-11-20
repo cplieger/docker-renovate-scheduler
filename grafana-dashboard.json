@@ -523,7 +523,7 @@
         "spec": {
           "id": 14,
           "title": "Next full run",
-          "description": "When the built-in schedule next starts a full run, one RUN_INTERVAL after the last scheduled run, so a restart keeps the cadence. A triggered run can start sooner and does not move it. A time in the past means a full run is running now. No schedule means RUN_INTERVAL is off, so your own scheduler sets the pace. Not scraped means Prometheus has no fresh sample from the scheduler.",
+          "description": "When the built-in schedule next starts a full run, one RUN_INTERVAL after the last scheduled run, so a restart keeps the cadence. A time in the past means a full run is running now. No schedule means RUN_INTERVAL is off, so your own scheduler sets the pace. Not scraped means Prometheus has no fresh sample from the scheduler.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
